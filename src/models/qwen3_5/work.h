@@ -1,9 +1,12 @@
 #pragma once
 
+#include "models/common/token_input.h"
+
 #include "models/common/context/contract.h"
 #include "models/common/context/directory/state.h"
 #include "models/common/context/directory/history.h"
 #include "models/common/qwen/frontend/prepared_prompt.h"
+#include "models/common/qwen/vision/control.h"
 #include "runtime/contract/resources.h"
 #include "runtime/executor/contract.h"
 
@@ -51,7 +54,7 @@ struct InputWindow {
     std::vector<std::int32_t> rope_positions;
     // Forward mathematical segments inside one scheduling unit; excludes zero and window end.
     std::vector<std::uint32_t> execution_splits;
-    std::shared_ptr<const qwen::VisionExecutionInput> vision;
+    std::optional<qwen::VisionWork> visual;
     std::uint32_t prompt_begin = 0;
     std::optional<PromptReadout> readout;
 };
@@ -63,7 +66,7 @@ struct ForwardWork {
     ForwardPurpose purpose = ForwardPurpose::Prefill;
     std::vector<ExecutionRow> rows;
     std::vector<InputWindow> inputs;
-    std::vector<std::vector<TokenId>> committed_tokens;
+    std::vector<TokenId> control_last_tokens;
     SamplePurpose sample = SamplePurpose::None;
     std::vector<SamplingInput> sampling;
 };
@@ -88,7 +91,7 @@ struct NormalizeWork {
 struct ResidencyBinding {
     runtime::ExecutionMember member;
     ResolvedSamplingParameters sampling;
-    std::vector<TokenId> committed_generated_tokens;
+    TokenCounts counts;
     std::vector<TokenId> prompt_tokens;
 };
 

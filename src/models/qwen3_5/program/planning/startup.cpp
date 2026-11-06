@@ -108,15 +108,16 @@ ResourceLayout persistent_layout(const SequencePlanImpl& plan) {
         };
     }
     spec.frame = {
-        .hidden         = dimension(config.hidden_size),
-        .output_rows    = dimension(config.vocab_size),
-        .public_tokens  = dimension(profile.public_tokens),
-        .prefill_chunk  = std::min(plan.prefill_chunk, plan.capacity),
-        .batch_capacity = plan.max_concurrency,
-        .draft_window   = plan.draft_window,
-        .backend        = plan.speculative_backend,
-        .causal_scoring = plan.causal_scoring,
-        .vision         = plan.features.vision,
+        .hidden              = dimension(config.hidden_size),
+        .output_rows         = dimension(config.vocab_size),
+        .public_tokens       = dimension(profile.public_tokens),
+        .prefill_chunk       = std::min(plan.prefill_chunk, plan.capacity),
+        .batch_capacity      = plan.max_concurrency,
+        .draft_window        = plan.draft_window,
+        .backend             = plan.speculative_backend,
+        .causal_scoring      = plan.causal_scoring,
+        .vision              = plan.features.vision,
+        .control_token_limit = profile.control_token_limit,
     };
     spec.context_bytes      = plan.context_bytes;
     spec.host_context_bytes = plan.context_cache.host_capacity_bytes.value_or(0);
@@ -511,11 +512,10 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                   out.dflash_context, out.dflash_round, out.causal_score});
     out.capacity = out.general_capacity;
     if (plan.features.vision) {
-        const std::uint32_t merged = static_cast<std::uint32_t>(
-            std::min<std::uint64_t>(plan.capacity, qwen::kMaximumVisionItemTokens));
-        out.vision   = qwen::VisionContext::plan_workspace(*profile.config.vision, *profile.vision,
-                                                           merged, out.general_capacity);
-        out.capacity = std::max(out.capacity, out.vision->capacity_bytes);
+        out.vision =
+            qwen::VisionContext::plan_resources(*profile.config.vision, *profile.vision,
+                                                plan.capacity, plan.vision_memory_budget_bytes);
+        out.capacity = std::max(out.capacity, out.vision->encoder.workspace_bytes);
     }
     return out;
 }
@@ -594,6 +594,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->causal_scoring                    = inputs.causal_scoring;
     impl->multiprocessor_count              = inputs.multiprocessor_count;
     impl->context_cache                     = inputs.context_cache;
+    impl->vision_memory_budget_bytes        = inputs.vision_memory_budget_bytes;
     impl->kv_storage                        = inputs.kv_storage;
     impl->persistent                        = persistent_layout(*impl);
     impl->context_cache.host_capacity_bytes = context::host_context_capacity(
@@ -603,6 +604,11 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->device_reservation_bytes      = checked_add(
         checked_add(impl->persistent.bytes, impl->context_bytes, "Context arena capacity"),
         impl->workspace.capacity, "sequence device capacity");
+    if (impl->workspace.vision)
+        impl->device_reservation_bytes +=
+            impl->workspace.vision->output_bytes +
+            (NINFER_SHARED_PHYSICAL_MEMORY ? impl->workspace.vision->encoder.host_staging_bytes
+                                           : 0);
     if constexpr (NINFER_SHARED_PHYSICAL_MEMORY != 0)
         impl->device_reservation_bytes =
             checked_add(impl->device_reservation_bytes, impl->persistent.pinned_bytes(),
@@ -629,16 +635,17 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
         .max_concurrency = options.max_concurrency,
         .prefill_chunk =
             std::min(options.prefill_chunk ? options.prefill_chunk : 1024U, options.max_context),
-        .draft_window         = options.speculative.draft_tokens,
-        .speculative_backend  = options.speculative.backend,
-        .kv_storage           = options.kv_cache,
-        .proposal_head        = options.speculative.proposal_head,
-        .features             = models::load_options(options),
-        .gpu_timing           = options.observability.gpu_timing,
-        .use_cuda_graph       = options.use_cuda_graph,
-        .causal_scoring       = options.purpose == EnginePurpose::CausalScoring,
-        .multiprocessor_count = device.multiprocessor_count(),
-        .context_cache        = options.context_cache,
+        .draft_window               = options.speculative.draft_tokens,
+        .speculative_backend        = options.speculative.backend,
+        .kv_storage                 = options.kv_cache,
+        .proposal_head              = options.speculative.proposal_head,
+        .features                   = models::load_options(options),
+        .gpu_timing                 = options.observability.gpu_timing,
+        .use_cuda_graph             = options.use_cuda_graph,
+        .causal_scoring             = options.purpose == EnginePurpose::CausalScoring,
+        .multiprocessor_count       = device.multiprocessor_count(),
+        .context_cache              = options.context_cache,
+        .vision_memory_budget_bytes = options.vision_memory_budget_bytes,
     };
     auto planner           = std::make_unique<SequencePlannerImpl>();
     planner->inputs        = inputs;
@@ -652,31 +659,36 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
         set.records.push_back({geometry.spec_classes[0], states});
         set.records.push_back({geometry.spec_classes[1], main});
         if (capacity.records.size() > 2) set.records.push_back({geometry.spec_classes[2], backend});
-        capacity.working_sets.push_back(std::move(set));
+        return set;
     };
     const auto transition    = inputs.speculative_backend == SpeculativeBackend::None ? 0U : 1U;
     const auto maximum_pages = page_count(inputs.capacity);
-    working_set("maximum context", 1 + transition, maximum_pages + transition,
-                maximum_pages + transition);
+    auto maximum       = working_set("maximum context", 1 + transition, maximum_pages + transition,
+                                     maximum_pages + transition);
+    capacity.reference = {inputs.capacity, 1, geometry.required_bytes(maximum.records)};
+    capacity.working_sets.push_back(std::move(maximum));
     if (!inputs.causal_scoring) {
         if (options.clamp_concurrency_to_pool)
-            working_set("complete concurrent contexts",
+            capacity.working_sets.push_back(working_set("complete concurrent contexts",
                         inputs.max_concurrency * (1 + transition),
                         inputs.max_concurrency * (maximum_pages + transition),
-                        inputs.max_concurrency * (maximum_pages + transition));
+                        inputs.max_concurrency * (maximum_pages + transition)));
         const auto short_tokens = static_cast<std::uint32_t>(std::min<std::uint64_t>(
             inputs.capacity, std::uint64_t(inputs.prefill_chunk) + inputs.draft_window + 1));
         const auto short_pages  = page_count(short_tokens) + transition;
-        working_set("concurrent requests", inputs.max_concurrency * (1 + transition),
-                    inputs.max_concurrency * short_pages, inputs.max_concurrency * short_pages);
+        capacity.working_sets.push_back(working_set(
+            "concurrent requests", inputs.max_concurrency * (1 + transition),
+            inputs.max_concurrency * short_pages, inputs.max_concurrency * short_pages));
         if (inputs.context_cache.enabled)
-            working_set("checkpoint handover", inputs.max_concurrency + 1 + transition,
-                        maximum_pages + inputs.max_concurrency,
-                        maximum_pages + inputs.max_concurrency);
+            capacity.working_sets.push_back(working_set(
+                "checkpoint handover", inputs.max_concurrency + 1 + transition,
+                maximum_pages + inputs.max_concurrency, maximum_pages + inputs.max_concurrency));
     }
     capacity.fixed_device_bytes = base->device_reservation_bytes;
     capacity.fixed_host_bytes =
         base->persistent.host_context_bytes + base->persistent.pinned_bytes();
+    if (base->workspace.vision)
+        capacity.fixed_host_bytes += base->workspace.vision->encoder.host_staging_bytes;
     if (base->moe)
         capacity.fixed_host_bytes += base->moe->description().bridge_pinned_bytes +
                                      base->moe->description().cpu_workspace_bytes;
@@ -687,7 +699,8 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
 
 std::unique_ptr<SequencePlanImpl>
 make_graph_probe_plan(std::shared_ptr<const execution::ModelProfile> profile, DeviceContext& device,
-                      const EngineOptions& options, std::shared_ptr<const moe::Plan> moe) {
+                      const EngineOptions& options, std::shared_ptr<const moe::Plan> moe,
+                      GraphProbeBacking backing) {
     auto planner = make_sequence_planner_impl(std::move(profile), device, options, std::move(moe));
     auto inputs  = std::move(planner->inputs);
     inputs.context_cache.host_capacity_bytes = 0;
@@ -695,7 +708,10 @@ make_graph_probe_plan(std::shared_ptr<const execution::ModelProfile> profile, De
     const auto geometry                      = describe_context_pool(records);
     std::vector<RecordRequest> demand;
     for (const auto id : geometry.spec_classes) demand.push_back({id, inputs.max_concurrency});
-    auto plan         = build_sequence_candidate(inputs, geometry.required_bytes(demand));
+    const auto bytes  = backing == GraphProbeBacking::Inputs
+                            ? geometry.required_bytes(demand)
+                            : planner->capacity_plan.minimum_capacity().device_bytes;
+    auto plan         = build_sequence_candidate(inputs, bytes);
     plan->graph_probe = true;
     return plan;
 }

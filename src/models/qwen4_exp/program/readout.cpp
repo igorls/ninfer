@@ -90,7 +90,7 @@ void RankProgramImpl::collect_trace() {
             for (std::size_t b = 0; b < f.rows.size(); ++b)
                 if (step < f.verify->extents[b])
                     columns.push_back({f.rows[b].member.residency.lane.value,
-                        f.verify->bases[b] - 1 + step, static_cast<std::uint32_t>(b)});
+                        f.rows[b].main_frontier - 1 + step, static_cast<std::uint32_t>(b)});
             route_trace->record_proposal(step, columns);
         }
         columns.clear();

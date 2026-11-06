@@ -1,9 +1,12 @@
 #pragma once
 
+#include "models/common/vision/execution.h"
+
 #include "core/tensor.h"
 #include "core/gdn_replay_records.h"
 
 #include <variant>
+#include <vector>
 
 namespace ninfer::models::qwen4_exp::execution {
 
@@ -30,11 +33,6 @@ using StateUpdate = std::variant<SequenceState, StepUpdate, VerifyRecords>;
 struct TextOutputs {
     Tensor sample;
     Tensor conditioning;
-};
-
-struct VisualEmbeddingView {
-    Tensor features;
-    Tensor columns;
 };
 
 } // namespace ninfer::models::qwen4_exp::execution

@@ -7,7 +7,7 @@
 #include "models/qwen4_exp/state/kv_cache.h"
 #include "models/common/moe/schedule.h"
 #include "models/qwen4_exp/execution/route_trace.h"
-#include "models/qwen4_exp/parallel/execution.h"
+#include "models/common/parallel_execution.h"
 
 namespace ninfer::models::qwen4_exp::execution {
 
@@ -19,6 +19,8 @@ struct TextExecution {
     Tensor qsa_raw_records, qsa_coordinate_records, ple_records;
     const RouteTrace* route_trace = nullptr;
     ParallelExecution* parallel = nullptr;
+    // A preceding producer may use the same communicator on its own stream.
+    const CudaCompletionEvent* first_collective_ready = nullptr;
 };
 
 // Activations stay live across the Host PLE handoff. All borrowed views follow the Program's
@@ -29,7 +31,7 @@ public:
     void consume_ple(const Tensor& embedding);
 
     // GPU bodies share the same activation frame in eager execution and graph capture.
-    void stem(std::optional<VisualEmbeddingView> = {});
+    void stem(std::optional<models::vision::EmbeddingView> = {});
     [[nodiscard]] bool advance_layer(std::uint32_t layer);
     void mixer(std::uint32_t layer);
     void local_mixer(std::uint32_t layer);
@@ -37,7 +39,7 @@ public:
     void resident_moe(std::uint32_t layer);
     void gpu_moe(const moe::GpuCall&);
     void combine(std::uint32_t layer);
-    void finish(TextOutputs);
+    void finish(TextOutputs, Tensor logits = {});
 
     [[nodiscard]] Tensor& block_output() { return roots_.output; }
 

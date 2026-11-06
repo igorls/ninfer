@@ -1,5 +1,8 @@
 #include "models/qwen4_exp/wire.h"
 
+#include "models/common/context/wire.h"
+#include "models/common/parallel_wire.h"
+
 #include <stdexcept>
 #include <type_traits>
 
@@ -66,16 +69,6 @@ T slot(Decoder& in) {
     return {in.u32(), in.u32(), in.u32()};
 }
 
-void range(Encoder& out, context::ContextRange range) {
-    out.u8(static_cast<std::uint8_t>(range.memory));
-    out.i64(range.offset);
-    out.u64(range.bytes);
-}
-
-context::ContextRange range(Decoder& in) {
-    return {static_cast<context::ContextMemory>(in.u8()), in.i64(), in.u64()};
-}
-
 void sampling(Encoder& out, const ResolvedSamplingParameters& p) {
     out.f32(p.temperature);
     out.i32(p.top_k);
@@ -90,71 +83,6 @@ ResolvedSamplingParameters sampling(Decoder& in) {
     return {in.f32(), in.i32(), in.f32(), in.f32(), in.f32(), in.f32(), in.u64()};
 }
 
-void actions(Encoder& out, const context::ContextActions& actions) {
-    out.u64(actions.operations.size());
-    for (const auto& operation : actions.operations)
-        std::visit(
-            [&](const auto& action) {
-                using T = std::decay_t<decltype(action)>;
-                if constexpr (std::is_same_v<T, context::RecordClear>) {
-                    out.u8(1);
-                    range(out, action.destination);
-                } else if constexpr (std::is_same_v<T, context::RecordCopy>) {
-                    out.u8(2);
-                    range(out, action.source);
-                    range(out, action.destination);
-                    out.boolean(action.resource.pool.has_value());
-                    if (action.resource.pool) out.u16(action.resource.pool->index);
-                    out.u32(action.image_count);
-                    out.u32(action.page_groups);
-                } else {
-                    out.u8(3);
-                    out.u32(action.pool_id);
-                    out.i32(action.row);
-                    out.u32(action.logical_begin);
-                    out.u64(action.offsets.size());
-                    for (auto offset : action.offsets) out.i64(offset);
-                }
-            },
-            operation);
-}
-
-context::ContextActions actions(Decoder& in) {
-    context::ContextActions actions;
-    const auto count = in.count(1);
-    actions.operations.reserve(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        switch (in.u8()) {
-        case 1:
-            actions.operations.emplace_back(context::RecordClear{range(in)});
-            break;
-        case 2: {
-            context::RecordCopy copy;
-            copy.source      = range(in);
-            copy.destination = range(in);
-            if (in.boolean()) copy.resource.pool = runtime::KvPoolId{in.u16()};
-            copy.image_count = in.u32();
-            copy.page_groups = in.u32();
-            actions.operations.emplace_back(copy);
-            break;
-        }
-        case 3: {
-            context::MappingUpdate mapping;
-            mapping.pool_id       = in.u32();
-            mapping.row           = in.i32();
-            mapping.logical_begin = in.u32();
-            mapping.offsets.resize(in.count(8));
-            for (auto& offset : mapping.offsets) offset = in.i64();
-            actions.operations.emplace_back(std::move(mapping));
-            break;
-        }
-        default:
-            throw std::invalid_argument("unknown context action in Qwen4Exp message");
-        }
-    }
-    return actions;
-}
-
 void row(Encoder& out, const WorkRow& r, std::uint32_t rank) {
     member(out, r.member);
     selectors(out, r.states.at(rank));
@@ -165,7 +93,8 @@ void row(Encoder& out, const WorkRow& r, std::uint32_t rank) {
     out.i32(r.rope_delta);
     for (auto value : r.ple_raw_tail) out.i32(value);
     integers(out, r.ids);
-    integers(out, r.count_tokens);
+    out.boolean(r.control_last_token.has_value());
+    if (r.control_last_token) out.i32(*r.control_last_token);
     integers(out, r.window_ends);
     integers(out, r.rope_positions);
     for (auto value : r.previous_rope) out.i32(value);
@@ -184,8 +113,8 @@ WorkRow row(Decoder& in, std::uint32_t rank) {
     r.mtp_frontier  = in.u32();
     r.rope_delta    = in.i32();
     for (auto& value : r.ple_raw_tail) value = in.i32();
-    r.ids            = integers<TokenId>(in);
-    r.count_tokens   = integers<TokenId>(in);
+    r.ids = integers<TokenId>(in);
+    if (in.boolean()) r.control_last_token = in.i32();
     r.window_ends    = integers<std::uint32_t>(in);
     r.rope_positions = integers<std::int32_t>(in);
     for (auto& value : r.previous_rope) value = in.i32();
@@ -208,35 +137,32 @@ std::vector<WorkRow> rows(Decoder& in, std::uint32_t rank) {
 
 } // namespace
 
-void VisionInputBindings::install(std::uint64_t id,
-                                  std::shared_ptr<const qwen::VisionExecutionInput> input) {
-    if (!id || !input || !inputs_.emplace(id, std::move(input)).second)
-        throw std::invalid_argument("duplicate or empty Vision input resource");
+void VisionInputBindings::install(qwen::VisionWork work) {
+    if (!work.window.id || !work.window.plan || !work.input ||
+        (current_ && work.window.id <= current_->window.id))
+        throw std::invalid_argument("Vision input window is empty or stale");
+    current_ = std::move(work);
 }
 
-void VisionInputBindings::release(std::uint64_t id) {
-    if (!inputs_.erase(id)) throw std::invalid_argument("Vision input resource is absent");
+void VisionInputBindings::release_payload(std::uint64_t id) {
+    if (!current_ || current_->window.id != id || !current_->input)
+        throw std::logic_error("Vision input payload has no matching production");
+    current_->input.reset();
 }
 
-std::uint64_t
-VisionInputBindings::id(const std::shared_ptr<const qwen::VisionExecutionInput>& input) const {
-    if (!input) return 0;
-    for (const auto& [id, value] : inputs_)
-        if (value == input) return id;
-    throw std::logic_error("Vision input must be installed before binding its residency");
-}
-
-std::shared_ptr<const qwen::VisionExecutionInput> VisionInputBindings::get(std::uint64_t id) const {
-    if (!id) return {};
-    const auto found = inputs_.find(id);
-    if (found == inputs_.end()) throw std::logic_error("Vision input resource is not installed");
-    return found->second;
+qwen::VisionWork VisionInputBindings::get(std::uint64_t id, bool produce) const {
+    if (!current_ || current_->window.id != id || (produce && !current_->input))
+        throw std::logic_error("Vision work has no installed window input");
+    auto out           = *current_;
+    out.window.produce = produce;
+    if (!produce) out.input.reset();
+    return out;
 }
 
 void encode_work(Encoder& out, const Work& work, const VisionInputBindings& inputs,
                  std::uint32_t rank) {
     out.u32(rank);
-    actions(out, local_actions(work.actions, rank));
+    context::encode_actions(out, local_actions(work.actions, rank));
     std::visit(
         [&](const auto& v) {
             using T = std::decay_t<decltype(v)>;
@@ -245,6 +171,11 @@ void encode_work(Encoder& out, const Work& work, const VisionInputBindings& inpu
                 out.u8(static_cast<std::uint8_t>(v.kind));
                 out.u8(static_cast<std::uint8_t>(v.sample));
                 rows(out, v.rows, rank);
+                out.boolean(v.visual.has_value());
+                if (v.visual) {
+                    out.u64(v.visual->window.id);
+                    out.boolean(v.visual->window.produce);
+                }
                 out.boolean(v.prefetch.has_value());
                 if (v.prefetch) {
                     member(out, v.prefetch->member);
@@ -262,8 +193,7 @@ void encode_work(Encoder& out, const Work& work, const VisionInputBindings& inpu
                 for (const auto& binding : v.bindings) {
                     member(out, binding.member);
                     sampling(out, binding.sampling);
-                    integers(out, binding.generated);
-                    out.u64(inputs.id(binding.vision));
+                    encode_token_counts(out, binding.counts);
                 }
                 out.u64(v.releases.size());
                 for (auto id : v.releases) residency(out, id);
@@ -280,13 +210,17 @@ void encode_work(Encoder& out, const Work& work, const VisionInputBindings& inpu
 Work decode_work(Decoder& in, const VisionInputBindings& inputs) {
     Work work;
     const auto rank = in.u32();
-    work.actions.emplace(rank, actions(in));
+    work.actions.emplace(rank, context::decode_actions(in));
     switch (in.u8()) {
     case 1: {
         ForwardWork v;
         v.kind   = static_cast<ForwardKind>(in.u8());
         v.sample = static_cast<SampleKind>(in.u8());
         v.rows   = rows(in, rank);
+        if (in.boolean()) {
+            const auto id = in.u64();
+            v.visual      = inputs.get(id, in.boolean());
+        }
         if (in.boolean()) {
             v.prefetch.emplace();
             v.prefetch->member   = member(in);
@@ -302,12 +236,11 @@ Work decode_work(Decoder& in, const VisionInputBindings& inputs) {
         break;
     case 3: {
         ContextWork v;
-        v.bindings.resize(in.count(76));
+        v.bindings.resize(in.count(68));
         for (auto& binding : v.bindings) {
-            binding.member    = member(in);
-            binding.sampling  = sampling(in);
-            binding.generated = integers<TokenId>(in);
-            binding.vision    = inputs.get(in.u64());
+            binding.member   = member(in);
+            binding.sampling = sampling(in);
+            binding.counts   = decode_token_counts(in);
         }
         v.releases.resize(in.count(12));
         for (auto& id : v.releases) id = residency(in);
@@ -339,7 +272,7 @@ void encode_commit(Encoder& out, const Commit& commit, std::uint32_t rank) {
         out.boolean(r.cancelled);
         out.boolean(r.failed);
     }
-    actions(out, local_actions(commit.actions, rank));
+    context::encode_actions(out, local_actions(commit.actions, rank));
 }
 
 Commit decode_commit(Decoder& in) {
@@ -354,7 +287,7 @@ Commit decode_commit(Decoder& in) {
         r.cancelled = in.boolean();
         r.failed    = in.boolean();
     }
-    result.actions.emplace(rank, actions(in));
+    result.actions.emplace(rank, context::decode_actions(in));
     return result;
 }
 
@@ -370,7 +303,6 @@ void encode_result(Encoder& out, const Result& result) {
                     out.u32(r.drafts);
                     out.u32(r.accepted_drafts);
                     integers(out, r.tokens);
-                    integers(out, r.input_tokens);
                     out.u32(r.dead_positions);
                 }
 
@@ -387,6 +319,11 @@ void encode_result(Encoder& out, const Result& result) {
                     out.u32(t.work.copy_operations);
                     out.u64(t.elapsed_ns);
                     out.u32(t.rank);
+                    out.boolean(t.peer.has_value());
+                    if (t.peer) {
+                        out.u32(t.peer->source_rank);
+                        out.u32(t.peer->destination_rank);
+                    }
                 }
             } else {
                 out.u8(3);
@@ -402,13 +339,12 @@ Result decode_result(Decoder& in) {
     switch (in.u8()) {
     case 1: {
         ComputeResult v;
-        v.rows.resize(in.count(4 * 4 + 2 * 8));
+        v.rows.resize(in.count(4 * 4 + 8));
         for (auto& r : v.rows) {
             r.processed       = in.u32();
             r.drafts          = in.u32();
             r.accepted_drafts = in.u32();
             r.tokens          = integers<TokenId>(in);
-            r.input_tokens    = integers<TokenId>(in);
             r.dead_positions  = in.u32();
         }
 
@@ -416,7 +352,7 @@ Result decode_result(Decoder& in) {
     }
     case 2: {
         ContextResult v;
-        v.transfers.resize(in.count(34));
+        v.transfers.resize(in.count(35));
         for (auto& t : v.transfers) {
             if (in.boolean()) t.resource.pool = runtime::KvPoolId{in.u16()};
             t.direction   = static_cast<runtime::ContextTransferDirection>(in.u8());
@@ -425,6 +361,7 @@ Result decode_result(Decoder& in) {
             t.work        = {in.u64(), in.u32()};
             t.elapsed_ns  = in.u64();
             t.rank        = in.u32();
+            if (in.boolean()) t.peer = runtime::ContextPeerTransfer{in.u32(), in.u32()};
         }
         return v;
     }

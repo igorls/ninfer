@@ -29,7 +29,7 @@ public:
 
     [[nodiscard]] MemorySpan sampling_ingress() { return sampling_.span(); }
 
-    [[nodiscard]] MemorySpan mtp_ingress() { return mtp_ingress_.span(); }
+    [[nodiscard]] MemorySpan ple_handoff() { return ple_handoff_.span(); }
 
     [[nodiscard]] MemorySpan compute_aux() { return compute_aux_.span(); }
 
@@ -50,7 +50,7 @@ public:
     [[nodiscard]] Tensor tensor(const TensorRegion&);
     [[nodiscard]] Tensor packed(const TensorRegion&, std::initializer_list<std::int32_t>);
     [[nodiscard]] execution::BatchView main_batch(std::int32_t tokens, std::int32_t batch,
-                                                  std::uint32_t visible);
+                                                  std::uint32_t visible, bool sequence = false);
     [[nodiscard]] execution::BatchView mtp_batch(const MtpBatchLayout&, std::int32_t tokens,
                                                  std::int32_t batch, std::uint32_t visible);
     [[nodiscard]] ops::QsaTailStateView mtp_working_tail(std::uint32_t slot, std::int32_t batch);
@@ -59,12 +59,13 @@ public:
 private:
     DeviceContext& device_;
     DeviceBuffer context_, persistent_, workspace_;
-    PinnedHostBuffer ingress_, egress_, sampling_, mtp_ingress_, compute_aux_, context_counts_;
+    PinnedHostBuffer ingress_, egress_, sampling_, ple_handoff_, compute_aux_, context_counts_;
     PinnedHostBuffer host_context_;
     PinnedHostBuffer score_hidden_;
     CudaStream ple_stream_;
     CudaExecutionView ple_transfer_;
 public:
+    std::optional<vision::Storage> vision;
     MemoryArena workspace;
     std::unique_ptr<StateViews> states;
     std::unique_ptr<QsaCache> main, mtp;

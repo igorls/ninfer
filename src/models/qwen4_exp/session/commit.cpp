@@ -91,7 +91,7 @@ void SessionImpl::finish_result(ComputeResult result) {
         const auto& row = tx.result->rows[b];
         commit.rows.push_back({member(s), tx.rows[b].states, row.processed});
         if (tx.kind == Kind::Control) {
-            const auto count = tx.rows[b].count_tokens.size();
+            const auto count = tx.rows[b].ids.size();
             s.identity.tokens.reserve(s.identity.tokens.size() + count);
             s.identity.positions.prepare_generated(count, s.continuation.metadata.rope_delta,
                                                    tx.splits[b]);
@@ -135,7 +135,17 @@ void SessionImpl::finish_result(ComputeResult result) {
         if (tx.kind == Kind::Prefill)
             s.capture_pending =
                 s.capture && s.captures[s.next_capture].frontier == completed[b].main_frontier;
-        if (tx.kind == Kind::Control) append_identity(s, tx.rows[b].count_tokens, tx.splits[b]);
+        if (tx.kind == Kind::Control) {
+            const auto& row   = tx.rows[b];
+            const auto prefix = std::span<const TokenId>(row.ids).subspan(1);
+            append_identity(s, prefix,
+                            tx.splits[b] && *tx.splits[b] <= prefix.size() ? tx.splits[b]
+                                                                           : std::nullopt);
+            const auto split = tx.splits[b] && *tx.splits[b] == row.ids.size()
+                                   ? std::optional<std::uint32_t>{1}
+                                   : std::nullopt;
+            append_identity(s, {&*row.control_last_token, 1}, split);
+        }
         if (tx.kind == Kind::Replay && s.continuation.metadata.main_frontier == s.replay_target)
             s.phase = s.resume_phase;
     }
@@ -143,6 +153,19 @@ void SessionImpl::finish_result(ComputeResult result) {
 
 void SessionImpl::retire_compute(const runtime::DeviceRetired& event) {
     auto& tx = *compute;
+    if (tx.vision_id) {
+        const auto* window = vision_window.current();
+        bool complete      = tx.discarded;
+        if (window && valid(window->owner.sequence)) {
+            const auto& metadata = sequence(window->owner.sequence).continuation.metadata;
+            complete |= metadata.main_frontier >= window->plan->consume_end &&
+                        (!metadata.mtp_frontier ||
+                         metadata.mtp_frontier.value_or(0) >= window->plan->consume_end - 1);
+        } else
+            complete = true;
+        vision_window.consumed(tx.vision_id, complete);
+        vision_window.retired(event.ticket);
+    }
     tx.context.mark_completed();
     tx.context.publish();
     if (tx.completion) {
@@ -203,6 +226,8 @@ CommitResult Session::commit(PendingBatch&& batch,
         for (std::size_t b = 0; b < decisions.size(); ++b) {
             auto& s              = p.sequence(tx.members[b]);
             const auto& decision = decisions[b];
+            result.rows[b].speculative.attempted_per_position.reserve(
+                s.speculative.attempted_per_position.size());
             result.rows[b].speculative.accepted_per_position.reserve(
                 s.speculative.accepted_per_position.size());
             physical.rows.push_back({p.member(s), tx.rows[b].states, decision.accepted_tokens,
@@ -215,12 +240,12 @@ CommitResult Session::commit(PendingBatch&& batch,
             s.identity.digests.prepare_generated(count, s.continuation.metadata.rope_delta,
                                                  decision.prefix_execution_split_after);
             if (tx.kind == detail::ComputeTransaction::Kind::Mtp) {
-                const auto& inputs = tx.result->rows[b].input_tokens;
-                if (inputs.size() < count)
-                    throw std::logic_error("MTP result omitted its adopted input prefix");
-                completed[b] =
-                    p.prepare_commit(s, tx.rows[b], std::span<const TokenId>(inputs).first(count),
-                                     false, *tx.completion);
+                // Accepted drafts are the licensed output prefix before the correction/bonus.
+                // Main consumed the previous anchor followed by exactly those draft tokens.
+                std::vector<TokenId> inputs(count);
+                inputs[0] = tx.rows[b].ids.front();
+                std::copy_n(tx.result->rows[b].tokens.begin(), count - 1, inputs.begin() + 1);
+                completed[b] = p.prepare_commit(s, tx.rows[b], inputs, false, *tx.completion);
             } else {
                 completed[b] =
                     p.prepare_commit(s, tx.rows[b], tx.rows[b].ids, false, *tx.completion);
@@ -250,6 +275,7 @@ CommitResult Session::commit(PendingBatch&& batch,
             else
                 ++stats.fallback_steps;
             stats.drafted_tokens += drafted;
+            for (std::uint32_t i = 0; i < drafted; ++i) ++stats.attempted_per_position[i];
             stats.accepted_tokens += accepted;
             for (std::uint32_t i = 0; i < accepted; ++i) ++stats.accepted_per_position[i];
         }

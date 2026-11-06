@@ -157,7 +157,7 @@ std::string supported_reasoning_efforts(const ninfer::ReasoningEffortCapabilitie
 
 } // namespace
 
-ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& request,
+PromptOptionInputs resolve_prompt_semantics(const GenerationRequest& request,
                                                  const product::ServeOptions& server,
                                                  const ninfer::PromptCapabilities& capabilities) {
     using Json  = RequestJson;
@@ -200,10 +200,12 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
         effort = nested;
     }
     kwargs.erase("reasoning_effort");
-    ResolvedPromptSemantics result{
+    PromptOptionInputs result{
         .enable_thinking           = thinking ? thinking : server.launch.generation.enable_thinking,
         .preserve_thinking         = preserve ? preserve : server.launch.generation.preserve_thinking,
         .chat_template_kwargs_json = kwargs.dump(),
+        .defaults                  = {server.launch.generation.enable_thinking,
+                                      server.launch.generation.preserve_thinking},
     };
     if (effort) {
         const bool enables = *effort != RequestedReasoningEffort::None;
@@ -228,16 +230,11 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
                                   "reasoning_effort", "reasoning_effort_not_supported");
         }
     }
-    if (request.continuation == ninfer::PromptContinuationMode::ContinueFinalAssistant &&
-        result.enable_thinking == true) {
-        invalid_prompt_option("assistant prefill cannot be combined with enabled thinking",
-                              "messages", "assistant_prefill_not_supported");
-    }
     return result;
 }
 
 ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
-                                    const ResolvedPromptSemantics& semantics,
+                                    const PromptOptionInputs& semantics,
                                     const MediaAcquirer& acquire_media) {
     ninfer::PromptInput input;
     input.messages.reserve(request.messages.size());
@@ -252,11 +249,7 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
             message.tool_calls.push_back(ninfer::ToolCall{call.id, call.name, call.arguments_json});
         }
 
-        if (turn.role == ChatRole::Tool && turn.tool_result_is_error) {
-            ninfer::MessagePart error;
-            error.text = "[tool_error]\n";
-            message.parts.push_back(std::move(error));
-        }
+        message.tool_result_is_error = turn.tool_result_is_error;
 
         std::uint64_t text_bytes = 0;
         for (std::size_t part_index = 0; part_index < turn.content.size(); ++part_index) {
@@ -312,6 +305,22 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
                 }
             }
         }
+        for (const auto& boundary : turn.content_boundaries) {
+            if (!boundary.cache_boundary_after) continue;
+            if (turn_index >= std::numeric_limits<std::uint32_t>::max() ||
+                boundary.parts > std::numeric_limits<std::uint32_t>::max() ||
+                boundary.tool_calls > std::numeric_limits<std::uint32_t>::max() ||
+                boundary.reasoning_bytes > std::numeric_limits<std::uint32_t>::max())
+                throw std::overflow_error("message content boundary exceeds uint32");
+            input.context_cache.markers.push_back(
+                {.after_message_count      = static_cast<std::uint32_t>(turn_index + 1),
+                 .kind                     = boundary.cache_boundary_after->kind,
+                 .evidence                 = boundary.cache_boundary_after->evidence,
+                 .location                 = PromptCacheMarkerLocation::MessageContentBoundary,
+                 .after_message_part_count = static_cast<std::uint32_t>(boundary.parts),
+                 .after_tool_call_count    = static_cast<std::uint32_t>(boundary.tool_calls),
+                 .reasoning_bytes          = static_cast<std::uint32_t>(boundary.reasoning_bytes)});
+        }
         input.messages.push_back(std::move(message));
         if (turn.cache_boundary_after) {
             if (input.messages.size() > std::numeric_limits<std::uint32_t>::max()) {
@@ -326,6 +335,7 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
         }
     }
 
+    input.options.defaults                  = semantics.defaults;
     input.options.continuation              = request.continuation;
     input.options.enable_thinking           = semantics.enable_thinking;
     input.options.reasoning_effort          = semantics.reasoning_effort;
@@ -352,7 +362,7 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
 
 ninfer::RequestOptions to_request_options(const GenerationRequest& request,
                                           const product::ServeOptions& server,
-                                          const ResolvedPromptSemantics& semantics,
+                                          const PromptOptionInputs& semantics,
                                           bool allow_prefix_reuse) {
     ninfer::RequestOptions options;
     options.constraint                        = request.constraint;

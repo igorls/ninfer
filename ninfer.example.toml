@@ -1,6 +1,7 @@
 # Complete NInfer startup configuration reference.
 # Schema and behavior: docs/startup-configuration.md.
 # Copy this file and adjust the model path for local use.
+# Focused deployment examples: examples/configs/.
 # All configurable fields are listed; mutually exclusive alternatives are commented out.
 # Relative paths use this file's directory. Explicit command-line values take precedence.
 
@@ -14,13 +15,13 @@ device = 0
 max_context = 8192
 kv_dtype = "bf16" # bf16 / int8 / fp8 / nvfp4 / k8v4
 context_capacity = "auto" # Per-rank shared Device KV/State capacity; auto, "8GiB", or positive integer bytes.
+memory_headroom = "1GiB" # Per-rank planning allowance; startup may consume it. 0B adds no headroom.
 prefill_chunk = "default" # default or a positive multiple of 128; no hardware performance estimation.
 cuda_graph = true
 max_concurrency = 1
 max_pending_requests = 16
 pending_timeout = "30s" # Queue timeout before execution, not a total generation deadline.
 desktop_reserve = "8GiB"
-kv_slack_floor = "1GiB" # Automatic KV sizing headroom; explicit pools do not use this floor.
 clamp_concurrency_to_pool = false
 
 [context_cache]
@@ -34,6 +35,9 @@ cost_presets = "" # Optional context-cost JSON path; empty uses existing default
 backend = "none" # none / mtp / dflash / dflash2
 draft_tokens = 0 # none: 0; MTP: 1..5; DFlash/DFlash2: 1..15.
 proposal_head = "full" # full / optimized; support depends on the model and artifact.
+
+[vision]
+memory_budget = "1GiB" # Per-rank encoder activations and output window; excludes weights and Host staging.
 
 [media]
 cache_capacity = "1GiB" # 0B disables the retained media cache.

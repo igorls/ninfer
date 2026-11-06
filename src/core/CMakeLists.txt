@@ -36,6 +36,7 @@ add_library(ninfer_core ${NINFER_LIBRARY_TYPE}
   u4z8.cpp
   ${ninfer_io_sources}
   gdn_replay_records.cpp
+  kda_replay_records.cpp
   cyclic_kv_cache.cpp
   context_pool.cpp
   paged_kv_cache.cpp

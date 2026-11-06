@@ -1,27 +1,25 @@
-# Build system
+# 构建系统
 
 NInfer builds from its source tree with CMake 3.28+ and C++/CUDA 20.
 The fork uses CUDA 13.3 on Windows and Linux; upstream uses CUDA 13.4. Product commands and prerequisites are in the
 [README](../../README.md#quick-start); test and measurement workflows live in
 [tests](../../tests/README.md) and [benchmarks](../../bench/README.md).
 
-## Execution targets
+## 编译目标
 
-`NINFER_TARGET` selects one execution target for the entire build directory:
+`NINFER_TARGET` 为每个 build directory 选择一个目标：
 
-| Target | System | CUDA architecture |
+| 目标 | 系统 | CUDA architecture |
 |---|---|---|
 | `rtx5090` (default; RTX 5090 and RTX PRO 6000 Blackwell) | Windows 11 / Linux x86-64 | `120a` |
 
 DGX Spark/SM121a and AArch64 are deferred in this fork. The selector rejects them;
 imported target-private sources are not part of a supported build.
 
-[`cmake/NinferPlatform.cmake`](../../cmake/NinferPlatform.cmake) resolves the target and validates
-`CMAKE_CUDA_ARCHITECTURES` before `project()` detects CUDA. After toolchain initialization it checks
-`CMAKE_SYSTEM_NAME` and `CMAKE_SYSTEM_PROCESSOR`, so a cross toolchain is checked against its target
-system. Unknown targets, conflicting CUDA architectures and target changes within an existing
-build directory are configuration errors. Compiler changes also require a fresh build directory.
-Libraries and executables retain their logical names across targets; their build trees are separate.
+平台配置在 CUDA toolchain 检测前解析，验证系统、架构和 build directory 一致性。
+修改编译目标或 compiler 使用独立构建目录。维护入口为
+[NinferPlatform.cmake](../../cmake/NinferPlatform.cmake)与
+[CMakePresets.json](../../CMakePresets.json)。
 
 The same selection generates `<build-dir>/generated/core/target.h` from
 [`src/core/platform.h.in`](../../src/core/platform.h.in). Internal consumers explicitly include
@@ -37,25 +35,22 @@ target-private translation units and dependencies; macros handle small differenc
 sources, not whole implementation catalogs. Benchmark reference data belongs to
 [`bench/common/roofline.h`](../../bench/common/roofline.h), selected by target identity.
 
-Target selection owns source composition and compilation, not model mathematics or artifact
-capability admission. Ops retain the same public interfaces and report unsupported implementations
-at their own capacity/execution entries. Models do not receive a target key or reproduce Op shape
-catalogs. Runtime input-dependent dispatch and worker ISA selection remain inside the owning Op.
+小组件直接列源文件，大组件使用明确的 `sources.cmake`。每个实现一个编译 owner，
+新增文件显式注册；不递归扫描目录或自动发现 shape。Manifest 按 `CMAKE_CURRENT_LIST_DIR`
+定位文件，新增 manifest 不自动要求新增 library。
 
-## Configuration
+可共享源码注册一次，target-private route 由各自 manifest 选择。
+AVX CPU executor/MoE 只进入 x86 目标；Spark 不编译这些对象。
+Op 自己保留 format/shape 分派和调优，CMake 不成为另一套 runtime registry。
 
-The root `CMakeLists.txt` owns language/toolchain constraints, build options and top-level
-composition. The default configuration is Release. Ninja links and archives share the single-slot
-`ninfer_link` pool; compilation uses the build command's parallelism.
+配置选项与实际 target 以 [根 CMake](../../CMakeLists.txt)、
+[src](../../src/CMakeLists.txt)和[依赖声明](../../cmake/Dependencies.cmake)为准。
+模型加载、控制与设备执行保持不同依赖边界；runtime 通过 contracts/support 组织它们，
+不让通用 Core/Artifact 依赖模型或 Ops。
 
-| Cache option | Default | Scope |
-|---|---|---|
-| `NINFER_TARGET` | `rtx5090` | Execution target and native architecture |
-| `NINFER_BUILD_ENGINE` | ON | Frontend, media decode, models and Engine |
-| `NINFER_BUILD_APPS` | ON | CLI, HTTP server and perplexity evaluator; requires Engine |
-| `BUILD_TESTING` | OFF | Tests for the selected components |
-| `NINFER_BUILD_BENCHMARKS` | OFF | Benchmarks for the selected components |
-| `NINFER_ENABLE_DISTRIBUTED` | OFF | Process/control transport, distributed execution and NCCL collectives |
+`NINFER_ENABLE_DISTRIBUTED` 独立控制执行组和 NCCL 依赖，关闭时不发现或链接 NCCL。
+系统库正常安装，vendor 源码固定在仓库；配置阶段不下载依赖。
+编译器、Python 和本地依赖路径放入忽略的 `CMakeUserPresets.json`。
 
 Core, Artifact and Ops are always present. An Ops development build disables both Engine and Apps;
 it does not discover FFmpeg, libjpeg, curl, Jinja, XGrammar or spdlog. Engine adds FFmpeg, libjpeg and the frontend
@@ -91,8 +86,9 @@ cmake --build build -j
 ctest --preset dev
 ```
 
-Keep compiler, Python, pkg-config and dependency paths in ignored `CMakeUserPresets.json`.
-A local preset can inherit any checked-in preset:
+Spark 使用 `dgx-spark-*`；分布式另启用对应选项。独立 build tree 防止目标、缓存和产物混用。
+具体选项默认值直接查 CMake，测试与测量命令分别见
+[tests](../../tests/README.md)和[bench](../../bench/README.md)。
 
 ```json
 {

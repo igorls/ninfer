@@ -129,11 +129,11 @@ struct Fixture {
     context::RecordReservation reserve_history(const context::HistoryBindingDemand& demand,
                                                std::uint32_t pool) {
         context::ContextDemand whole;
-        whole.add_history(pool, demand);
+        const auto id    = whole.add_history(pool, demand);
         auto reservation = directory->reserve(whole);
         if (!reservation) throw std::bad_alloc();
         expect(reservation.reservation->ready(), "fixture unexpectedly requires pool maintenance");
-        return reservation.reservation->take_history(pool);
+        return reservation.reservation->take(id);
     }
 
     context::HistoryBinding prepare(const context::HistoryPrefix* source, std::uint32_t frontier,
@@ -165,10 +165,10 @@ struct Fixture {
     void grow(context::HistoryId owner, std::uint32_t count) {
         auto& histories = history(owner.pool_id);
         context::ContextDemand demand;
-        demand.add_growth(histories, owner, count);
+        const auto id    = demand.add_growth(histories, owner, count);
         auto reservation = directory->reserve(demand);
         if (!reservation) throw std::bad_alloc();
-        auto records = reservation.reservation->take_history(owner.pool_id);
+        auto records = reservation.reservation->take(id);
         histories.prepare_growth(owner, records);
         histories.adopt_growth(owner, std::move(records));
     }
@@ -210,11 +210,11 @@ struct Fixture {
     }
 
     context::RecordReservation host_reservation(std::uint32_t count, std::uint32_t pool = 0) {
-        context::ContextDemand demand{.histories = {{pool, count, {}}},
-                                      .memory    = context::ContextMemory::Host};
+        context::ContextDemand demand;
+        const auto id = demand.add_history(pool, count, context::ContextMemory::Host);
         auto reserved = directory->reserve(demand);
         if (!reserved) throw std::bad_alloc();
-        return reserved.reservation->take_history(pool);
+        return reserved.reservation->take(id);
     }
 
     void backup(std::span<const context::PageId> records, bool drop_device = false) {
@@ -397,7 +397,14 @@ void reservations_and_host(DeviceContext& device) {
     expect(rejected && f.histories->reserved_growth_pages(a.handle()) == 4 &&
                f.histories->reserved_growth_pages(b.handle()) == 0,
            "failed growth mutated an existing permit");
+    const context::RecordAssessment pressure{
+        {{{0, context::ContextMemory::Device}, {.reclaim_bytes = f.page_layout.page_bytes}}}};
+    expect(f.histories->growth_contributes(a.handle(), pressure, false),
+           "unused growth permit was absent from pause capacity contribution");
     f.histories->release_growth(a.handle());
+    expect(!f.histories->growth_contributes(a.handle(), pressure, false) &&
+               !f.histories->growth_contributes(a.handle(), {}, true),
+           "released growth still advertised record or metadata contribution");
     f.grow(a.handle(), 3);
     f.grow(b.handle(), 4);
     expect(f.reserved_pages() == 7, "retry lost released shared capacity");
@@ -945,7 +952,7 @@ void qwen_reclaim_facts(DeviceContext& device) {
     const std::array all{root, left, right, kept_left, kept_right, domain, position, alias};
     const std::array removed{root, left, right};
     const std::array kept{kept_left, kept_right};
-    context::RecoveryIndex index;
+    context::RecoveryIndex index(f.directory->metadata_budget());
     index.synchronize(qwen::RecoveryStoreView{store});
     auto evaluation = index.evaluate(kept);
     expect(evaluation.loss(removed) == 200 && !evaluation.prefix(domain, left) &&
@@ -1023,6 +1030,79 @@ void qwen_reclaim_facts(DeviceContext& device) {
     f.empty();
 }
 
+void request_and_cache_usage(DeviceContext& device) {
+    Fixture f(device);
+    const auto check = [&](ContextMemoryDomain memory, unsigned used, unsigned cached) {
+        const auto usage = f.directory->usage();
+        for (const auto& pool : usage.pools)
+            expect(pool.live_bytes == pool.in_use_bytes + pool.cached_bytes,
+                   "pool purposes do not conserve physical bytes");
+        for (const auto& value : usage.resources)
+            if (value.domain == memory && value.history_pool == 0)
+                expect(value.in_use_bytes == used * f.page_layout.page_bytes &&
+                           value.cached_bytes == cached * f.page_layout.page_bytes,
+                       "KV request/cache classification does not match its physical owners");
+    };
+    auto owner         = f.create(193);
+    auto cache         = f.histories->retain_prefix(owner.handle(), 193);
+    auto short_request = f.histories->retain_prefix(owner.handle(), 65);
+    short_request.set_use(context::ContextUse::Request);
+    auto another_request = short_request;
+    check(ContextMemoryDomain::Device, 4, 0);
+    owner.reset();
+    check(ContextMemoryDomain::Device, 2, 2);
+    short_request.reset();
+    check(ContextMemoryDomain::Device, 2, 2);
+    another_request.reset();
+    check(ContextMemoryDomain::Device, 0, 4);
+
+    const auto first = f.histories->logical_page(cache.history(), 0);
+    {
+        auto records = f.host_reservation(1);
+        auto backup  = f.pages->prepare_host_replica(first, 0, records.materialize(0));
+        check(ContextMemoryDomain::Device, 0, 4);
+        check(ContextMemoryDomain::Host, 0, 1);
+    }
+    check(ContextMemoryDomain::Host, 0, 0);
+    const auto logical = f.logical(cache.history());
+    f.backup(logical);
+    check(ContextMemoryDomain::Host, 0, 4);
+    {
+        auto maintenance = f.pages->pin_binding(first, 0, context::ContextMemory::Device);
+        check(ContextMemoryDomain::Device, 0, 4);
+        auto reader = f.pages->read_device(first, 0, 64);
+        check(ContextMemoryDomain::Device, 1, 3);
+        check(ContextMemoryDomain::Host, 0, 4);
+    }
+    check(ContextMemoryDomain::Device, 0, 4);
+
+    auto& states     = f.directory->states();
+    const auto image = states.reserve_destination().value();
+    states.complete_initialization(image);
+    states.freeze(image);
+    using Snapshot = context::ContextSnapshot<int, int>;
+    {
+        Snapshot checkpoint(states, {image, 0}, {cache}, std::make_shared<const int>(1));
+        auto paused = checkpoint;
+        paused.set_use(context::ContextUse::Request);
+        check(ContextMemoryDomain::Device, 4, 0);
+        auto other = paused;
+        paused.set_use(context::ContextUse::Cache);
+        check(ContextMemoryDomain::Device, 4, 0);
+        other.set_use(context::ContextUse::Request, context::ContextMemory::Host);
+        check(ContextMemoryDomain::Device, 0, 4);
+        check(ContextMemoryDomain::Host, 4, 0);
+        paused = std::move(other);
+        check(ContextMemoryDomain::Host, 4, 0);
+    }
+    check(ContextMemoryDomain::Device, 0, 4);
+    check(ContextMemoryDomain::Host, 0, 4);
+    cache.reset();
+    check(ContextMemoryDomain::Device, 0, 0);
+    check(ContextMemoryDomain::Host, 0, 0);
+    f.empty();
+}
+
 void accepted_frontier_and_retirement(DeviceContext& device) {
     Fixture f(device);
     auto owner = f.create(65);
@@ -1059,6 +1139,7 @@ int main() {
             return 77;
         CUDA_CHECK(error);
         DeviceContext device(0);
+        request_and_cache_usage(device);
         accepted_frontier_and_retirement(device);
         prefix_retention_and_replicas(device);
         reservations_and_host(device);

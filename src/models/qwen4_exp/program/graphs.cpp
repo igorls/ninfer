@@ -6,18 +6,32 @@
 #include "core/nvtx.h"
 
 #include <algorithm>
+#include <array>
+#include <stdexcept>
 #include <thread>
 
 namespace ninfer::models::qwen4_exp::detail {
 
+namespace {
+constexpr std::array kDecodeContextBounds{128U, 512U, 2048U, 8192U, 32768U, 131072U};
+}
+
 std::vector<std::uint32_t> decode_context_bounds(std::uint32_t capacity) {
     std::vector<std::uint32_t> out;
-    for (const auto bound : {128U, 512U, 2048U, 8192U, 32768U, 131072U}) {
+    for (const auto bound : kDecodeContextBounds) {
         if (bound >= capacity) break;
         out.push_back(bound);
     }
     out.push_back(capacity);
     return out;
+}
+
+std::uint32_t decode_context_bound(std::uint32_t visible, std::uint32_t capacity) {
+    if (!visible || visible > capacity)
+        throw std::logic_error("decode context exceeds its capacity");
+    for (const auto bound : kDecodeContextBounds)
+        if (visible <= bound) return std::min(bound, capacity);
+    return capacity;
 }
 
 namespace {
@@ -77,10 +91,9 @@ void GraphInputs::prepare() {
     }
     const auto& buffers = r.plan.persistent.buffers;
     if (buffers.mtp) {
-        for (const auto* region :
-             {&buffers.mtp->base_conditioning, &buffers.mtp->hidden, &buffers.mtp->tail_keys,
-              &buffers.mtp->tail_coordinates, &buffers.mtp->drafts, &buffers.mtp->extents,
-              &buffers.mtp->anchors, &buffers.mtp->frontiers}) {
+        for (const auto* region : {&buffers.mtp->base_conditioning, &buffers.mtp->hidden,
+                                   &buffers.mtp->tail_keys, &buffers.mtp->tail_coordinates,
+                                   &buffers.mtp->drafts, &buffers.mtp->extents, &buffers.anchors}) {
             const auto value = r.tensor(*region);
             CUDA_CHECK(cudaMemsetAsync(value.data, 0, value.bytes(), owner_.cuda.stream()));
         }
@@ -96,6 +109,12 @@ GraphInputs::~GraphInputs() {
     // prepare() reports execution failures; unwinding still drains the staging readers.
     (void)cudaStreamSynchronize(owner_.cuda.stream());
     for (const auto id : allocations_) records_->release(id);
+}
+
+void GraphInputs::stage() {
+    auto& r             = owner_.resources;
+    const auto& ingress = r.plan.persistent.buffers.ingress;
+    copy_bytes(r.ingress().subspan(0, ingress.bytes), ingress.bind(r.persistent()), owner_.cuda);
 }
 
 void GraphInputs::batch(execution::BatchView call, std::uint32_t visible) {
@@ -133,38 +152,16 @@ void GraphInputs::batch(execution::BatchView call, std::uint32_t visible) {
     for (int row = 0; row < b; ++row) tail_offsets[row] = row * 2 * sizeof(TokenId);
     write_values<std::int64_t>(owner_.resources.tensor(io.raw_tail_offsets).slice(0, 0, b),
                                tail_offsets, owner_.cuda);
-    write_values<std::int32_t>(owner_.resources.tensor(io.row_indices).slice(0, 0, b), rows,
-                               owner_.cuda);
-}
-
-std::uint32_t context_envelope(std::uint32_t visible, std::uint32_t capacity) {
-    if (!visible || visible > capacity)
-        throw std::logic_error("Qwen4Exp visible context exceeds its capacity");
-    for (const auto bound : {128U, 512U, 2048U, 8192U, 32768U, 131072U})
-        if (visible <= bound) return std::min(bound, capacity);
-    return capacity;
 }
 
 Graphs::Graphs(RankProgramImpl& owner)
     : owner_(owner), bounds_(decode_context_bounds(owner.shape.max_context)) {}
 
-TextGraph& Graphs::main(Batch& graph, MainGraph kind) {
-    switch (kind) {
-    case MainGraph::Control:
-        return graph.control;
-    case MainGraph::Ordinary:
-        return graph.ordinary;
-    case MainGraph::Verify:
-        return graph.verify;
-    }
-    throw std::logic_error("invalid Main graph kind");
-}
-
-void Graphs::prepare_main(Batch& graph, std::uint32_t batch, MainGraph kind) {
+void Graphs::prepare_main(Batch& graph, std::uint32_t batch, bool verify,
+                          GraphPreparation& preparation) {
     auto& p             = owner_;
     auto& r             = p.resources;
     const auto& buffers = r.plan.persistent.buffers;
-    const auto verify   = kind == MainGraph::Verify;
     const auto tokens   = verify ? p.shape.draft_tokens + 1 : 1;
     const auto call     = r.main_batch(tokens, batch, bounds_.back());
     const auto& c       = p.parameters.profile->config.text;
@@ -174,6 +171,8 @@ void Graphs::prepare_main(Batch& graph, std::uint32_t batch, MainGraph kind) {
     if (buffers.pending_conditioning)
         output.conditioning =
             r.packed(*buffers.pending_conditioning, {dimension(c.residual_width()), t, b});
+    const auto logits =
+        r.packed(*buffers.logits, {dimension(p.parameters.profile->local.vocabulary), t, b});
     const execution::TextExecution execution{r.workspace,
                                              *r.states,
                                              *r.main,
@@ -187,58 +186,107 @@ void Graphs::prepare_main(Batch& graph, std::uint32_t batch, MainGraph kind) {
     if (verify) update.emplace<execution::VerifyRecords>(*r.gdn_records);
     const std::array ple{r.ple_upload->binding(0, tokens, batch),
                          r.ple_upload->binding(1, tokens, batch)};
-    auto& selected = main(graph, kind);
+    auto& selected = verify ? graph.verify : graph.main;
     {
-        // Warm the actual bodies before capture. No disk request is needed for these bindings.
         execution::TextRun run(p.parameters, execution, call, update, p.cuda);
-        run.stem();
-        for (std::uint32_t layer = 0; layer < c.ple.layer; ++layer)
-            while (!run.advance_layer(layer)) std::this_thread::yield();
-        run.consume_ple(ple[0].values);
-        for (std::uint32_t layer = c.ple.layer; layer < p.parameters.text.layers.size(); ++layer)
-            while (!run.advance_layer(layer)) std::this_thread::yield();
-        run.finish(output);
-        p.device.synchronize();
-        selected.prepare(run, p.parameters, r.experts.get(), bounds_,
-                         {ple[0].values, ple[1].values}, output,
-                         tokens * batch, r.workspace, p.device);
+        if (!preparation.capturing()) {
+            run.stem();
+            for (std::uint32_t layer = 0; layer < c.ple.layer; ++layer)
+                while (!run.advance_layer(layer)) std::this_thread::yield();
+            run.consume_ple(ple[0].values);
+            for (std::uint32_t layer = c.ple.layer; layer < p.parameters.text.layers.size();
+                 ++layer)
+                while (!run.advance_layer(layer)) std::this_thread::yield();
+            run.finish(output, logits);
+            preparation.checkpoint();
+            return;
+        }
+        selected.prepare(run, p.parameters, r.experts.get(), bounds_, ple, output, logits,
+                         tokens * batch, r.workspace, p.device, [&] {
+                             if (!verify) p.install_decode(batch);
+                         });
     }
     selected.select(bounds_.back());
     execution::TextRun run(p.parameters, execution, call, update, p.cuda);
-    for (std::uint32_t slot : {1U, 0U}) {
+    if (selected.resident()) {
+        selected.replay(1, p.cuda);
+        selected.replay(0, p.cuda);
+    } else {
         selected.begin_prefix(p.cuda);
         while (!selected.advance_prefix(p.cuda)) std::this_thread::yield();
-        selected.consume_ple(slot, p.cuda);
+        selected.consume_ple(0, p.cuda);
         while (!selected.advance_suffix(p.cuda)) std::this_thread::yield();
     }
-    p.device.synchronize();
+    preparation.checkpoint();
 }
 
-void Graphs::prepare_drafts(Batch& graph, std::uint32_t batch) {
+void Graphs::prepare_drafts(Batch& graph, std::uint32_t batch, GraphInputs& inputs,
+                            GraphPreparation& preparation) {
     auto& p = owner_;
     graph.drafts.resize(p.shape.draft_tokens);
     for (std::uint32_t step = 0; step < p.shape.draft_tokens; ++step) {
         auto& call = graph.drafts[step];
-        p.draft_forward(step, batch, bounds_.back());
-        p.device.synchronize();
+        if (!preparation.capturing()) {
+            for (const auto bound : bounds_) {
+                inputs.batch(p.resources.mtp_batch(
+                                 p.resources.plan.persistent.buffers.mtp->draft_steps[step], 1,
+                                 batch, bound),
+                             bound);
+                p.draft_forward(step, batch, bound);
+            }
+            preparation.checkpoint();
+            continue;
+        }
         for (const auto bound : bounds_) {
             p.resources.workspace.reset_peak();
             call.definitions.emplace_back();
             call.definitions.back().capture(p.cuda.stream(),
-                [&] { p.draft_forward(step, batch, bound); });
+                                            [&] { p.draft_forward(step, batch, bound); });
             call.workspace_bytes.push_back(p.resources.workspace.peak_used());
         }
-        call.executable.instantiate(call.definitions.front());
-        for (std::size_t i = 0; i < call.definitions.size(); ++i) {
-            call.executable.update(call.definitions[i]);
-            call.executable.upload(p.cuda.stream());
+        const auto ids = p.draft_output_ids(step, batch);
+        for (std::uint32_t slot = 0; slot < 2; ++slot)
+            call.handoffs[slot].capture(
+                p.cuda.stream(), [&] { p.host_ple->capture_append(slot, ids, step, p.cuda); });
+    }
+    if (!preparation.capturing()) return;
+    CudaCompletionEvent fork(p.device), join(p.device);
+    const auto transfer = p.resources.ple_transfer();
+    {
+        const auto depth = p.shape.draft_tokens;
+        auto& chain      = graph.chain;
+        chain.installed.resize(depth);
+        chain.graph.prepare(p.cuda, [&] {
+            p.install_decode(batch);
+            for (std::uint32_t step = 0; step < depth; ++step) {
+                const auto& call = graph.drafts[step];
+                chain.steps.push_back(call.definitions.front().append_to(p.cuda.stream()));
+                fork.record(p.cuda.stream());
+                fork.wait(transfer.stream());
+                chain.handoffs.push_back(call.handoffs[0].append_to(transfer.stream()));
+            }
+            join.record(transfer.stream());
+            join.wait(p.cuda.stream());
+        });
+        for (std::size_t context = 0; context < bounds_.size(); ++context) {
+            for (std::uint32_t step = 0; step < depth; ++step)
+                chain.graph.executable.update_child(chain.steps[step],
+                                                    graph.drafts[step].definitions[context]);
+            chain.graph.executable.upload(p.cuda.stream());
             p.device.synchronize();
         }
-        call.installed = call.definitions.size() - 1;
+        std::fill(chain.installed.begin(), chain.installed.end(), bounds_.size() - 1);
+        for (std::uint32_t slot : {1U, 0U}) {
+            for (std::uint32_t step = 0; step < depth; ++step)
+                chain.graph.executable.update_child(chain.handoffs[step],
+                                                    graph.drafts[step].handoffs[slot]);
+            chain.graph.executable.launch(p.cuda.stream());
+            preparation.checkpoint();
+        }
     }
 }
 
-void Graphs::prepare(GraphInputs& inputs) {
+void Graphs::prepare(GraphInputs& inputs, GraphPreparation& observation) {
     auto& p = owner_;
     auto& r = p.resources;
     std::optional<moe::Schedule::Preparation> preparation;
@@ -247,35 +295,35 @@ void Graphs::prepare(GraphInputs& inputs) {
     for (std::uint32_t batch = 1; batch <= p.shape.max_concurrency; ++batch) {
         auto& graph = batches_[batch - 1];
         inputs.batch(r.main_batch(1, batch, bounds_.back()), bounds_.back());
-        prepare_main(graph, batch, MainGraph::Control);
-        prepare_main(graph, batch, MainGraph::Ordinary);
-        p.project_samples(batch, false);
-        p.sample_forward(batch, false);
-        p.device.synchronize();
+        inputs.stage();
+        prepare_main(graph, batch, false, observation);
         r.workspace.reset_peak();
-        graph.sample.prepare(p.cuda, [&] {
-            p.project_samples(batch, false);
+        if (observation.capturing()) {
+            graph.sample.prepare(p.cuda, [&] { p.sample_forward(batch, false); });
+            graph.sample.launch(p.cuda);
+        } else {
             p.sample_forward(batch, false);
-        });
+        }
+        observation.checkpoint();
         graph.sample_workspace = r.workspace.peak_used();
         if (p.parameters.mtp) {
             const auto& frame = *r.plan.persistent.buffers.mtp;
             for (std::uint32_t step = 0; step < p.shape.draft_tokens; ++step)
                 inputs.batch(r.mtp_batch(frame.draft_steps[step], 1, batch, bounds_.back()),
                              bounds_.back());
-            prepare_drafts(graph, batch);
+            inputs.stage();
+            prepare_drafts(graph, batch, inputs, observation);
             inputs.batch(r.main_batch(p.shape.draft_tokens + 1, batch, bounds_.back()),
                          bounds_.back());
-            prepare_main(graph, batch, MainGraph::Verify);
-            p.project_samples(batch, true);
-            p.device.synchronize();
+            prepare_main(graph, batch, true, observation);
             r.workspace.reset_peak();
-            graph.head.prepare(p.cuda, [&] { p.project_samples(batch, true); });
-            graph.head_workspace = r.workspace.peak_used();
-            p.accept_forward(batch);
-            p.device.synchronize();
-            r.workspace.reset_peak();
-            graph.accept.prepare(p.cuda, [&] { p.accept_forward(batch); });
+            if (observation.capturing()) {
+                graph.accept.prepare(p.cuda, [&] { p.accept_forward(batch); });
+                graph.accept.launch(p.cuda);
+            } else {
+                p.accept_forward(batch);
+            }
+            observation.checkpoint();
             graph.accept_workspace = r.workspace.peak_used();
         }
     }
@@ -284,9 +332,10 @@ void Graphs::prepare(GraphInputs& inputs) {
     r.workspace.reset_peak();
 }
 
-TextGraph& Graphs::main(std::uint32_t batch, MainGraph kind, std::uint32_t visible) {
+TextGraph& Graphs::main(std::uint32_t batch, bool verify, std::uint32_t visible, bool head) {
     auto& group = batches_.at(batch - 1);
-    auto& graph = main(group, kind);
+    auto& graph = verify ? group.verify : group.main;
+    graph.set_head(head);
     graph.select(visible);
     workspace_peak_ = std::max(workspace_peak_, graph.workspace_bytes());
     return graph;
@@ -295,28 +344,26 @@ TextGraph& Graphs::main(std::uint32_t batch, MainGraph kind, std::uint32_t visib
 void Graphs::draft(std::uint32_t batch, std::span<const execution::BatchView> calls,
                    ple::Ticket ticket, std::span<const std::uint32_t> extents) {
     auto& group = batches_.at(batch - 1);
+    auto& chain = group.chain;
     for (std::size_t step = 0; step < calls.size(); ++step) {
-        auto& call = group.drafts.at(step);
-        const auto found = std::lower_bound(bounds_.begin(), bounds_.end(), calls[step].max_visible_tokens);
+        const auto& call = group.drafts[step];
+        const auto found =
+            std::lower_bound(bounds_.begin(), bounds_.end(), calls[step].max_visible_tokens);
         if (found == bounds_.end()) throw std::logic_error("MTP graph context exceeds capacity");
         const auto selected = static_cast<std::size_t>(found - bounds_.begin());
-        workspace_peak_ = std::max(workspace_peak_, call.workspace_bytes[selected]);
-        if (call.installed != selected) {
-            call.executable.update(call.definitions[selected]);
-            call.installed = selected;
+        workspace_peak_     = std::max(workspace_peak_, call.workspace_bytes[selected]);
+        if (chain.installed[step] != selected) {
+            chain.graph.executable.update_child(chain.steps[step], call.definitions[selected]);
+            chain.installed[step] = selected;
         }
-        call.executable.launch(owner_.cuda.stream());
-        owner_.save_draft(static_cast<std::uint32_t>(step), batch);
-        const auto& frame = *owner_.resources.plan.persistent.buffers.mtp;
-        auto ids = owner_.device_tensor(frame.draft_steps[step + 1].ids).slice(0, 0, batch);
-        owner_.host_ple->append_device(ticket, ids, extents, static_cast<std::uint32_t>(step));
+        if (chain.slot != ticket.slot)
+            chain.graph.executable.update_child(chain.handoffs[step],
+                                                call.handoffs.at(ticket.slot));
     }
-}
-
-void Graphs::verify_head(std::uint32_t batch) {
-    auto& group = batches_.at(batch - 1);
-    workspace_peak_ = std::max(workspace_peak_, group.head_workspace);
-    group.head.executable.launch(owner_.cuda.stream());
+    chain.slot = ticket.slot;
+    chain.graph.executable.launch(owner_.cuda.stream());
+    for (std::uint32_t step = 0; step < calls.size(); ++step)
+        owner_.host_ple->append_submitted(ticket, extents, step);
 }
 
 void Graphs::sample(std::uint32_t batch) {
@@ -329,7 +376,7 @@ void Graphs::accept(std::uint32_t batch) {
     batches_.at(batch - 1).accept.executable.launch(owner_.cuda.stream());
 }
 
-void MtpCommitGraphs::prepare(GraphInputs& inputs) {
+void MtpCommitGraphs::prepare(GraphInputs& inputs, GraphPreparation& preparation) {
     auto& p          = owner_;
     auto& r          = p.resources;
     const auto& io   = r.plan.persistent.buffers;
@@ -343,46 +390,79 @@ void MtpCommitGraphs::prepare(GraphInputs& inputs) {
         for (std::uint32_t b = 0; b < batch; ++b) slots[b] = b;
         write_values<std::int32_t>(r.tensor(io.batch.count_slots).slice(0, 0, batch), slots,
                                    p.cuda);
-        for (int rebuild = 0; rebuild < 2; ++rebuild) {
-            write_values<std::int32_t>(r.tensor(io.batch.accepted_columns).slice(0, 0, batch),
-                                       std::vector<std::int32_t>(batch, rebuild ? width : 1),
-                                       p.cuda);
-            r.workspace.reset_peak();
-            auto& variant = batches_[batch - 1][rebuild];
-            variant.graph.prepare(p.cuda, [&] { p.execute_mtp_commit(batch, rebuild); });
-            variant.workspace_bytes = r.workspace.peak_used();
+        write_values<std::int32_t>(r.tensor(io.batch.accepted_columns).slice(0, 0, batch),
+                                   std::vector<std::int32_t>(batch, width), p.cuda);
+        write_values<std::int32_t>(r.tensor(io.mtp->skip_first).slice(0, 0, batch),
+                                   std::vector<std::int32_t>(batch, 1), p.cuda);
+        write_values<std::int32_t>(r.tensor(io.mtp->last_columns).slice(0, 0, batch),
+                                   std::vector<std::int32_t>(batch, width - 1), p.cuda);
+        write_values<std::int32_t>(r.tensor(io.mtp->active_columns).slice(0, 0, batch),
+                                   std::vector<std::int32_t>(batch, 0), p.cuda);
+        write_values<std::int32_t>(r.tensor(io.batch.count_columns).slice(0, 0, batch),
+                                   std::vector<std::int32_t>(batch, 0), p.cuda);
+        const auto destination = r.tensor(io.commit_destination_offsets).slice(0, 0, batch);
+        const auto source      = r.tensor(io.batch.destination_offsets).slice(0, 0, batch);
+        copy_bytes({destination.data, destination.bytes(), p.cuda.device()},
+                   {source.data, source.bytes(), p.cuda.device()}, p.cuda);
+        r.workspace.reset_peak();
+        if (!preparation.capturing()) {
+            p.execute_mtp_commit(batch, true, true);
+            preparation.checkpoint();
+            continue;
         }
+        auto& target = batches_[batch - 1];
+        target.graph.prepare(p.cuda, [&] {
+            p.execute_mtp_commit(batch, true, true, &target.repair, &target.counts);
+        });
+        target.workspace_bytes = r.workspace.peak_used();
+        target.graph.launch(p.cuda);
+        preparation.checkpoint();
     }
     r.workspace.reset_peak();
 }
 
-void MtpCommitGraphs::replay(std::uint32_t batch, bool rebuild_history) {
-    auto& variant   = batches_.at(batch - 1)[rebuild_history];
-    workspace_peak_ = std::max(workspace_peak_, variant.workspace_bytes);
-    variant.graph.launch(owner_.cuda);
+void MtpCommitGraphs::replay(std::uint32_t batch, bool rebuild_history, bool count_tokens) {
+    auto& target = batches_.at(batch - 1);
+    target.repair.set_enabled(target.graph.executable, rebuild_history);
+    target.counts.set_enabled(target.graph.executable, count_tokens);
+    workspace_peak_ = std::max(workspace_peak_, target.workspace_bytes);
+    target.graph.launch(owner_.cuda);
 }
 
-void RankProgramImpl::initialize_graphs() {
-    if (!shape.cuda_graph) return;
+GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode mode) {
+    if (!shape.cuda_graph) return {};
+    if (graphs || device_graphs) throw std::logic_error("Qwen4Exp Graphs are already prepared");
+    if (mode == GraphPreparationMode::Complete) {
+        initialize_graphs(GraphPreparationMode::Warmup);
+        return initialize_graphs(GraphPreparationMode::Capture);
+    }
     nvtx::ScopedRange range(nvtx::Name::CudaGraphPrepare, nvtx::Category::Graph);
-    const auto before = device_memory_snapshot(cuda.device());
-    GraphInputs inputs(*this);
-    inputs.prepare();
+    GraphPreparation observation(device, mode);
+    graph_inputs = std::make_unique<GraphInputs>(*this);
+    graph_inputs->prepare();
     if (host_ple) {
         graphs = std::make_unique<Graphs>(*this);
-        graphs->prepare(inputs);
+        graphs->prepare(*graph_inputs, observation);
     } else {
         device_graphs = std::make_unique<DeviceGraphs>(*this);
-        device_graphs->prepare(inputs);
+        device_graphs->prepare(*graph_inputs, observation);
     }
     if (parameters.mtp && shape.draft_tokens) {
         commit_graphs = std::make_unique<MtpCommitGraphs>(*this);
-        commit_graphs->prepare(inputs);
+        commit_graphs->prepare(*graph_inputs, observation);
     }
-    graph_memory.emplace();
-    graph_memory->preparation_increment_bytes =
-        device_memory_growth(before, device_memory_snapshot(cuda.device()));
-    device.synchronize();
+    observation.checkpoint();
+    graph_inputs.reset();
+    const auto result = observation.sample();
+    if (!graph_memory) graph_memory.emplace();
+    if (observation.capturing()) {
+        graph_memory->preparation_increment_bytes = result.increment_bytes;
+        graph_memory->preparation_peak_bytes      = result.peak_bytes;
+    } else {
+        release_graphs();
+        graph_memory->warmup_increment_bytes = result.increment_bytes;
+    }
+    return result;
 }
 
 void RankProgramImpl::release_graphs() {
@@ -390,6 +470,7 @@ void RankProgramImpl::release_graphs() {
     graphs.reset();
     device_graphs.reset();
     commit_graphs.reset();
+    graph_inputs.reset();
 }
 
 } // namespace ninfer::models::qwen4_exp::detail

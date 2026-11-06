@@ -1,34 +1,25 @@
-# NInfer tools
+# Tools
 
-`tools/` contains artifact conversion and inspection, benchmark orchestration, and serving smoke
-checks. To download and run an existing artifact, start with the [project README](../README.md).
-To build your own weights, use the [weight conversion guide](../docs/weight-conversion.md).
+工具使用显式 artifact、executable 和输出目录；Python 不提供另一条模型推理路径。
+维护环境为 Python 3.11，各工具按自身 requirements 使用已选环境，不在运行时隐式下载模型。
+临时日志和实验产物放在 `.agent-tmp/<task>/`，`out/` 留给权重。
 
-Run commands from the repository root with a Python environment containing the dependencies
-for the selected tool. The maintained environment uses Python 3.11.
-
-Python tools are independent of CMake; there is no `NINFER_BUILD_TOOLS` option.
-Tools that launch native binaries require an explicit executable or build-directory argument.
-The stored-scale CUDA quantization extension uses PyTorch's visible-device architecture selection;
-`TORCH_CUDA_ARCH_LIST` can set an explicit architecture list.
-
-## Task index
-
-| Task | Location |
+| 任务 | 入口 |
 |---|---|
-| Convert weights with an official or custom recipe | [`convert/`](convert/); [user guide](../docs/weight-conversion.md) |
-| Inspect artifact metadata and objects | [`artifact/inspect.py`](artifact/inspect.py) |
-| One-time upgrade of official v2 artifacts | [`upgrade_ninfer_v2_to_v3.py`](upgrade_ninfer_v2_to_v3.py), with positional `INPUT OUTPUT` paths |
-| Run benchmark matrices | [`bench/`](bench/README.md) |
-| Measure external Serve TTFT | [`bench/ttft/`](bench/ttft/README.md) |
-| Exercise a resident HTTP server | [`smoke/serve_contract.py`](smoke/serve_contract.py) |
-| Exercise thinking preservation through a managed server | [`smoke/serve_thinking_preservation.py`](smoke/serve_thinking_preservation.py) |
-| Measure sustained device-memory bandwidth | [`hbm_bandwidth_probe.cu`](hbm_bandwidth_probe.cu); [build command](#memory-bandwidth-probe) |
+| 权重转换 | [convert](convert/)与[转换指南](../docs/weight-conversion.md) |
+| Artifact 检查 | [artifact.inspect](artifact/inspect.py) |
+| 已有 v2 产物升级工具 | [upgrade_ninfer_v2_to_v3.py](upgrade_ninfer_v2_to_v3.py) |
+| Engine 与 Op 微测 | [bench](../bench/README.md) |
+| 固定语料、并发与 TTFT | [tools/bench](bench/README.md) |
+| 已运行服务的协议检查 | [serve_contract](smoke/serve_contract.py) |
+| Thinking/history 场景 | [serve_thinking_preservation](smoke/serve_thinking_preservation.py) |
+
+Artifact 的表示与物化关系见[权重与加载](../docs/maintainer/weights-and-loading.md)。
+各命令参数以 `--help` 为准；managed runner 拥有其启动的服务，resident runner 只访问给定地址。
 
 ## Memory bandwidth probe
 
-This probe is a CMake benchmark target, using the selected native CUDA architecture and benchmark
-reference table. With a configured development tree (substitute `dgx-spark-dev` on Spark):
+持续带宽 probe 是 CMake benchmark target，使用所选架构：
 
 ```bash
 cmake --build build/rtx5090-dev -j --target ninfer_memory_bandwidth_bench

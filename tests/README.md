@@ -1,11 +1,10 @@
 # Tests
 
-The retained tests protect current `.ninfer`, numerical operator, model, runtime-transaction,
-benchmark-report, and external protocol behavior. Op qualification and CUDA implementation rules
-are defined in [Op development](../docs/maintainer/op-development.md); product execution and
-ownership contracts are defined in [Engine architecture](../docs/maintainer/engine-architecture.md).
+测试保护公开行为、数学、状态和生命周期。具体 Op 的数值方法见
+[Op 开发](../docs/maintainer/op-development.md#数值验证)，跨模块所有权见
+[Engine 架构](../docs/maintainer/engine-architecture.md)。
 
-## Organization
+## 组织
 
 - `artifact/` — v3 framing, directory/binding records, codecs, sharding, selected-object
   materialization and Python-writer/C++-reader interoperability;
@@ -16,16 +15,14 @@ ownership contracts are defined in [Engine architecture](../docs/maintainer/engi
   opt-in real Engine integration;
 - `models/qwen4_exp/` — Flash-Next binding, complete continuation-state round trips, and real
   Engine text/MTP/image/video, graph, batch, cache, scoring, causal-prefix independence and
-  constrained-output checks;
+  constrained-output checks; native bank binding and state/page-group transfers; PLE disk
+  binding, exact hash/NF4 reconstruction, incremental windows, cancellation and buffer lifetimes;
 - `ops/` — semantic Op qualification with independent mathematical or state-transition oracles;
   Linear and fused Linear suites are separated by their supported weight/activation paths;
 - `runtime/` — scheduler fairness, cache resource policy, capacity and context-cost calculations;
 - `distributed/` — typed native work, bounded transport, and opt-in two-rank GPU execution;
 - `cpu/` — topology/ISA, bounded task admission, bound collectives, publication and shutdown;
 - `io/` — bounded direct reads, partial submission, completion, wakeup and borrowed-buffer lifetime;
-- `models/qwen4_exp/` — native bank binding, state/page-group layouts and transfers, plus PLE
-  disk binding, exact hash/NF4 reconstruction, incremental windows,
-  cancellation and Host/CUDA buffer lifetimes;
 - `bench/ttft/` — HTTP measurements, campaign orchestration and workload construction;
 - root C++ tests — core storage, public API, serving protocols, logging, benchmark reports and
   causal-scoring evaluation;
@@ -41,6 +38,12 @@ executables and CTest working directories under `build/tests/`.
 0/1/77 entry handling; each projection family keeps its own fixtures and complete oracle.
 Concrete numerical criteria remain named by the semantic Op suite; there are no cross-Op tolerance
 presets.
+
+Causal-cache attention and full/prefix KV append use the common `ops/suite.h` runner and
+independent scalar codecs, including the FP8 group-128 UE8M0 representation. Append cases can
+be selected with `ninfer_kv_cache_append_test --format bf16|int8|fp8|nvfp4|k8v4`.
+LinearPair retains alias-input cases and tests distinct inputs against independent FP64 dot
+products at both supported Q8 widths.
 
 Family-specific case declarations, independent oracles and numerical criteria live alongside the
 Op suites. `ops/quantized_weight.h` owns packed-weight fixtures and independent logical decoding;
@@ -162,8 +165,8 @@ geometries, including the original projections and selector matrix. The default 
 
 Linear (including both BF16 fixture recipes), LinearAdd (including FP8/NVFP4) and LinearSwiGLU
 common implementations each compile once into a test support library. Their libraries and CXX Op test executables receive `-fno-fast-math` and `-ffp-contract=off`
-on GNU/Clang. The remaining organization, entry-point and oracle-build work is tracked in the
-[Linear test reorganization requirements](../docs/maintainer/linear-test-reorganization-plan.md).
+on GNU/Clang. The current mathematical and oracle-build requirements are in
+[Op development](../docs/maintainer/op-development.md).
 
 Run the native Python suites with the project Python environment:
 
@@ -587,9 +590,17 @@ From the configured coordinator:
 ./build/dgx-spark-dev/tests/ninfer_distributed_execution_test --config distributed.local.toml
 ```
 
-The test launches local/SSH workers and uses the production Executor, transport and NCCL backend.
-It checks SUM, unsigned MAX and exact PLE words, Gather/Scatter/Broadcast/P2P, Graph replay,
-decision input, delayed-rank commit, owner subsets, cancellation, retirement, resource queries,
-peak reset, remote launch failure and failure during a collective. No model payload is loaded.
-The test's Program supplies an independent small mathematical/state reference; it is not a model
-registration or an alternative inference entry.
+这个入口使用生产 transport、Executor 与 NCCL，小型 Program 提供独立计算参考；
+它不证明某个真实模型已经正确集成。模型验证通过现有原生检查与公共 Engine/产品入口完成。
+
+## 验证边界
+
+浮点模型的不同合法路线可能产生不同 logits/token；数学正确性由 Op oracle 验证。
+模型检查关注组合、前沿、采用前缀、缓存内容、取消和资源寿命，不以输出看似正常替代这些事实。
+
+Prefix reuse 不保证任意负载序列后都命中。缓存测试需固定来源、保留资格与资源前提，
+然后检查仍可恢复的内容；不能通过改变 prompt 或增加预热追求断言通过。
+
+失败注入仅在相关测试 executable 内使用现有 interpose 支持，生产代码不增加测试 hook。
+性能只由相应 benchmark/产品测量证明；确定性工作量检查可防算法复杂度回退，不能替代时延测量。
+临时实验和日志使用 `.agent-tmp/<task>/`。

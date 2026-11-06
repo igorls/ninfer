@@ -78,3 +78,4 @@ profiles/
 # Local startup configuration; keep the complete reference in version control.
 *.toml
 !/ninfer.example.toml
+!/examples/configs/*.toml

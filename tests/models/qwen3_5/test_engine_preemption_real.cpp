@@ -25,6 +25,8 @@ namespace {
 
 constexpr std::uint32_t kOutputTokens    = 256;
 constexpr std::size_t kSnapshotHostBytes = 512ULL << 20;
+// The pressure configuration chooses the prompt length; readouts address its last positions.
+std::uint32_t g_prompt_tokens = 0;
 const ninfer::GenerationObservationOptions kObservations{
     .constraint_timings = true, .live_timings = true, .prompt_progress = true};
 
@@ -69,7 +71,7 @@ ninfer::RequestOptions request(std::uint32_t outputs, std::size_t row = 0) {
         options.execution.logprobs.candidates         = row == 0
                                                            ? std::vector<ninfer::TokenId>{198, 1000, 1001}
                                                            : std::vector<ninfer::TokenId>{199, 1002, 1003};
-        options.execution.logprobs.prompt_positions   = {0, kPromptTokens - 2};
+        options.execution.logprobs.prompt_positions   = {0, g_prompt_tokens - 2};
         options.execution.sampling.presence_penalty   = 0.2F;
         options.execution.sampling.frequency_penalty  = 0.1F;
         options.execution.sampling.repetition_penalty = 1.05F;
@@ -322,6 +324,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     auto options = engine_options(artifact, selected, snapshot);
     const auto prompt_tokens =
         ninfer::test::qwen3_5::configure_two_request_pressure(options, kOutputTokens);
+    g_prompt_tokens = prompt_tokens;
     ninfer::Engine engine(options);
     const auto before = engine.snapshot().runtime;
     const auto device =
@@ -396,19 +399,25 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
         if (first_error) { std::rethrow_exception(first_error); }
         throw std::runtime_error("first admission never submitted the second request");
     }
+    const auto cancellation_target = second.request_id();
     bool cancellation_requested = false;
     ninfer::RuntimeStats cancellation_observed;
     std::uint32_t committed_at_cancellation = 0;
     const ninfer::CancellationView cancellation([&] {
         if (cancellation_requested) { return true; }
         if (cancel_stage == CancelStage::None) { return false; }
-        const auto stats    = engine.snapshot().runtime;
-        const bool observed = cancel_stage == CancelStage::Paused
-                                  ? stats.paused_requests == 1
-                                  : stats.replaying_requests != 0 && stats.replayed_tokens != 0;
+        const auto snapshot = engine.snapshot({.include_requests = true});
+        const auto& stats   = snapshot.runtime;
+        const auto target =
+            std::find_if(snapshot.requests->begin(), snapshot.requests->end(),
+                         [&](const auto& r) { return r.id == cancellation_target; });
+        const bool observed =
+            target != snapshot.requests->end() &&
+            (cancel_stage == CancelStage::Paused
+                 ? target->phase == ninfer::RequestPhase::Paused
+                 : target->phase == ninfer::RequestPhase::Replay && stats.replayed_tokens != 0);
         if (!observed) { return false; }
-        // The second request's ticket is strictly newer: its submit follows first.start().
-        // With only these two requests, protecting the oldest resident makes it the only victim.
+        // Observe this request's lifecycle directly: pressure service can preempt either row.
         // CancellationView is checked by the consumer, including while its stream is idle; it
         // observes actual Engine state without delaying a model callback or guessing a sleep.
         cancellation_observed     = stats;
@@ -431,8 +440,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
     require(first_result->stats.engine_request_id != second_result.stats.engine_request_id,
             "concurrent requests lost their independent identity");
 
-    // The physical snapshot also waits for the completed worker boundary before we inspect its
-    // published counters; wait() may return as soon as the terminal response is available.
+    // wait() publishes the completed requests' scheduling state before returning.
     const auto after = engine.snapshot().runtime;
     settled(after);
     require(first_token_counts[0] == 1 && first_token_counts[1] == 1,
@@ -506,10 +514,9 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
                 after.replayed_tokens - before.replayed_tokens == totals.replayed_tokens,
             "request and Engine scheduling counters disagree");
     if (cancel_stage != CancelStage::None) {
-        require(first_result->stats.scheduling.preemptions == 0 &&
-                    second_result.stats.scheduling.preemptions != 0 &&
+        require(second_result.stats.scheduling.preemptions != 0 &&
                     second_result.stats.scheduling.paused_ns != 0,
-                "cancellation pressure did not preserve the oldest resident");
+                "cancellation did not reach the requested pressure state");
         // The consumer may still have committed events queued when it observes paused state.
         // validate() checks the complete drained stream against the terminal result as well.
         require(second_result.generated_token_ids.size() >= committed_at_cancellation,
@@ -586,7 +593,7 @@ void exercise(const std::filesystem::path& artifact, ninfer::SpeculativeBackend 
                 validate(got, prompts[row]->at(position + 1), false);
                 if (std::abs(got.sampled.raw_logprob - expected.sampled.raw_logprob) >= 2e-3F) {
                     std::cerr << "prompt readout row=" << row << " position=" << position
-                              << " row_preemptions=" << actual.scheduling.preemptions
+                              << " row_preemptions=" << actual.stats.scheduling.preemptions
                               << " actual=" << got.sampled.raw_logprob
                               << " sequential=" << expected.sampled.raw_logprob << '\n';
                 }

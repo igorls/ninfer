@@ -60,16 +60,22 @@ void RankProgramImpl::install_residencies(const ContextWork& work) {
         auto& residency = residencies[id.lane.value];
         if (!residency.installed || residency.id != id)
             throw std::logic_error("Qwen3.5 release no longer matches its residency");
-        residency.vision.reset();
-        residency.vision_input.reset();
+        if (resources.vision) {
+            const auto* active = resources.vision->current();
+            if (active && active->owner.residency == residency.id)
+                resources.vision->release(active->id);
+        }
         residency.installed = false;
     }
     auto* counts = static_cast<std::int32_t*>(context_counts.data());
     for (const auto& binding : work.bindings) {
         const auto lane = binding.member.residency.lane.value;
         auto& residency = residencies[lane];
-        residency.vision.reset();
-        residency.vision_input.reset();
+        if (resources.vision) {
+            const auto* active = resources.vision->current();
+            if (active && active->owner.residency == residency.id)
+                resources.vision->release(active->id);
+        }
         residency.id        = binding.member.residency;
         residency.sequence  = binding.member.sequence;
         residency.installed = true;
@@ -91,14 +97,13 @@ void RankProgramImpl::install_residencies(const ContextWork& work) {
         }
         if (!resources.token_counts.data || !residency.penalties) continue;
         Tensor destination = resources.token_counts.slice(1, static_cast<int>(lane), 1);
-        if (binding.committed_generated_tokens.empty()) {
+        if (binding.counts.empty()) {
             CUDA_CHECK(cudaMemsetAsync(destination.data, 0, destination.bytes(),
                                        device.transfer_stream()));
             continue;
         }
         auto* row_counts = counts + lane * vocabulary;
-        std::fill_n(row_counts, vocabulary, 0);
-        for (auto token : binding.committed_generated_tokens) ++row_counts[token];
+        binding.counts.restore({row_counts, vocabulary});
         CUDA_CHECK(cudaMemcpyAsync(destination.data, row_counts, vocabulary * sizeof(std::int32_t),
                                    cudaMemcpyHostToDevice, device.transfer_stream()));
     }
@@ -158,6 +163,16 @@ std::optional<runtime::ExecutionEvent<ExecutionTypes>> RankProgramImpl::poll() {
     return event;
 }
 
+// Sleeps on the active stream rather than occupying a core while the GPU works. Host expert
+// execution overlaps that stream, so the coordinator keeps polling it.
+void RankProgramImpl::wait_for_device() const {
+    if (resources.moe) return;
+    if (compute)
+        device.synchronize();
+    else if (context_operation)
+        CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream()));
+}
+
 void RankProgramImpl::drain() {
     std::exception_ptr failure;
     const auto attempt = [&](auto&& action) {
@@ -187,10 +202,8 @@ void RankProgramImpl::drain() {
     compute.reset();
     context_operation.reset();
     events.clear();
-    for (auto& residency : residencies) {
-        residency.vision.reset();
-        residency.vision_input.reset();
-    }
+    if (resources.vision)
+        if (const auto* active = resources.vision->current()) resources.vision->release(active->id);
     if (failure) std::rethrow_exception(failure);
 }
 

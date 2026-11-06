@@ -18,6 +18,8 @@ add_library(ninfer_serve STATIC
   request_events.cpp
   operational_log.cpp
   request_log.cpp
+  observations.cpp
+  monitor.cpp
   metrics.cpp
   http_server.cpp
   llamacpp_props.cpp

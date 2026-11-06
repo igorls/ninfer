@@ -12,6 +12,7 @@ void submit(detail::SessionImpl& session, runtime::ExecutionReservation reservat
     work.actions = session.actions(tx.context);
     tx.ticket    = session.executor->submit(std::move(reservation), std::move(work));
     tx.context.mark_submitted();
+    if (tx.vision_id) session.vision_window.submitted(tx.vision_id, tx.ticket);
 }
 
 std::optional<PlePrefetch> prefetch(const detail::SessionImpl& p, const detail::Sequence& s,
@@ -68,6 +69,8 @@ std::optional<runtime::ExecutionTicket> Session::start_prefill(SequenceHandle ha
                 *s.request->reasoning_feature_position < end)
                 readout.feature_position = s.request->reasoning_feature_position;
         }
+        forward.visual = p.prepare_visual(s, frontier, end);
+        if (forward.visual) tx.vision_id = forward.visual->window.id;
         forward.prefetch = prefetch(p, s, end, s.request->summary.prompt_tokens);
         submit(p, std::move(*reservation), {{}, std::move(forward)});
         return tx.ticket;
@@ -95,8 +98,10 @@ std::optional<runtime::ExecutionTicket> Session::start_replay(SequenceHandle han
         if (end > begin) p.prepare_write(s, end, tx.context);
         tx.rows.push_back(p.work_row(s, end - begin));
         ForwardWork forward;
-        forward.kind     = ForwardKind::Replay;
-        forward.rows     = tx.rows;
+        forward.kind   = ForwardKind::Replay;
+        forward.rows   = tx.rows;
+        forward.visual = p.prepare_visual(s, begin, end);
+        if (forward.visual) tx.vision_id = forward.visual->window.id;
         forward.prefetch = prefetch(p, s, end, s.replay_target);
         submit(p, std::move(*reservation), {{}, std::move(forward)});
         return tx.ticket;
@@ -166,6 +171,7 @@ Session::start_control(std::span<const SequenceHandle> members, std::span<const 
     auto& p = *impl_;
     if (p.compute) return {};
     if (members.empty() || members.size() > p.shape.max_concurrency || !stride ||
+        stride > p.definition->resources().text.control_tokens->size() ||
         tokens.size() != members.size() * stride || splits.size() != members.size())
         throw std::logic_error("invalid forced control window");
     for (std::size_t b = 0; b < members.size(); ++b) {
@@ -178,7 +184,7 @@ Session::start_control(std::span<const SequenceHandle> members, std::span<const 
             throw std::logic_error("forced control row is not executable");
     }
     for (const auto id : tokens)
-        if (id < 0 || std::uint32_t(id) >= p.definition->resources().public_token_count)
+        if (id < 0 || std::uint32_t(id) >= p.definition->resources().text.public_token_count)
             throw std::invalid_argument("forced token is outside vocabulary");
     auto reservation = p.executor->try_reserve(runtime::FrameKind::Compute);
     if (!reservation) return {};
@@ -190,9 +196,10 @@ Session::start_control(std::span<const SequenceHandle> members, std::span<const 
         for (std::size_t b = 0; b < members.size(); ++b) {
             auto& s = p.sequence(members[b]);
             p.prepare_write(s, s.continuation.metadata.main_frontier + stride, tx.context);
-            auto row = p.work_row(s, 1);
-            row.count_tokens.assign(tokens.begin() + b * stride, tokens.begin() + (b + 1) * stride);
-            row.ids.insert(row.ids.end(), row.count_tokens.begin(), row.count_tokens.end() - 1);
+            auto row               = p.work_row(s, 1);
+            const auto forced      = tokens.subspan(b * stride, stride);
+            row.control_last_token = forced.back();
+            row.ids.insert(row.ids.end(), forced.begin(), forced.end() - 1);
             for (const auto frontier : s.identity.positions.execution_frontiers())
                 if (frontier > row.main_frontier && frontier < row.main_frontier + stride)
                     row.window_ends.push_back(frontier - row.main_frontier);
@@ -200,10 +207,7 @@ Session::start_control(std::span<const SequenceHandle> members, std::span<const 
             std::sort(row.window_ends.begin(), row.window_ends.end());
             row.window_ends.erase(std::unique(row.window_ends.begin(), row.window_ends.end()),
                                   row.window_ends.end());
-            row.rope_positions.resize(3ULL * stride);
-            for (std::uint32_t axis = 0; axis < 3; ++axis)
-                for (std::uint32_t j = 0; j < stride; ++j)
-                    row.rope_positions[axis * stride + j] = row.main_frontier + j + row.rope_delta;
+            row.rope_positions.clear();
             tx.rows.push_back(std::move(row));
         }
         submit(p, std::move(*reservation),

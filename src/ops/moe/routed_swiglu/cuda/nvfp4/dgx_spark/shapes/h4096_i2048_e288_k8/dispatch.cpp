@@ -11,17 +11,19 @@ Plan select_plan(const SwiGLUProfile& ffn, int t, int) {
     p                   = {.format                 = ffn.gate_up_type,
                            .gate_columns           = 8,
                            .down_columns           = 8,
-                           .vector                 = t == 1,
-                           .atomic_output          = t >= 128,
+                           .direct_assignments     = t == 1,
+                           .atomic_output          = t > 64,
                            .single_block_grouping  = t <= 64,
                            .column_major_down      = t >= 1024,
                            .preserve_balanced_down = true,
+                           .token_ordered_groups   = t >= 1024,
                            .queued_ctas_per_sm     = 6,
                            .clamp_limit            = *ffn.clamp_limit};
     using kernel::block_scaled::Nvfp4CachePolicy;
     using kernel::block_scaled::Nvfp4Pipeline;
     p.nvfp4.pipeline = Nvfp4Pipeline::K256Deep;
     p.nvfp4.cache    = Nvfp4CachePolicy::BypassWeightL1;
+    if (t > 8 && t <= 16) p.gate_columns = p.down_columns = 16;
     if (t > 16 && t <= 64) {
         p.gate_columns = p.down_columns = 16;
         p.nvfp4.cache                   = Nvfp4CachePolicy::BypassL1;
@@ -115,7 +117,7 @@ Plan select_plan(const SwiGLUProfile& ffn, int t, int) {
 } // namespace
 
 const ShapePolicy& nvfp4_h4096_i2048_e288_k8() {
-    static constexpr int boundaries[]{2,   17,   33,   65,   128,  129,  257, 512,
+    static constexpr int boundaries[]{2,   9,    17,   33,   65,   129,  257, 512,
                                       769, 1024, 1025, 1537, 2049, 3073, 4097};
     static const ShapePolicy policy{.select                = select_plan,
                                     .allocation_boundaries = boundaries,

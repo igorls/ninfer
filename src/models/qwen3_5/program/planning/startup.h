@@ -39,6 +39,7 @@ struct SequencePlanningInputs {
     bool causal_scoring               = false;
     std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
+    std::size_t vision_memory_budget_bytes = 0;
 };
 
 struct SequencePlanImpl {
@@ -59,6 +60,7 @@ struct SequencePlanImpl {
     bool causal_scoring               = false;
     std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
+    std::size_t vision_memory_budget_bytes = 0;
     ResourceLayout persistent;
     WorkspaceSpec workspace;
     bool graph_probe                     = false;
@@ -81,6 +83,7 @@ finalize_sequence_plan_impl(std::unique_ptr<qwen3_5::detail::SequencePlannerImpl
 
 [[nodiscard]] std::unique_ptr<SequencePlanImpl>
 make_graph_probe_plan(std::shared_ptr<const execution::ModelProfile>, DeviceContext&,
-                      const EngineOptions&, std::shared_ptr<const moe::Plan>);
+                      const EngineOptions&, std::shared_ptr<const moe::Plan>,
+                      GraphProbeBacking = GraphProbeBacking::Inputs);
 
 } // namespace ninfer::models::qwen3_5::detail

@@ -102,6 +102,7 @@ public:
 
     [[nodiscard]] std::uint32_t frontier() const noexcept { return frontier_; }
 
+    void set_use(ContextUse, ContextMemory = ContextMemory::Device);
     void reset() noexcept;
 
 private:
@@ -111,7 +112,17 @@ private:
     HistoryDirectory* store_ = nullptr;
     HistoryId history_;
     std::uint32_t frontier_ = 0;
+    ContextUse use_         = ContextUse::Cache;
+    ContextMemory memory_   = ContextMemory::Device;
     friend class HistoryDirectory;
+};
+
+// Layout-owned ranges for a complete page and for exactly partial_columns of its final page.
+// Partial ranges must exclude every invalid column, including compressed/scale-plane suffixes.
+struct HistoryCopyLayout {
+    std::vector<RecordRangeCopy> full_page;
+    std::vector<RecordRangeCopy> partial_page;
+    std::uint32_t partial_columns = 0;
 };
 
 // Owns all binding reservations. Copies must complete before publishing or releasing a binding.
@@ -141,6 +152,7 @@ public:
     void publish_restores();
     void prepare_tail_copy();
     void prepare_mapping(ContextTransaction& transaction);
+    void prepare_conversion(ContextTransaction& transaction);
     [[nodiscard]] HistoryOwner commit();
 
 private:
@@ -157,6 +169,17 @@ private:
     bool write_tail_         = false;
     std::uint32_t frontier_  = 0;
     bool mapping_prepared_   = false;
+
+    struct ConversionPage {
+        PageId source;
+        PageId destination;
+        std::uint32_t columns;
+    };
+
+    std::vector<ConversionPage> conversion_pages_;
+    std::vector<PageDirectory::ReadLease> conversion_readers_;
+    HistoryCopyLayout conversion_layout_;
+    bool conversion_prepared_ = false;
     friend class HistoryDirectory;
 };
 
@@ -164,11 +187,13 @@ struct HistoryMetadataDemand {
     // An invalid history prepares a new binding; otherwise prepare this existing writer.
     HistoryId history;
     std::uint32_t growth_pages = 0;
+    std::uint32_t prefix_pages = 0;
 };
 
 struct HistoryBindingDemand {
     std::uint32_t restore_pages = 0;
     std::uint32_t growth_pages  = 0;
+    std::uint32_t logical_pages = 0;
     std::vector<RecordDemand> records;
     std::uint32_t tail_copies = 0;
     bool reuse_history        = false;
@@ -189,6 +214,7 @@ public:
                                                     std::uint32_t page_capacity,
                                                     std::uint32_t ranks = 1);
     [[nodiscard]] static std::size_t page_metadata_bytes() noexcept;
+    [[nodiscard]] static std::uint32_t capacity_for_metadata(std::size_t bytes) noexcept;
 
     HistoryDirectory(const HistoryDirectory&)            = delete;
     HistoryDirectory& operator=(const HistoryDirectory&) = delete;
@@ -221,6 +247,10 @@ public:
     released_pages(std::span<const HistoryPrefix* const> removed) const;
     [[nodiscard]] std::vector<HistoryId>
     released_histories(std::span<const HistoryPrefix* const> removed) const;
+    // Physical/logical objects released by dropping this active owner, after its work retires.
+    // Surviving prefixes, other history owners and source readers retain their objects.
+    [[nodiscard]] std::vector<PageId> released_pages(HistoryId owner) const;
+    [[nodiscard]] std::vector<HistoryId> released_histories(HistoryId owner) const;
 
     [[nodiscard]] HistoryBindingDemand
     binding_demand(const HistoryPrefix* source, std::uint32_t frontier, std::uint32_t peak_frontier,
@@ -231,6 +261,14 @@ public:
                     std::uint32_t peak_frontier, std::int32_t execution_row,
                     RecordReservation reservation, bool consume_source = false,
                     std::span<const std::uint32_t> placement = {});
+    [[nodiscard]] HistoryBindingDemand
+    conversion_demand(const HistoryPrefix& source, std::uint32_t frontier,
+                      std::uint32_t peak_frontier, std::span<const std::uint32_t> placement) const;
+    [[nodiscard]] HistoryBinding
+    prepare_conversion(const HistoryPrefix& source, std::uint32_t frontier,
+                       std::uint32_t peak_frontier, std::int32_t execution_row,
+                       RecordReservation reservation, std::span<const std::uint32_t> placement,
+                       HistoryCopyLayout layout);
     // These mutations belong to an accepted execution reservation. Their actions must execute
     // through retirement even after cancellation; discarding them does not roll back the directory.
     void deactivate(HistoryId history, ContextTransaction& transaction);
@@ -240,6 +278,8 @@ public:
     [[nodiscard]] HistoryMetadataDemand growth_metadata_demand(HistoryId history,
                                                                std::uint32_t pages) const;
     void release_growth(HistoryId history);
+    [[nodiscard]] bool growth_contributes(HistoryId, const RecordAssessment&,
+                                          bool metadata_pressure) const;
     void shrink_growth(HistoryId history, std::uint32_t pages);
     void settle_reservation(HistoryId history, std::uint32_t retain_through);
     // Replenishes the requested growth only after trimmed pages retire in this transaction.
@@ -273,49 +313,63 @@ public:
 private:
     static constexpr std::uint32_t kChunkPages = 32;
 
-    struct DirectoryNode;
+    struct Chunk;
 
-    class Directory {
+    class ChunkRef {
     public:
-        Directory() noexcept = default;
-        ~Directory();
-        Directory(const Directory&) noexcept;
-        Directory& operator=(const Directory&) noexcept;
-        Directory(Directory&&) noexcept;
-        Directory& operator=(Directory&&) noexcept;
+        ChunkRef() noexcept = default;
+        ~ChunkRef();
+        ChunkRef(const ChunkRef&) noexcept;
+        ChunkRef& operator=(const ChunkRef&) noexcept;
+        ChunkRef(ChunkRef&&) noexcept;
+        ChunkRef& operator=(ChunkRef&&) noexcept;
 
-        [[nodiscard]] DirectoryNode* get() const noexcept { return node_; }
+        [[nodiscard]] Chunk* get() const noexcept { return chunk_; }
 
-        [[nodiscard]] DirectoryNode* operator->() const noexcept { return node_; }
+        [[nodiscard]] Chunk* operator->() const noexcept { return chunk_; }
 
-        [[nodiscard]] DirectoryNode& operator*() const noexcept { return *node_; }
+        [[nodiscard]] Chunk& operator*() const noexcept { return *chunk_; }
 
-        explicit operator bool() const noexcept { return node_ != nullptr; }
+        explicit operator bool() const noexcept { return chunk_ != nullptr; }
 
         [[nodiscard]] bool unique() const noexcept;
         void reset() noexcept;
     private:
-        DirectoryNode* node_ = nullptr;
+        Chunk* chunk_ = nullptr;
 
-        explicit Directory(DirectoryNode* node) noexcept : node_(node) {}
+        explicit ChunkRef(Chunk* chunk) noexcept : chunk_(chunk) {}
         friend class HistoryDirectory;
     };
 
-    struct DirectoryNode {
-        Directory left;
-        Directory right;
-        std::array<PageId, kChunkPages> pages{};
+    struct LocalPage {
+        std::uint32_t index = 0, generation = 0;
+
+        LocalPage& operator=(PageId page) noexcept {
+            index      = page.index;
+            generation = page.generation;
+            return *this;
+        }
+    };
+
+    struct Chunk {
+        std::array<LocalPage, kChunkPages> pages{};
         HistoryDirectory* owner  = nullptr;
         std::uint32_t references = 0;
         std::uint32_t index      = 0;
         bool reserved            = false;
     };
 
+    struct PrefixReferences {
+        std::uint32_t frontier = 0;
+        std::uint32_t count    = 0;
+        std::array<std::uint32_t, 2> requests{};
+    };
+
     struct History {
-        Directory directory;
-        std::vector<DirectoryNode*> spare_nodes;
+        std::vector<ChunkRef> directory;
+        std::vector<Chunk*> spare_chunks;
         MetadataReservation branch_descriptor;
-        std::vector<std::pair<std::uint32_t, std::uint32_t>> prefixes;
+        std::vector<PrefixReferences> prefixes;
         RecordReservation reservation;
         std::vector<std::uint32_t> placement;
         std::optional<RowLease> row;
@@ -324,9 +378,10 @@ private:
         std::uint32_t frontier     = 0;
         std::uint32_t retained     = 0;
         std::uint32_t prefix_count = 0;
-        bool occupied              = false;
-        bool reserved              = false;
-        bool owned                 = false;
+        std::array<std::uint32_t, 2> request_frontiers{};
+        bool occupied = false;
+        bool reserved = false;
+        bool owned    = false;
     };
 
     [[nodiscard]] History& require(HistoryId history);
@@ -341,6 +396,7 @@ private:
     [[nodiscard]] std::uint64_t writer(HistoryId history) const noexcept;
     void add_prefix(HistoryId history, std::uint32_t frontier);
     void remove_prefix(HistoryId history, std::uint32_t frontier) noexcept;
+    void update_request_prefix(HistoryId, std::uint32_t frontier, ContextMemory, bool add);
     void release_owner(HistoryId history) noexcept;
     void deactivate_retired(HistoryId history);
     void collect(HistoryId history);
@@ -350,35 +406,32 @@ private:
     void abort(HistoryBinding& binding) noexcept;
     [[nodiscard]] HistoryOwner commit(HistoryBinding& binding);
     [[nodiscard]] PageId membership(const History& history, std::uint32_t index) const noexcept;
-    [[nodiscard]] PageId& directory_slot(History&, std::uint32_t index);
-    [[nodiscard]] Directory prefix_directory(History&, const Directory& root, std::uint64_t width,
-                                             std::uint32_t count);
+    [[nodiscard]] LocalPage& directory_slot(History&, std::uint32_t index);
+    void copy_prefix(History& destination, const History& source, std::uint32_t pages);
     void branch_owner(HistoryOwner& history, std::uint32_t frontier,
                       ContextTransaction& transaction);
 
     MetadataAccount metadata_;
     PageDirectory* pages_;
     std::uint32_t page_capacity_;
-    std::uint64_t directory_capacity_ = kChunkPages;
     std::vector<std::uint32_t> row_generations_;
     std::vector<bool> row_active_;
-    DirectorySlots<DirectoryNode> nodes_;
-    std::vector<DirectoryNode*> free_nodes_;
+    DirectorySlots<Chunk> chunks_;
+    std::vector<Chunk*> free_chunks_;
     DirectorySlots<History> histories_;
     std::uint32_t initialized_     = 0;
     std::uint32_t occupied_        = 0;
     std::uint32_t next_generation_ = 1;
-    std::uint32_t tree_depth_      = 0;
-    void reserve_nodes(History&, std::size_t count);
+    void reserve_chunks(History&, std::size_t count);
     void reserve_branch(History&);
     void release_spares(History&) noexcept;
     void trim_prepared_metadata(History&, std::uint32_t records) noexcept;
-    [[nodiscard]] Directory allocate_node(History&, const DirectoryNode* source = nullptr);
-    void release_node(DirectoryNode*) noexcept;
+    [[nodiscard]] ChunkRef allocate_chunk(History&, const Chunk* source = nullptr);
+    void release_chunk(Chunk*) noexcept;
 
     struct MetadataRetirement {
         std::vector<std::uint32_t> histories;
-        std::vector<std::uint32_t> nodes;
+        std::vector<std::uint32_t> chunks;
     };
 
     [[nodiscard]] MetadataRetirement metadata_retirement(std::span<const HistoryId>) const;

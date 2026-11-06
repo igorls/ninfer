@@ -42,6 +42,24 @@ int q8_a16_conformance() {
                                        .second_row      = 5120,
                                        .route_starts    = kK2048RouteStarts,
                                        .route_interiors = kK2048RouteInteriors});
+    // Both supported model widths, independent inputs, and packed row views.
+    // Existing cases above retain read-only input alias coverage at every route boundary.
+    constexpr std::array<std::int32_t, 3> kDistinct5120{24, 86, 961};
+    constexpr std::array<std::int32_t, 4> kDistinct2048{16, 33, 1346, 4096};
+    for (const auto k : std::array{5120, 2048}) {
+        failures += ninfer::test::linear_pair::run_q8_a16_shape(
+            "Q8_A16 LinearPair distinct inputs",
+            ShapeCase{.k = k,
+                      .seed = 439U,
+                      .parents = WeightParents::Shared,
+                      .parent_rows = 6144,
+                      .first_row = 4096,
+                      .second_row = 5120,
+                      .route_starts = {},
+                      .route_interiors = k == 5120 ? std::span<const std::int32_t>(kDistinct5120)
+                                                   : std::span<const std::int32_t>(kDistinct2048),
+                      .distinct_inputs = true});
+    }
     return failures;
 }
 

@@ -1,12 +1,13 @@
 #pragma once
 
 #include "core/layout.h"
+#include "models/common/graph_preparation.h"
 
 #include "models/common/context/directory.h"
 #include "models/qwen3_5/execution/profile.h"
-#include "models/common/qwen/vision/vision.h"
 #include "ninfer/types.h"
 #include "runtime/contract/resources.h"
+#include "runtime/contract/execution.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -29,10 +30,12 @@ using ContextAssessment = context::ContextAssessment;
 using ContextReleaseSet = context::ContextReleaseSet;
 
 struct ResourceReservation {
-    bool reserved = false;
+    runtime::UnitReservationStatus status = runtime::UnitReservationStatus::ContextUnavailable;
     ContextAssessment assessment;
 
-    explicit operator bool() const noexcept { return reserved; }
+    explicit operator bool() const noexcept {
+        return status == runtime::UnitReservationStatus::Granted;
+    }
 };
 
 inline constexpr runtime::KvPoolId kTextKvPool{0};
@@ -72,8 +75,8 @@ struct SessionPlan {
     TransferWork state_transfer;
     std::optional<LayoutRegion> dflash_local_group;
     std::optional<TransferWork> dflash_local_transfer;
-    std::optional<qwen::VisionWorkspacePlan> vision_workspace;
-    bool causal_scoring = false;
+    std::uint32_t vision_max_features = 0;
+    bool causal_scoring               = false;
 };
 
 class SequencePlan {
@@ -101,7 +104,8 @@ private:
     friend SessionPlan plan_session(const SequencePlan&);
     friend std::unique_ptr<RankProgram> create_rank_program(const execution::Parameters&,
                                                             SequencePlan&&, DeviceContext&,
-                                                            const StartupObserver&);
+                                                            const StartupObserver&,
+                                                            GraphPreparationMode);
 };
 
 class SequencePlanner {
@@ -131,8 +135,8 @@ private:
                                                     std::shared_ptr<const moe::Plan> = {});
 [[nodiscard]] SequencePlanner make_sequence_planner(const execution::Parameters&, DeviceContext&,
                                                     const EngineOptions&);
-[[nodiscard]] std::unique_ptr<RankProgram> create_rank_program(const execution::Parameters&,
-                                                               SequencePlan&&, DeviceContext&,
-                                                               const StartupObserver&);
+[[nodiscard]] std::unique_ptr<RankProgram>
+create_rank_program(const execution::Parameters&, SequencePlan&&, DeviceContext&,
+                    const StartupObserver&, GraphPreparationMode = GraphPreparationMode::Complete);
 
 } // namespace ninfer::models::qwen3_5

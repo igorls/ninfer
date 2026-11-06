@@ -3,7 +3,8 @@
 #include "models/qwen4_exp/program/planning.h"
 #include "models/qwen4_exp/session/planning.h"
 #include "models/qwen4_exp/work.h"
-#include "models/qwen4_exp/parallel/execution.h"
+#include "models/common/parallel_execution.h"
+#include "models/common/graph_preparation.h"
 
 namespace ninfer::models::qwen4_exp {
 namespace execution {
@@ -24,9 +25,10 @@ public:
     RankProgram(const RankProgram&)            = delete;
     RankProgram& operator=(const RankProgram&) = delete;
 
-    [[nodiscard]] runtime::ExecutionCapacity capacity() const noexcept;
+    [[nodiscard]] static constexpr runtime::ExecutionCapacity capacity() noexcept { return {1, 1}; }
+
     [[nodiscard]] SessionPlan session_plan() const;
-    void prepare_execution();
+    GraphPreparationSample prepare_execution(GraphPreparationMode = GraphPreparationMode::Complete);
     void release_execution();
     void validate_work(const Work&, runtime::FrameKind) const;
     void start(runtime::ExecutionRequest<ExecutionTypes>&&);
@@ -38,10 +40,12 @@ public:
     [[nodiscard]] bool can_discard(runtime::ExecutionTicket) const;
     [[nodiscard]] std::optional<runtime::ExecutionEvent<ExecutionTypes>> poll();
     void drain();
+    void wait_for_device() const;
     [[nodiscard]] RankMemoryUsage observe_resources() const;
     [[nodiscard]] std::optional<GraphMemorySummary> graph_memory_observation() const;
     [[nodiscard]] RankMemoryBudget resource_budget() const;
     void reset_measurement_peaks() noexcept;
+    [[nodiscard]] MemorySpan input_storage();
 
 private:
     std::unique_ptr<detail::RankProgramImpl> impl_;

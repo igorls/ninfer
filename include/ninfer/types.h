@@ -39,24 +39,19 @@ enum class EnginePurpose : std::uint8_t {
 
 
 // Device memory left for the shared desktop and other applications.
-inline constexpr std::size_t kDefaultDesktopReserveBytes = 8ULL * 1024ULL * 1024ULL * 1024ULL;
-inline constexpr std::size_t kDefaultContextSlackFloorBytes = 1024ULL * 1024ULL * 1024ULL;
-inline constexpr std::size_t kDefaultContextHeadroomBytes = 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kDefaultDesktopReserveBytes = 8ULL << 30;
+inline constexpr std::size_t kDefaultMemoryHeadroomBytes = 1ULL << 30;
 
 struct ContextCapacityPolicy {
-    ContextCapacityMode mode             = ContextCapacityMode::Automatic;
-    std::size_t explicit_bytes           = 0;
-    std::size_t automatic_headroom_bytes = kDefaultContextHeadroomBytes;
+    ContextCapacityMode mode   = ContextCapacityMode::Automatic;
+    std::size_t explicit_bytes = 0;
 
     [[nodiscard]] static constexpr ContextCapacityPolicy
     explicit_capacity(std::size_t bytes) noexcept {
-        return ContextCapacityPolicy{ContextCapacityMode::Explicit, bytes, 0};
+        return ContextCapacityPolicy{ContextCapacityMode::Explicit, bytes};
     }
 
-    [[nodiscard]] static constexpr ContextCapacityPolicy
-    automatic(std::size_t headroom_bytes = kDefaultContextHeadroomBytes) noexcept {
-        return ContextCapacityPolicy{ContextCapacityMode::Automatic, 0, headroom_bytes};
-    }
+    [[nodiscard]] static constexpr ContextCapacityPolicy automatic() noexcept { return {}; }
 };
 
 enum class ProposalHead : std::uint8_t {
@@ -84,6 +79,10 @@ enum class StartupPhase : std::uint8_t {
     HostContextPin,
     CudaGraphPrepare,
     CudaGraphCalibration,
+    CommunicationInitialize,
+    CommunicationWarmup,
+    RuntimeMemoryCheck,
+    RuntimeRelease,
     EngineFinalize,
 };
 
@@ -99,6 +98,11 @@ enum class StartupProgressUnit : std::uint8_t {
     Bytes,
 };
 
+struct StartupOrigin {
+    std::uint32_t rank = 0, node = 0;
+    friend bool operator==(const StartupOrigin&, const StartupOrigin&) = default;
+};
+
 struct StartupEvent {
     StartupPhase phase                = StartupPhase::EngineStartup;
     StartupStatus status              = StartupStatus::Begin;
@@ -106,6 +110,9 @@ struct StartupEvent {
     std::uint64_t current             = 0;
     std::uint64_t total               = 0;
     std::uint64_t elapsed_ns          = 0;
+    std::optional<StartupOrigin> origin;
+    std::uint32_t attempt    = 0;
+    std::uint64_t invocation = 0;
 };
 
 struct StartupObserver {
@@ -199,10 +206,11 @@ struct EngineOptions {
     int device                      = 0;
     std::uint32_t max_context       = 8192; // Logical ceiling of one request or score window.
     ContextCapacityPolicy context_capacity;
+    // Per-rank planning allowance that startup allocations may consume. Zero adds no allowance.
+    std::size_t memory_headroom_bytes  = kDefaultMemoryHeadroomBytes;
     std::uint32_t max_concurrency      = 1;
     // Reduce startup-fixed lanes until their complete context working sets fit.
     bool clamp_concurrency_to_pool = false;
-    std::size_t min_slack_floor_bytes = kDefaultContextSlackFloorBytes;
     // Admission uses device-wide free memory minus this desktop reserve.
     std::size_t desktop_reserve_bytes = kDefaultDesktopReserveBytes;
     std::uint32_t max_pending_requests = 16;
@@ -217,6 +225,7 @@ struct EngineOptions {
     // Zero selects a bounded worker count from the detected host concurrency.
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
+    std::size_t vision_memory_budget_bytes = 1ULL << 30;
     bool use_cuda_graph                    = true;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
@@ -228,11 +237,6 @@ struct EngineOptions {
     // Routed-expert observation. Startup reserves the trace buffers only when it is set, and a
     // model without routed experts rejects it.
     std::shared_ptr<ExpertRouteObserver> expert_route_observer;
-};
-
-enum class SamplingMode : std::uint8_t {
-    Thinking,
-    NonThinking,
 };
 
 // Immutable model-owned values used when a request does not override a sampling field. Seed is
@@ -252,10 +256,6 @@ struct SamplingPreset {
 struct ModelSamplingDefaults {
     SamplingPreset thinking;
     SamplingPreset non_thinking;
-
-    [[nodiscard]] constexpr const SamplingPreset& for_mode(SamplingMode mode) const noexcept {
-        return mode == SamplingMode::Thinking ? thinking : non_thinking;
-    }
 };
 
 // Public request-side overrides. std::nullopt means "use the registered model/mode default";
@@ -302,7 +302,7 @@ struct StopPolicy {
 };
 
 struct ThinkingControlOptions {
-    // Positive maximum accepted model-origin tokens while the Qwen thinking phase remains open.
+    // Positive maximum accepted model-origin tokens while the model thinking phase remains open.
     // Omitted means unlimited. Injected target-control tokens consume the total output budget but
     // not this model-origin budget.
     std::optional<std::uint32_t> budget;
@@ -399,7 +399,7 @@ struct ExecutionOptions {
 struct OutputOptions {
     bool raw                     = false;
     bool preserve_special_tokens = false;
-    // Presentation constraint supplied by the protocol adapter. It bounds only Qwen's emitted
+    // Presentation constraint supplied by the protocol adapter. It bounds the model's emitted
     // function-name grammar; it does not require the name to match a currently declared tool.
     std::uint32_t tool_name_max_length = 128;
 };
@@ -554,6 +554,7 @@ struct ChatMessage {
     std::string reasoning_content;
     std::vector<ToolCall> tool_calls;
     std::string tool_call_id;
+    bool tool_result_is_error = false;
 };
 
 enum class ReasoningEffort : std::uint8_t {
@@ -612,6 +613,11 @@ enum class PromptContinuationMode : std::uint8_t {
     ContinueFinalAssistant,
 };
 
+struct PromptDefaults {
+    std::optional<bool> enable_thinking;
+    std::optional<bool> preserve_thinking;
+};
+
 struct PromptOptions {
     PromptContinuationMode continuation = PromptContinuationMode::NewAssistantTurn;
     std::optional<bool> enable_thinking;
@@ -621,6 +627,7 @@ struct PromptOptions {
     std::string chat_template_kwargs_json;
     bool add_vision_id = false;
     std::vector<std::string> tool_jsons;
+    PromptDefaults defaults;
 };
 
 enum class PromptCacheMarkerKind : std::uint8_t {
@@ -656,6 +663,7 @@ constexpr SharedCandidateEvidence& operator|=(SharedCandidateEvidence& left,
 enum class PromptCacheMarkerLocation : std::uint8_t {
     MessageBoundary,
     MessagePartBoundary,
+    MessageContentBoundary,
     LeadingInstructionBoundary,
     ToolBoundary,
 };
@@ -671,6 +679,9 @@ struct PromptCacheMarker {
     // For MessagePartBoundary, after_message_count identifies the containing message using a
     // one-based count and this value identifies the number of serialized parts within it.
     std::uint32_t after_message_part_count = 0;
+    // MessageContentBoundary addresses the complete semantic prefix of an assistant message.
+    std::uint32_t after_tool_call_count = 0;
+    std::uint32_t reasoning_bytes       = 0;
 
     [[nodiscard]] friend constexpr bool operator==(PromptCacheMarker,
                                                    PromptCacheMarker) noexcept = default;
@@ -694,6 +705,9 @@ struct PromptInput {
 };
 
 enum class RequestErrorKind : std::uint8_t {
+    ConflictingPromptOptions,
+    UnsupportedPromptContinuation,
+    UnsupportedOutputCombination,
     InvalidToolConstraint,
     InvalidToolOutput,
     InvalidGrammar,
@@ -925,7 +939,7 @@ struct RequestStats {
     // Entry B-1 records this request's full step exposure at actual decode batch B.
     // Summing a complete cohort duplicates each such step B times.
     std::vector<ExecutionExposure> decode_by_batch;
-    std::array<DurationCounter, 4> max_rank_gpu{};
+    GpuIntervalCounters max_rank_gpu{};
     GenerationEngineTiming engine_timing;
     GenerationSchedulingStats scheduling;
     GenerationAdmissionStats admission;

@@ -5,7 +5,7 @@
 #include "models/qwen4_exp/ple/parameters.h"
 #include "ninfer/ops/moe.h"
 #include "ninfer/ops/gated_residual.h"
-#include "core/weight_bank.h"
+#include "models/common/moe/weights.h"
 
 #include <memory>
 #include <variant>
@@ -43,6 +43,7 @@ struct MoeProfile {
     ops::MoeProfile math;
     ExpertBankId bank;
     ops::ExpertActivationDivisors activation_divisors;
+    ops::ExpertSubsetKind subset = ops::ExpertSubsetKind::All;
 };
 
 struct BlockProfile {
@@ -89,6 +90,7 @@ struct ModelProfile {
 
     LoadOptions options;
     std::uint32_t public_tokens;
+    std::uint32_t control_token_limit = 0;
     TextProfile text;
     std::optional<MtpProfile> mtp;
     std::optional<qwen::VisionProfile> vision;
@@ -97,7 +99,8 @@ struct ModelProfile {
 
 [[nodiscard]] std::shared_ptr<const ModelProfile> describe_model(const ModelDefinition&);
 [[nodiscard]] std::shared_ptr<const ModelProfile>
-describe_model(const ModelDefinition&, std::span<const BoundWeight>, const RankPlan&);
+describe_model(const ModelDefinition&, std::span<const BoundWeight>,
+               std::span<const moe::ExpertDescription>, const RankPlan&);
 [[nodiscard]] std::size_t qsa_projection_workspace_bytes(const QsaProfile&, std::int32_t first,
                                                          std::int32_t last);
 } // namespace execution

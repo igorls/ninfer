@@ -46,6 +46,7 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
                                            const PreparedRequest& prepared, std::string client) {
     RequestLogContext context;
     context.id                                 = id;
+    context.engine_request_id                  = prepared.generation.request_id();
     context.http_request_id                    = metadata.http_request_id;
     context.response_id                        = metadata.response_id;
     context.protocol                           = std::move(protocol);

@@ -8,9 +8,10 @@ ninfer_add_op_bench(ninfer_dynamic_grouped_conv_prepare_bench
 ninfer_add_op_bench(ninfer_linear_dynamic_grouped_conv_add_bench
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_dynamic_grouped_conv_add_bench.cu")
 ninfer_add_op_bench(ninfer_kimi_delta_attention_bench
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/kimi_delta_attention_bench.cu")
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_attention/kimi_delta_attention/main.cu")
 ninfer_add_op_bench(ninfer_rope_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/rope_bench.cu")
 ninfer_add_op_bench(ninfer_rmsnorm_rope_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/rmsnorm_rope_bench.cu")
+ninfer_add_op_bench(ninfer_axial_rope_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/axial_rope_bench.cu")
 ninfer_add_op_bench(ninfer_add_bias_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/add_bias_bench.cu")
 ninfer_add_op_bench(ninfer_gelu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/gelu_bench.cu")
 ninfer_add_op_bench(ninfer_layer_norm_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/layer_norm_bench.cu")
@@ -55,6 +56,12 @@ ninfer_add_op_bench(ninfer_vocabulary_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/v
 ninfer_add_op_bench(ninfer_sampling_select_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/sampling_select_bench.cu")
 ninfer_add_op_bench(ninfer_moe_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/moe/main.cu")
 ninfer_add_op_bench(ninfer_moe_block_scaled_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/moe/block_scaled.cu")
+if(NINFER_TARGET STREQUAL "dgx_spark")
+  ninfer_add_op_bench(ninfer_moe_tp2_bench
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/moe/tp2.cu"
+            "${PROJECT_SOURCE_DIR}/tests/ops/moe/tp2_fixture.cu")
+  target_include_directories(ninfer_moe_tp2_bench PRIVATE "${PROJECT_SOURCE_DIR}/tests")
+endif()
 if(NINFER_TARGET STREQUAL "rtx5090")
   ninfer_add_op_bench(ninfer_moe_cpu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/moe/cpu.cpp")
   target_link_libraries(ninfer_moe_cpu_bench PRIVATE ninfer_cpu_executor)
@@ -68,13 +75,16 @@ ninfer_add_op_bench(ninfer_proposal_remap_bench SOURCES "${CMAKE_CURRENT_LIST_DI
 include("${CMAKE_CURRENT_LIST_DIR}/gdn_input_proj/benchmarks.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/ple/benchmarks.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/softmax_attention/qsa/benchmarks.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/softmax_attention/kpool_mla/benchmarks.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/linear_attention/gated_delta_net/benchmarks.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/rmsnorm/benchmarks.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/gdn_control/benchmarks.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/gated_residual/benchmarks.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/mhc/benchmarks.cmake")
 
 ninfer_add_op_bench(ninfer_linear_swiglu_clamped_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_swiglu_clamped.cu")
 
 ninfer_add_op_bench(ninfer_swiglu_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/swiglu_bench.cu")
 ninfer_add_op_bench(ninfer_sigmoid_route_bench
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/sigmoid_route_bench.cu")
+ninfer_add_op_bench(ninfer_linear_bias_bench SOURCES "${CMAKE_CURRENT_LIST_DIR}/linear_bias.cu")

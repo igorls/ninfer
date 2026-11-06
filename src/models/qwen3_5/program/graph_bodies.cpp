@@ -6,25 +6,24 @@
 
 namespace ninfer::models::qwen3_5::detail {
 
-void RankProgramImpl::initialize_graphs() {
-    if (!use_cuda_graph || resources.frame.spec.causal_scoring) return;
+GraphPreparationSample RankProgramImpl::initialize_graphs(GraphPreparationMode mode) {
+    if (!use_cuda_graph || resources.frame.spec.causal_scoring) return {};
     if (graphs) throw std::logic_error("Qwen3.5 graphs are already initialized");
-    device.synchronize();
-    const auto before = device_memory_snapshot(device.device());
+    if (mode == GraphPreparationMode::Complete) {
+        initialize_graphs(GraphPreparationMode::Warmup);
+        return initialize_graphs(GraphPreparationMode::Capture);
+    }
+    GraphPreparation observation(device, mode);
     graphs.emplace(GraphSpec{capacity, max_concurrency, draft_window, backend});
     GraphBodies bodies;
-    bodies.prologue = [this](const GraphInvocation& call) {
-        if (call.phase == GraphPhase::Verify) {
-            upload_positions(call.width, call.batch);
-        } else {
-            if (!resources.dflash) upload_ingress();
-            upload_input(call.width, call.batch);
-        }
+    bodies.prologue = [this, capture = observation.capturing()](const GraphInvocation& call) {
+        gpu_timer.begin_target(capture);
+        if (call.phase != GraphPhase::Verify && !resources.dflash) upload_ingress();
     };
     bodies.text = [this](const GraphInvocation& call) {
         auto& frame      = resources.frame;
         const auto batch = static_cast<int>(call.batch), width = static_cast<int>(call.width);
-        auto input = frame.input_view(width, batch);
+        auto input = frame.decode_view(width, batch);
         execution::TextInputs inputs{input.ids,
                                      input.cache_positions,
                                      input.rope_positions,
@@ -48,10 +47,12 @@ void RankProgramImpl::initialize_graphs() {
                                          resources.moe.get()},
             std::move(inputs), update, call.envelope, input.hidden, feature ? &*feature : nullptr);
     };
-    bodies.project = [this](const GraphInvocation& call) {
+    bodies.project = [this, capture = observation.capturing()](const GraphInvocation& call) {
         project_decode(call.batch, call.width);
+        gpu_timer.end_target(capture);
     };
-    bodies.draft = [this](const GraphInvocation& call) {
+    bodies.draft = [this, capture = observation.capturing()](const GraphInvocation& call) {
+        gpu_timer.begin_draft(capture);
         if (backend == SpeculativeBackend::Mtp) {
             upload_ingress();
             run_mtp_draft(call.batch, draft_window, std::max(1U, call.profile.max));
@@ -59,21 +60,33 @@ void RankProgramImpl::initialize_graphs() {
             append_draft_history(call.batch, {0, draft_window + 1});
             run_dflash_draft(call.batch, 0, call.profile.max);
         }
+        gpu_timer.end_draft(capture);
     };
     bodies.decision = [this](const GraphInvocation& call) {
         decide_decode(call.batch, call.width);
     };
     if (backend == SpeculativeBackend::Mtp)
-        bodies.mtp_history = [this](std::uint32_t batch, std::uint32_t columns) {
-            rebuild_mtp_history(batch, columns);
+        bodies.mtp_commit = [this](std::uint32_t batch, DecodeGraphSection* repair,
+                                   DecodeGraphSection* counts) {
+            execute_mtp_commit(batch, true, true, repair, counts);
         };
-    bodies.readback = [this](const GraphInvocation&) { readback_decode(); };
-    graphs->prepare(resources, parameters, device, bodies);
-    device.synchronize();
-    graph_memory = GraphMemorySummary{.preparation_increment_bytes = device_memory_growth(
-                                          before, device_memory_snapshot(device.device()))};
+    bodies.readback = [this](const GraphInvocation& call) {
+        readback_decode(call.batch, call.width > 1);
+    };
+    graphs->prepare(resources, parameters, device, bodies, observation);
+    observation.checkpoint();
+    const auto result = observation.sample();
+    if (!graph_memory) graph_memory.emplace();
+    if (observation.capturing()) {
+        graph_memory->preparation_increment_bytes = result.increment_bytes;
+        graph_memory->preparation_peak_bytes      = result.peak_bytes;
+    } else {
+        graphs.reset();
+        graph_memory->warmup_increment_bytes = result.increment_bytes;
+    }
     resources.work.reset();
     reset_measurement_peaks();
+    return result;
 }
 
 void RankProgramImpl::release_graphs() {

@@ -1,4 +1,5 @@
 #include "runtime/engine/context_capacity.h"
+#include "core/wide_multiply.h"
 
 #include <algorithm>
 #include <array>
@@ -62,7 +63,7 @@ void validate_policy(const ContextCapacityPolicy& policy) {
         if (!policy.explicit_bytes) return;
         break;
     case ContextCapacityMode::Explicit:
-        if (policy.explicit_bytes && !policy.automatic_headroom_bytes) return;
+        if (policy.explicit_bytes) return;
         break;
     }
     throw std::invalid_argument("inconsistent Context capacity policy");
@@ -134,9 +135,8 @@ resolve_group_context_capacity(const ContextCapacityPolicy& policy,
         const auto& offer  = offers[rank];
         auto geometry      = describe_context_pool(offer.plan.records);
         const auto minimum = minimum_bytes(offer.plan, geometry);
-        const auto fixed =
-            checked_add(offer.plan.fixed_device_bytes, policy.automatic_headroom_bytes);
-        const auto usable = offer.available_bytes > fixed ? offer.available_bytes - fixed : 0;
+        const auto fixed   = offer.plan.fixed_device_bytes;
+        const auto usable  = offer.available_bytes > fixed ? offer.available_bytes - fixed : 0;
         const auto selected =
             policy.mode == ContextCapacityMode::Explicit ? policy.explicit_bytes : minimum;
         if (selected < minimum || selected > usable)
@@ -206,13 +206,36 @@ resolve_group_context_capacity(const ContextCapacityPolicy& policy,
                 checked_add(owner.offer.plan.fixed_device_bytes, owner.minimum),
             .runtime_reservation_bytes     = runtime_bytes,
             .available_after_weights_bytes = owner.offer.available_bytes,
-            .automatic_headroom_bytes      = policy.automatic_headroom_bytes,
             .planned_slack_bytes   = owner.offer.available_bytes - runtime_bytes - device_control,
             .metadata_budget_bytes = owner.metadata(owner.selected),
             .control_reservation_bytes = control_bytes,
+            .reference                 = owner.offer.plan.reference,
         });
     }
     return result;
+}
+
+std::uint64_t
+estimate_context_token_capacity(std::span<const ContextCapacityResolution> capacities) {
+    if (capacities.empty())
+        throw std::invalid_argument("Context capacity estimate requires rank capacities");
+    const auto& reference = capacities.front().reference;
+    std::uint64_t tokens  = UINT64_MAX;
+    for (const auto& capacity : capacities) {
+        const auto& local = capacity.reference;
+        if (!capacity.block_bytes || !local.device_bytes || !local.tokens_per_request ||
+            !local.request_count || local.tokens_per_request != reference.tokens_per_request ||
+            local.request_count != reference.request_count)
+            throw std::invalid_argument(
+                "Context capacity estimate requires matching model references");
+        const auto usable   = capacity.device_bytes / capacity.block_bytes * capacity.block_bytes;
+        const auto represented_tokens =
+            std::uint64_t(local.request_count) * local.tokens_per_request;
+        const auto estimate = divide_wide_saturating(multiply_wide(usable, represented_tokens),
+                                                     local.device_bytes);
+        tokens = std::min(tokens, estimate);
+    }
+    return tokens;
 }
 
 ContextCapacityResolution

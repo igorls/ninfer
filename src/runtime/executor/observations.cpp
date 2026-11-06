@@ -12,12 +12,14 @@ template <class T>
 auto fields(T& v) {
     using Value = std::remove_cv_t<T>;
     if constexpr (std::is_same_v<Value, GraphMemorySummary>)
-        return std::tie(v.rebuild_estimate_bytes, v.preparation_increment_bytes,
-                        v.calibration_increment_bytes, v.calibration_retained_bytes);
-    else if constexpr (std::is_same_v<Value, VisionWorkspaceMemorySummary>)
-        return std::tie(v.handoff_in_persistent, v.aggregate_prompt_tokens, v.max_item_tokens,
-                        v.general_capacity_bytes, v.encode_required_bytes, v.handoff_offset_bytes,
-                        v.handoff_capacity_bytes, v.handoff_active_bytes, v.handoff_peak_bytes);
+        return std::tie(v.rebuild_estimate_bytes, v.warmup_increment_bytes,
+                        v.preparation_increment_bytes, v.preparation_peak_bytes,
+                        v.calibration_increment_bytes, v.calibration_peak_bytes,
+                        v.rebuild_increment_bytes);
+    else if constexpr (std::is_same_v<Value, VisionMemorySummary>)
+        return std::tie(v.budget_bytes, v.max_window_features, v.encoder_workspace_bytes,
+                        v.output_capacity_bytes, v.input_staging_bytes, v.output_active_bytes,
+                        v.output_peak_bytes);
     else if constexpr (std::is_same_v<Value, MoeMemorySummary>)
         return std::tie(v.host_weights_bytes, v.registered_host_bytes, v.cache_bytes, v.fixed_bytes,
                         v.window_bytes, v.window_count, v.used_bytes, v.target_bytes, v.ready_bytes,
@@ -48,23 +50,31 @@ auto fields(T& v) {
     else if constexpr (std::is_same_v<Value, CommunicationWork>)
         return std::tie(v.calls, v.payload_bytes);
     else if constexpr (std::is_same_v<Value, CommunicationStatistics>)
-        return std::tie(v.group, v.size, v.eager, v.graph);
+        return std::tie(v.group, v.size, v.eager, v.graph, v.startup_memory);
+    else if constexpr (std::is_same_v<Value, CommunicationMemory>)
+        return std::tie(v.tracked_device_bytes, v.persistent_device_bytes,
+                        v.suspendable_device_bytes);
     else if constexpr (std::is_same_v<Value, RankHostStatistics>)
         return std::tie(v.submit_ns, v.progress_ns, v.supply_ns, v.commit_ns, v.discard_ns);
     else if constexpr (std::is_same_v<Value, GpuExecutionObservation>)
         return std::tie(v.result_stream_ns, v.commit_stream_ns, v.prefill_stream_ns,
-                        v.vision_stream_ns);
+                        v.vision_stream_ns, v.draft_stream_ns, v.target_stream_ns);
+    else if constexpr (std::is_same_v<Value, AttentionWorkCounters>)
+        return std::tie(v.forwards, v.rows, v.valid_positions, v.scheduled_positions);
+    else if constexpr (std::is_same_v<Value, AttentionWorkObservation>)
+        return std::tie(v.kind, v.work);
     else if constexpr (std::is_same_v<Value, RankExecutionObservation>)
         return std::tie(v.path, v.host, v.gpu, v.communication_eager, v.communication_graph,
                         v.workspace_peak_bytes, v.measurement_peak_bytes, v.expert_upload_bytes,
-                        v.ple_upload_bytes);
+                        v.ple_upload_bytes, v.attention);
     else {
         static_assert(std::is_same_v<Value, RankMemoryBudget>);
         return std::tie(v.limit_bytes, v.runtime_reservation_bytes,
                         v.minimum_runtime_reservation_bytes, v.context_capacity_bytes,
                         v.minimum_context_capacity_bytes, v.context_control_budget_bytes,
                         v.available_after_weights_bytes, v.available_after_startup_bytes,
-                        v.headroom_bytes, v.planned_slack_bytes, v.retained_bytes, v.graphs);
+                        v.headroom_bytes, v.host_reservation_bytes, v.planned_slack_bytes,
+                        v.retained_bytes, v.graphs);
     }
 }
 
@@ -139,6 +149,15 @@ RankSnapshot rank_snapshot(wire::Decoder& in) {
 }
 
 void encode(wire::Encoder& out, const RankExecutionObservation& value) { write(out, value); }
+
+std::size_t rank_execution_observation_capacity() {
+    RankExecutionObservation value;
+    for (const auto field : kGpuIntervalFields) value.gpu.*field = 0;
+    value.attention.emplace();
+    wire::Encoder out;
+    encode(out, value);
+    return std::move(out).take().size();
+}
 
 RankExecutionObservation rank_execution_observation(wire::Decoder& in) {
     RankExecutionObservation result;

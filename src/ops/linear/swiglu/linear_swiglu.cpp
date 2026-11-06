@@ -5,6 +5,7 @@
 #include "ops/linear/swiglu/fp8/dispatch.h"
 #include "ops/linear/swiglu/nvfp4/dispatch.h"
 #include "ops/linear/swiglu/dispatch.h"
+#include "ops/linear/common/operands.h"
 #include "ops/common/host/operands.h"
 
 #include <cstdint>
@@ -36,11 +37,7 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
     }
     detail::validate_swiglu_geometry(qtype, gate_up_rows, input_rows);
     if (qtype == QType::BF16) return 0;
-    if (qtype == QType::Q8_G32_FP16) {
-        (void)detail::select_q8_linear_swiglu(gate_up_rows, input_rows, min_tokens);
-        (void)detail::select_q8_linear_swiglu(gate_up_rows, input_rows, max_tokens);
-        return 0;
-    }
+    if (qtype == QType::Q8_G32_FP16) return 0;
     if (qtype == QType::Q4_G64_FP16) {
         return detail::q4_linear_swiglu_capacity_workspace_bytes(gate_up_rows, input_rows,
                                                                  min_tokens, max_tokens);
@@ -80,10 +77,7 @@ static void execute_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor
     const auto& w = gate_up_weight;
     if (clamped && (!std::isfinite(limit) || limit <= 0.0f))
         throw std::invalid_argument("linear_swiglu: clamp limit must be finite and positive");
-    if (clamped && !((w.qtype == QType::NVFP4 && w.n == 12288 && w.k == 4096) ||
-                     (w.qtype == QType::BF16 && w.n == 2048 && w.k == 4096)))
-        throw std::invalid_argument("linear_swiglu: unsupported clamped geometry");
-    detail::validate_swiglu_geometry(w.qtype, w.n, w.k);
+    detail::validate_swiglu_geometry(w.qtype, w.n, w.k, clamped);
     const int t = x.ne[1];
     if (t <= 0 || x.ne[0] != w.k || out.ne[0] != w.n / 2 || x.ne[2] != 1 || x.ne[3] != 1 ||
         out.ne[1] != t || out.ne[2] != 1 || out.ne[3] != 1 || w.padded_shape[0] != w.n ||
@@ -95,12 +89,8 @@ static void execute_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor
 
 #if NINFER_TARGET_SPARK
     if (w.qtype == QType::BF16) {
-        if (w.ndim != 2 || w.shape[0] != w.n || w.shape[1] != w.k ||
-            w.layout != QuantLayout::Contiguous || w.group != 0 || w.group_size != 0 || w.scales ||
-            w.qhigh || w.high_plane_bytes || w.payload_bytes < std::uint64_t(w.n) * w.k * 2 ||
-            !common::operand::aligned(w.qdata, 16))
-            throw std::invalid_argument("linear_swiglu: invalid BF16 weight");
-        detail::launch_bf16_swiglu_n2048_k4096(x, w, out, limit, clamped, execution.stream());
+        detail::validate_bf16_projection(x, w, {&out, 1}, nullptr, execution, "linear_swiglu");
+        detail::bf16_linear_swiglu_dispatch(x, w, out, limit, clamped, execution.stream());
         return;
     }
 #endif
@@ -142,8 +132,8 @@ static void execute_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor
     }
 
     if (q8_weight) {
-        detail::select_q8_linear_swiglu(gate_up_weight.n, gate_up_weight.k,
-                                        t)(x, gate_up_weight, out, execution.stream());
+        detail::q8_linear_swiglu_dispatch(x, gate_up_weight, out, limit, clamped,
+                                          execution.stream());
     } else {
         detail::q4_linear_swiglu_dispatch(x, gate_up_weight, out, ws, execution);
     }

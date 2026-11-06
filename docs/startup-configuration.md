@@ -352,7 +352,7 @@ The replaced flags are removed; they are not aliases.
 | `--desktop-reserve-mib N` | `--desktop-reserve NMiB` |
 | `--device-state-slots N`, `--extra-state-slots N` | State and KV share `--context-capacity SIZE\|auto`; there is no separate slot quota |
 | `--kv-capacity N\|auto` | `--context-capacity SIZE\|auto`; token counts are not byte quantities |
-| `--kv-slack-floor SIZE` | `--context-slack-floor SIZE` |
+| `--kv-slack-floor SIZE` | `--memory-headroom SIZE` |
 | `--expert-trace-max-gib N` | `--expert-trace-max-size NGiB` |
 | `--lm-head-draft` | `--proposal-head optimized` |
 | `--default-max-tokens N` | `--max-tokens N` |
@@ -370,7 +370,7 @@ below use the same file/argv layering, exact quantities and source reporting abo
 | TOML field | CLI flag | Default and semantics |
 |---|---|---|
 | `engine.desktop_reserve` | `--desktop-reserve SIZE` | `8GiB`; subtract from device-wide free memory before planning and preserve the live allocation floor; `0B` is explicit |
-| `engine.context_slack_floor` | `--context-slack-floor SIZE` | at least `1GiB` of startup planning cushion for automatic Context; explicit pools ignore this automatic-sizing control |
+| `engine.memory_headroom` | `--memory-headroom SIZE` | `1GiB` planning cushion by default for automatic and explicit Context; `0B` is allowed, startup allocation may consume it |
 | `engine.clamp_concurrency_to_pool` | `--clamp-concurrency-to-pool` / `--no-clamp-concurrency-to-pool` | false; lower lanes to complete contexts backed by the requested pool |
 | `generation.sampling.repetition_penalty` | `--repetition-penalty F` | model; positive finite FP32 value; `model` clears the override |
 | `server.api_key_file` | `--api-key-file FILE` | absent; read the key from this file, trimming trailing whitespace, without exposing it in argv/configuration logs |
@@ -419,3 +419,23 @@ The Supervisor no longer estimates capacity from KV tokens or reduces explicit
 capacities on a failed restart. Use automatic Context sizing for changing memory
 availability. Explicit byte budgets remain explicit; the Engine validates their
 complete model working sets.
+
+
+## Planning headroom and bounded Vision
+
+`engine.memory_headroom` / `--memory-headroom SIZE` is the single planning headroom
+control (fork default `1GiB`; `0B` is allowed). Both automatic and explicit Context
+plans deduct it. Actual startup allocation may consume that allowance, while the
+complete initialized instance must fit the desktop-adjusted allocation budget.
+Desktop reserve remains independently controlled by `engine.desktop_reserve`.
+Explicit Context byte capacity is never silently reduced.
+
+`vision.memory_budget` / `--vision-memory-budget SIZE` defaults to `1GiB` per rank.
+It bounds encoder activations and the feature window, excluding weights and Host
+staging. Media cache/live budgets remain separate. A complete attention segment
+must fit; the planner does not truncate segment mathematics to satisfy the budget.
+
+`ninfer-perplexity` now uses the same public TOML/startup route. Its context limit
+defaults to the scoring window, FP8 KV is the default, and generation settings are
+excluded. `--reference` and `--dump-positions` retain their distribution-scoring
+contract. Spark/multi-GPU activation and GLM5Next remain deferred in this fork.

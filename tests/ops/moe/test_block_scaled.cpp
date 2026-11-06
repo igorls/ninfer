@@ -243,6 +243,9 @@ struct Fixture {
     }
 };
 
+// The M=1 complete-route output of token 0 for each replay; wider runs compare against it.
+std::array<std::vector<std::uint8_t>, 4> single_token_rows;
+
 int run(Fixture& f, CudaExecutionView execution, int tokens, ops::ExpertSubsetKind kind,
         bool shared, bool complete, DType dtype, ops::MoeEpilogue mode, bool graph) {
     const auto& profile = f.profile;
@@ -406,6 +409,17 @@ int run(Fixture& f, CudaExecutionView execution, int tokens, ops::ExpertSubsetKi
                 failures += verify_exact((label + " identical prefill").c_str(),
                                          from_device<std::uint8_t>(output.data, output.bytes()), expected);
             }
+        }
+        // A row keeps its single-token arithmetic through the vector limit: batch width selects
+        // a different kernel, and must not change that row's public output.
+        if (!f.fp8 && complete && shared && kind == ops::ExpertSubsetKind::All &&
+            mode == ops::MoeEpilogue::Write && tokens <= 48) {
+            const auto row = from_device<std::uint8_t>(output.data, output.bytes() / tokens);
+            auto& single   = single_token_rows[replay];
+            if (tokens == 1)
+                single = row;
+            else
+                failures += verify_exact((label + " single-token parity").c_str(), row, single);
         }
     }
     if (graph) {

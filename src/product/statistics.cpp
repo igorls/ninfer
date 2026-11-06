@@ -31,9 +31,12 @@ Json budget_json(const RankMemoryBudget& b) {
     if (b.graphs) {
         const auto& g = *b.graphs;
         graphs        = {{"rebuild_estimate_bytes", g.rebuild_estimate_bytes},
+                         {"warmup_increment_bytes", g.warmup_increment_bytes},
                          {"preparation_increment_bytes", g.preparation_increment_bytes},
+                         {"preparation_peak_bytes", g.preparation_peak_bytes},
                          {"calibration_increment_bytes", g.calibration_increment_bytes},
-                         {"calibration_retained_bytes", g.calibration_retained_bytes}};
+                         {"calibration_peak_bytes", g.calibration_peak_bytes},
+                         {"rebuild_increment_bytes", g.rebuild_increment_bytes}};
     }
     return {{"limit_bytes", b.limit_bytes},
             {"runtime_reservation_bytes", b.runtime_reservation_bytes},
@@ -44,6 +47,7 @@ Json budget_json(const RankMemoryBudget& b) {
             {"available_after_weights_bytes", b.available_after_weights_bytes},
             {"available_after_startup_bytes", b.available_after_startup_bytes},
             {"headroom_bytes", b.headroom_bytes},
+            {"host_reservation_bytes", b.host_reservation_bytes},
             {"planned_slack_bytes", b.planned_slack_bytes},
             {"retained_bytes", b.retained_bytes},
             {"desktop_reserve_bytes", b.desktop_reserve_bytes},
@@ -77,6 +81,8 @@ Json context_usage_json(const RuntimeStats& stats) {
                          {"capacity_bytes", pool.capacity_bytes},
                          {"block_bytes", pool.block_bytes},
                          {"live_bytes", pool.live_bytes},
+                         {"in_use_bytes", pool.in_use_bytes},
+                         {"cached_bytes", pool.cached_bytes},
                          {"reserved_bytes", pool.reserved_bytes},
                          {"pending_retirement_bytes", pool.pending_retirement_bytes},
                          {"relocation_bytes", pool.relocation_bytes},
@@ -136,13 +142,12 @@ Json execution_json(const ExecutionSample& value) {
 
 Json request_execution_json(const RequestStats& value) {
     constexpr const char* names[] = {"prefill", "decode", "replay", "control", "score", "context"};
-    constexpr const char* intervals[] = {"result_stream", "commit_stream", "prefill_stream",
-                                         "vision_stream"};
+
     Json out;
     for (std::size_t i = 0; i < value.executions.size(); ++i)
         out[names[i]] = execution_json(value.executions[i]);
     for (std::size_t i = 0; i < value.max_rank_gpu.size(); ++i)
-        out["max_rank_gpu_intervals"][intervals[i]] = duration_json(value.max_rank_gpu[i]);
+        out["max_rank_gpu_intervals"][kGpuIntervalNames[i]] = duration_json(value.max_rank_gpu[i]);
     return out;
 }
 
@@ -182,9 +187,21 @@ Json resource_json(const RankSnapshot& rank) {
                {"required_peak_bytes", m.workspace.required_peak_bytes},
                {"measurement_peak_bytes", m.workspace.measurement_peak_bytes}}},
              {"physical_memory", nullptr},
-             {"vision_workspace", nullptr},
+             {"vision", nullptr},
              {"experts", nullptr},
              {"ple", nullptr}};
+    out["communication"] = Json::array();
+    for (const auto& group : rank.communication) {
+        Json memory = nullptr;
+        if (group.startup_memory) {
+            const auto& value = *group.startup_memory;
+            memory            = {{"tracked_device_bytes", value.tracked_device_bytes},
+                                 {"persistent_device_bytes", value.persistent_device_bytes},
+                                 {"suspendable_device_bytes", value.suspendable_device_bytes}};
+        }
+        out["communication"].push_back(
+            {{"group", group.group}, {"size", group.size}, {"startup_memory", std::move(memory)}});
+    }
     if (rank.physical_memory) {
         const auto& p          = *rank.physical_memory;
         out["physical_memory"] = {{"cuda_total_bytes", p.cuda_total_bytes},
@@ -195,16 +212,14 @@ Json resource_json(const RankSnapshot& rank) {
                                   {"sampled_ns", p.sampled_ns}};
     }
     if (m.vision) {
-        const auto& v           = *m.vision;
-        out["vision_workspace"] = {{"handoff_in_persistent", v.handoff_in_persistent},
-                                   {"aggregate_prompt_tokens", v.aggregate_prompt_tokens},
-                                   {"max_item_tokens", v.max_item_tokens},
-                                   {"general_capacity_bytes", v.general_capacity_bytes},
-                                   {"encode_required_bytes", v.encode_required_bytes},
-                                   {"handoff_offset_bytes", v.handoff_offset_bytes},
-                                   {"handoff_capacity_bytes", v.handoff_capacity_bytes},
-                                   {"handoff_active_bytes", v.handoff_active_bytes},
-                                   {"handoff_peak_bytes", v.handoff_peak_bytes}};
+        const auto& v = *m.vision;
+        out["vision"] = {{"budget_bytes", v.budget_bytes},
+                         {"max_window_features", v.max_window_features},
+                         {"encoder_workspace_bytes", v.encoder_workspace_bytes},
+                         {"output_capacity_bytes", v.output_capacity_bytes},
+                         {"input_staging_bytes", v.input_staging_bytes},
+                         {"output_active_bytes", v.output_active_bytes},
+                         {"output_peak_bytes", v.output_peak_bytes}};
     }
     if (m.experts) {
         const auto& e  = *m.experts;

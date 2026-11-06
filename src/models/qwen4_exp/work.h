@@ -1,10 +1,13 @@
 #pragma once
 
+#include "models/common/token_input.h"
+
 #include "models/common/context/contract.h"
 #include "models/qwen4_exp/route_trace.h"
 #include "models/common/context/directory/state.h"
 #include "models/common/context/directory/history.h"
 #include "models/qwen4_exp/execution_shape.h"
+#include "models/common/qwen/vision/control.h"
 #include "ninfer/types.h"
 #include "runtime/contract/resources.h"
 #include "runtime/executor/contract.h"
@@ -37,7 +40,7 @@ struct WorkRow {
     std::int32_t rope_delta     = 0;
     std::array<TokenId, 2> ple_raw_tail{};
     std::vector<TokenId> ids;
-    std::vector<TokenId> count_tokens;
+    std::optional<TokenId> control_last_token;
     // Required boundaries within ids, measured from this input window's beginning.
     std::vector<std::uint32_t> window_ends;
     // Axis-major [3,T], where T is ids.size().
@@ -71,6 +74,7 @@ struct ForwardWork {
     std::vector<WorkRow> rows;
     std::optional<PlePrefetch> prefetch;
     std::optional<PromptReadout> readout;
+    std::optional<qwen::VisionWork> visual;
 };
 
 struct MtpWork {
@@ -81,8 +85,7 @@ struct MtpWork {
 struct ResidencyBinding {
     runtime::ExecutionMember member;
     ResolvedSamplingParameters sampling;
-    std::vector<TokenId> generated;
-    std::shared_ptr<const qwen::VisionExecutionInput> vision;
+    TokenCounts counts;
     std::vector<TokenId> prompt_tokens;
 };
 
@@ -108,7 +111,6 @@ struct RowResult {
     std::uint32_t drafts          = 0;
     std::uint32_t accepted_drafts = 0;
     std::vector<TokenId> tokens;
-    std::vector<TokenId> input_tokens;
     std::uint32_t dead_positions = 0;
     std::vector<TokenLogprobs> logprobs, prompt_logprobs;
     std::vector<float> reasoning_features;
@@ -157,7 +159,9 @@ struct WorkContract {
     ExecutionShape shape;
     std::uint32_t vocabulary, public_tokens;
     bool mtp, vision;
+    std::uint32_t control_token_limit = 0;
 
+    [[nodiscard]] runtime::WorkPayloadCapacity payload_capacity(std::uint32_t rank_count) const;
     void validate(const Work&, runtime::FrameKind) const;
     void validate(const Work&, const Result&, const Commit&) const;
     void validate_commit(const Work&, std::span<const RowResult>, const Commit&) const;

@@ -110,19 +110,7 @@ Json requested_reasoning_effort_json(const std::optional<RequestedReasoningEffor
 }
 
 const char* kv_cache_name(ninfer::KvCacheStorage storage) {
-    switch (storage) {
-    case ninfer::KvCacheStorage::BFloat16:
-        return "bf16";
-    case ninfer::KvCacheStorage::Int8Group64:
-        return "int8-group64";
-    case ninfer::KvCacheStorage::Fp8E4M3Row256:
-        return "fp8-e4m3-row256";
-    case ninfer::KvCacheStorage::Nvfp4Group16:
-        return "nvfp4";
-    case ninfer::KvCacheStorage::Fp8KeyNvfp4Value:
-        return "k8v4";
-    }
-    return "unknown";
+    return ninfer::kv_cache_profile_info(storage).name;
 }
 
 const char* context_capacity_mode_name(ninfer::ContextCapacityMode mode) {
@@ -233,6 +221,7 @@ Json request_json(const RequestLogContext& context) {
     Json thinking_budget = nullptr;
     if (context.thinking_budget) { thinking_budget = *context.thinking_budget; }
     return Json{{"request_id", context.id},
+                {"engine_request_id", context.engine_request_id},
                 {"http_request_id", context.http_request_id},
                 {"response_id", context.response_id},
                 {"protocol", context.protocol},
@@ -314,6 +303,7 @@ Json speculative_json(const RequestStats& metrics) {
                 {"accepted_tokens", metrics.speculative.accepted_tokens},
                 {"committed_draft_tokens", metrics.speculative.committed_draft_tokens},
                 {"fallback_steps", metrics.speculative.fallback_steps},
+                {"attempted_per_position", metrics.speculative.attempted_per_position},
                 {"accepted_per_position", metrics.speculative.accepted_per_position}};
 }
 
@@ -390,10 +380,10 @@ Json request_engine_timing_json(const ninfer::GenerationEngineTiming& timing) {
     };
 }
 
-Json transfer_timings_json(const std::array<ninfer::GenerationTransferTiming, 4>& current,
-                           const std::array<ninfer::GenerationTransferTiming, 4>& previous = {}) {
+Json transfer_timings_json(const ninfer::ContextTransferSeries& current,
+                           const ninfer::ContextTransferSeries& previous = {}) {
     Json result = Json::object();
-    constexpr std::array directions{"d2h", "h2d", "d2d", "h2h"};
+    constexpr std::array directions{"d2h", "h2d", "d2d", "h2h", "peer_d2d"};
     for (std::size_t i = 0; i < directions.size(); ++i) {
         const auto& now       = current[i];
         const auto& before    = previous[i];
@@ -564,6 +554,7 @@ std::string format_server_start_json(const std::string& server_instance_id, std:
                                       {"max_context", engine_options.max_context},
                                       {"context_capacity_mode", context_capacity_mode_name(engine_options.context_capacity.mode)},
                                       {"context_pools", product::context_capacity_json(description.context_pools)},
+                                      {"context_token_capacity_estimate", description.context_token_capacity_estimate},
                                       {"max_concurrency", engine_options.max_concurrency},
                                       {"max_pending_requests", engine_options.max_pending_requests},
                                       {"pending_timeout_ms", engine_options.pending_timeout_ms},
@@ -838,7 +829,7 @@ std::string format_throughput_json(const std::string& server_instance_id, std::u
     for (const auto& pool : current.kv_pools) {
         const auto before = pool.id < previous.context_transfers.kv.size()
                                 ? previous.context_transfers.kv[pool.id]
-                                : std::array<ninfer::GenerationTransferTiming, 4>{};
+                                : ninfer::ContextTransferSeries{};
         pools.push_back({{"pool_id", pool.id},
                          {"label", pool.label},
                          {"occupied_page_groups", pool.occupied_page_groups},
@@ -873,16 +864,15 @@ ServerLogEnvironment query_server_log_environment(int device) {
     return environment;
 }
 
-JsonlRequestLog::JsonlRequestLog(const std::string& path,
+JsonlRequestLog::JsonlRequestLog(std::string server_instance_id, const std::string& path,
                                  const std::string& protected_artifact_path,
                                  std::shared_ptr<spdlog::logger> logger)
-    : path_(path), logger_(std::move(logger)) {
+    : path_(path), server_instance_id_(std::move(server_instance_id)), logger_(std::move(logger)) {
     if (path_.empty()) { return; }
     if (!protected_artifact_path.empty() &&
         normalized_absolute_path(path_) == normalized_absolute_path(protected_artifact_path)) {
         throw std::invalid_argument("request JSONL log must not overwrite the model artifact");
     }
-    server_instance_id_ = new_server_instance_id();
     output_.open(path_, std::ios::out | std::ios::app);
     if (!output_) {
         throw std::runtime_error("failed to open request JSONL log for append: " + path_);

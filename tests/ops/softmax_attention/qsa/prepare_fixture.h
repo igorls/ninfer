@@ -143,7 +143,7 @@ struct CachePlane {
 };
 
 struct Fixture {
-    int T, B, A, alias, R, pages_per_row;
+    int T, B, A, alias, R, pages_per_row, kv_heads, query_heads;
     KvCacheStorage storage;
     CacheEncoding encoding;
     bool exact_key  = false;
@@ -279,10 +279,10 @@ struct Fixture {
                 const int logical = p / 64;
                 tables.at(logical, table_rows.at(b)) =
                     1 + (B - 1 - b) * pages_per_row + pages_per_row - 1 - (logical - f / 64);
-                for (int h = 0; h < 24; ++h)
+                for (int h = 0; h < query_heads; ++h)
                     for (int c = 0; c < 256; ++c)
                         q.at(c, h, t, b) = sample(p, b, c + 256 * h, 3 + phase);
-                for (int h = 0; h < 2; ++h)
+                for (int h = 0; h < kv_heads; ++h)
                     for (int c = 0; c < 256; ++c) {
                         k.at(c, h, t, b) = sample(p, b, c + 256 * h, 7 + phase);
                         v.at(c, h, t, b) = sample(p, b, c + 256 * h, 11 + phase);

@@ -291,6 +291,27 @@ int main() {
         thinking->confirm();
         require(allows(mask(*thinking), 256), "thinking wrapper did not reach content completion");
 
+        // The Qwen close ends with its own first byte. The first complete close must end the
+        // thinking region; a second close cannot start on that close's final newline.
+        const std::string think_close = "\n</think>\n\n";
+        const auto require_content_after = [&](std::string_view text) {
+            auto session = compile(compiler, "root ::= \" answer\"", think_close, {});
+            consume(*session, text);
+            const auto words = mask(*session);
+            require(allows(words, ' ') && !allows(words, '<') && !allows(words, '\n') &&
+                        !allows(words, 'x'),
+                    "self-overlapping close did not end the thinking region");
+        };
+        require_content_after("reason\n</think>\n\n");
+        require_content_after("\n</think>\n\n");
+        require_content_after("reason\n\n</think>\n\n");
+        require_content_after("reason\n</think>x\n</think>\n\n");
+        auto open_close = compile(compiler, "root ::= \" answer\"", think_close, {});
+        consume(*open_close, "reason\n</think>\n");
+        const auto open_words = mask(*open_close);
+        require(allows(open_words, '\n') && allows(open_words, 'x'),
+                "partial close ended the thinking region early");
+
         for (const auto& source : {"bad grammar", "root ::= missing", "root ::= Token(256)",
                                    "root ::= Regex(\".*\")", "root[temperature=0.5] ::= \"a\""}) {
             bool rejected = false;

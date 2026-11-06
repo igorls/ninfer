@@ -253,7 +253,7 @@ int main(int argc, char** argv) try {
     options.clamp_concurrency_to_pool = true;
     options.pending_timeout_ms = 3'600'000;
     options.prefill_chunk = 1024;
-    options.kv_cache = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    options.kv_cache = ninfer::KvCacheStorage::Fp8E4m3fnGroup128Ue8m0;
     options.context_cache.enabled = false;
     options.speculative.backend = ninfer::SpeculativeBackend::None;
     ninfer::Engine engine(options);

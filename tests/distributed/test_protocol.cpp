@@ -1,11 +1,17 @@
 #include "distributed/transport.h"
+#include "distributed/startup.h"
 #include "models/common/qwen/vision/control.h"
 #include "models/qwen4_exp/wire.h"
+#include "models/qwen4_exp/parallel/wire.h"
+#include "models/glm5next/parallel/wire.h"
 #include "runtime/executor/protocol.h"
+#include "runtime/executor/preparation.h"
 #include "runtime/executor/input.h"
+#include "models/common/parallel_wire.h"
 
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <iostream>
 #include <thread>
 
@@ -20,12 +26,203 @@ void require(bool value, const char* message) {
     if (!value) throw std::runtime_error(message);
 }
 
+std::optional<dist::IncomingMessage> poll_message(dist::Transport& transport) {
+    if (auto event = transport.poll()) {
+        if (auto* message = std::get_if<dist::IncomingMessage>(&*event)) return std::move(*message);
+        throw std::runtime_error(std::get<dist::PeerStatus>(*event).error);
+    }
+    return {};
+}
+
+dist::TransportEvent next_event(dist::Transport& transport) {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    for (;;) {
+        if (auto event = transport.poll()) return std::move(*event);
+        require(std::chrono::steady_clock::now() < until, "transport event timed out");
+        std::this_thread::yield();
+    }
+}
+
+void cache_profiles_roundtrip() {
+    for (auto storage : {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64,
+                         KvCacheStorage::Fp8E4m3fnGroup128Ue8m0, KvCacheStorage::Nvfp4Group16,
+                         KvCacheStorage::Fp8KeyNvfp4Value}) {
+        q::RankLoadRequest request{};
+        request.options.kv_cache = storage;
+        wire::Encoder load_out;
+        q::encode_rank_load(load_out, request);
+        const auto load_bytes = std::move(load_out).take();
+        wire::Decoder load_in(load_bytes);
+        const auto loaded = q::decode_rank_load(load_in);
+        load_in.finish();
+        require(loaded.options.kv_cache == storage, "rank load changed the KV profile");
+
+        q::RankExecutionDescription execution{};
+        execution.session.shape.kv_storage = storage;
+        wire::Encoder execution_out;
+        q::encode(execution_out, execution);
+        const auto execution_bytes = std::move(execution_out).take();
+        wire::Decoder execution_in(execution_bytes);
+        const auto decoded = q::decode_rank_execution(execution_in);
+        execution_in.finish();
+        require(decoded.session.shape.kv_storage == storage,
+                "rank execution changed the KV profile");
+    }
+}
+
 template <class F>
 void rejects(F function) {
     try {
         function();
     } catch (const std::exception&) { return; }
     throw std::runtime_error("invalid protocol input was accepted");
+}
+
+void topology_identity() {
+    DeploymentOptions deployment;
+    deployment.control_host = "127.0.0.1";
+    deployment.parallel     = {.tp = 2, .ep = 2, .adp = 2};
+    deployment.nodes        = {{.id = 0, .worker = "/worker", .artifact = "/model"}};
+    deployment.ranks        = {{0, 0, 0}, {1, 0, 1}};
+    dist::ExecutionTopology topology;
+    topology.plan   = 7;
+    topology.ranks  = {{0, 0, 0, 0, {0, 2}, {0, 2}, {}, {}, {0, 2}},
+                       {1, 0, 1, 1, {1, 2}, {1, 2}, {}, {}, {1, 2}}};
+    topology.groups = {{0, {0, 1}}};
+    topology.roles  = {{"tensor", 0}, {"expert", 0}};
+    topology.validate(deployment);
+
+    wire::Encoder out;
+    wire::encode(out, topology);
+    const auto bytes = std::move(out).take();
+    wire::Decoder in(bytes);
+    auto decoded = wire::decode_topology(in);
+    in.finish();
+    decoded.validate(deployment);
+    const auto& rank = decoded.rank(1);
+    require(rank.adp.rank == 1 && rank.adp.size == 2 && rank.dp.rank == 0 && rank.dp.size == 1 &&
+                dist::process_name(rank).find(":adp1") != std::string::npos &&
+                dist::rank_description(rank).find("ADP=1/2") != std::string::npos,
+            "topology lost independent attention ownership");
+    decoded.ranks[1].adp.rank = 2;
+    rejects([&] { decoded.validate(deployment); });
+    decoded.ranks[1].adp = {0, 1};
+    rejects([&] { decoded.validate(deployment); });
+}
+
+void model_preparation() {
+    namespace glm = models::glm5next;
+    runtime::RankPreparationReport report;
+    report.capacity.plan.reference  = {1048576, 2, 9ULL << 30};
+    report.capacity.available_bytes = 30ULL << 30;
+    wire::Encoder capacity_out;
+    runtime::encode_preparation_report(capacity_out, report);
+    const auto capacity_bytes = std::move(capacity_out).take();
+    wire::Decoder capacity_in(capacity_bytes);
+    const auto reported = runtime::decode_preparation_report(capacity_in);
+    capacity_in.finish();
+    require(reported.capacity.plan.reference == report.capacity.plan.reference &&
+                reported.capacity.available_bytes == report.capacity.available_bytes,
+            "preparation report lost the model's capacity reference");
+
+    glm::RankLoadRequest request;
+    request.artifact[3]              = std::byte{17};
+    request.rank.rank                = 1;
+    request.rank.size                = 2;
+    request.rank.ep_size             = 2;
+    request.rank.kda_heads           = {32, 32};
+    request.rank.vocabulary          = {77440, 77440};
+    request.rank.dense_intermediate  = {6144, 6144};
+    request.rank.shared_intermediate = {1024, 1024};
+    request.rank.experts             = {{{0, 7, 31}, {0, 2048}}, {{2, 9}, {0, 2048}}};
+    request.rank.assemblies          = {
+        {{256, 128}, {{{5}, 128, 64, 128, 128, 128, 0}}, {{{5}, {128, 128}, 16384, 32768}}}};
+    auto& o                             = request.options;
+    o.max_concurrency                   = 8;
+    o.max_context                       = 1048576;
+    o.prefill_chunk                     = 4096;
+    o.use_cuda_graph                    = false;
+    o.enable_vision                     = true;
+    o.vision_memory_budget_bytes        = 256ULL << 20;
+    o.speculative                       = {SpeculativeBackend::Mtp, 3, ProposalHead::Optimized};
+    o.context_cache.host_capacity_bytes = 0;
+    request.host_reservation_bytes      = 2ULL << 30;
+    request.control_owner               = false;
+    request.index_format                = KvCacheVectorFormat::BFloat16;
+    wire::Encoder out;
+    glm::encode_rank_load(out, request);
+    const auto bytes = std::move(out).take();
+    wire::Decoder in(bytes);
+    const auto decoded = glm::decode_rank_load(in);
+    in.finish();
+    for (const std::size_t headroom : {0ULL, 256ULL << 20}) {
+        wire::Encoder prepare;
+        runtime::encode_preparation_request(prepare, {42, headroom, bytes});
+        const auto message = std::move(prepare).take();
+        wire::Decoder request_in(message);
+        const auto received = runtime::decode_preparation_request(request_in);
+        request_in.finish();
+        require(received.plan == 42 && received.memory_headroom_bytes == headroom &&
+                    std::equal(received.model_payload.begin(), received.model_payload.end(),
+                               bytes.begin(), bytes.end()),
+                "rank preparation changed headroom or the native model payload");
+    }
+    wire::Encoder roundtrip;
+    glm::encode_rank_load(roundtrip, decoded);
+    require(std::move(roundtrip).take() == bytes && decoded.rank.kda_heads.begin == 32 &&
+                decoded.options.speculative.proposal_head == ProposalHead::Optimized &&
+                decoded.index_format == request.index_format &&
+                decoded.host_reservation_bytes == request.host_reservation_bytes,
+            "GLM preparation lost partition, assembly, execution policy or Host reservation");
+
+    q::RankLoadRequest qwen;
+    qwen.options         = o;
+    qwen.rank.assemblies = request.rank.assemblies;
+    qwen.rank.rank       = 1;
+    qwen.rank.size       = 2;
+    qwen.rank.experts    = {{{0, 1, 2}, {320, 320}}};
+    wire::Encoder qw;
+    q::encode_rank_load(qw, qwen);
+    const auto qb = std::move(qw).take();
+    wire::Decoder qi(qb);
+    const auto qd = q::decode_rank_load(qi);
+    qi.finish();
+    wire::Encoder qr;
+    q::encode_rank_load(qr, qd);
+    require(std::move(qr).take() == qb, "shared rank serialization changed Qwen preparation");
+
+    glm::RankResourceDescription r{};
+    r.rank                          = 1;
+    r.shape                         = {1048576,
+                                       8,
+                                       4096,
+                                       3,
+                                       KvCacheStorage::BFloat16,
+                                       KvCacheVectorFormat::Fp8E4m3fnGroup128Ue8m0,
+                                       EnginePurpose::Generation,
+                                       true,
+                                       false};
+    r.state                         = {{1024, 256}, {1536, 256}, {1024, 512, 256}};
+    r.context.ranks                 = {{1, 2ULL << 30, 0}};
+    r.context.state                 = {100, {{0, {{1, 1024, 256}}}, {1, {{1, 1536, 256}}}}};
+    r.context.pools                 = {{0, 4096, 100, 16384, 8, {{1, {8192, 256}}}},
+                                       {1, 4096, 100, 16384, 16, {{1, {1024, 256}}}}};
+    r.context.metadata_budget_bytes = 1ULL << 20;
+    r.budget.context_capacity_bytes = 2ULL << 30;
+    r.observation.rank              = 1;
+    r.observation.memory.allocations.device_weights_bytes = 91ULL << 30;
+    r.vision_max_features                                 = 4096;
+    wire::Encoder resources;
+    glm::encode(resources, r);
+    const auto rb = std::move(resources).take();
+    wire::Decoder ri(rb);
+    const auto rd = glm::decode_rank_resources(ri);
+    ri.finish();
+    require(rd.shape == r.shape && rd.state == r.state && rd.context == r.context &&
+                rd.budget.context_capacity_bytes == r.budget.context_capacity_bytes &&
+                rd.observation.memory.allocations.device_weights_bytes == 91ULL << 30 &&
+                rd.vision_max_features == r.vision_max_features,
+            "GLM resource description lost ADP layouts, capacity or observations");
 }
 
 q::WorkRow row() {
@@ -39,7 +236,6 @@ q::WorkRow row() {
     r.rope_delta        = -3;
     r.ple_raw_tail      = {13, 17};
     r.ids               = {23};
-    r.count_tokens      = {5, 8};
     r.rope_positions    = {7, 8, 9};
     r.previous_rope     = {6, 7, 8};
     r.sampling          = {0.7F, 7, 0.9F, 0.1F, -0.2F, 0.3F, UINT64_MAX};
@@ -50,9 +246,6 @@ q::WorkRow row() {
 
 void native_work() {
     q::VisionInputBindings bindings;
-    auto vision           = std::make_shared<models::qwen::VisionExecutionInput>();
-    vision->prompt_tokens = 37;
-    bindings.install(91, vision);
     q::WorkContract contract{
         {128, 2, 32, 3, KvCacheStorage::BFloat16, EnginePurpose::Generation}, 256, 250, true, true};
     const auto original = row();
@@ -87,8 +280,9 @@ void native_work() {
                 r.ple_raw_tail == original.ple_raw_tail && r.ids == original.ids &&
                 r.rope_delta == -3 && r.rope_positions == original.rope_positions &&
                 r.previous_rope == original.previous_rope &&
-                r.count_tokens == original.count_tokens && r.sampling.temperature == 0.7F &&
-                r.sampling.seed == UINT64_MAX && r.sampling_position == 4 && r.constrained,
+                r.control_last_token == original.control_last_token &&
+                r.sampling.temperature == 0.7F && r.sampling.seed == UINT64_MAX &&
+                r.sampling_position == 4 && r.constrained,
             "native work values changed in transit");
     const auto& actions = decoded.actions.at(0).operations;
     require(actions.size() == 4 &&
@@ -111,25 +305,33 @@ void native_work() {
     wire::Decoder truncated{std::span(bytes).first(bytes.size() - 1)};
     rejects([&] { (void)q::decode_work(truncated, bindings); });
 
-    q::Work bind{{}, q::ContextWork{{{original.member, original.sampling, {4, 5}, vision}}, {}}};
-    wire::Encoder encoded_binding;
-    q::encode_work(encoded_binding, bind, bindings, 0);
-    const auto binding_bytes = std::move(encoded_binding).take();
-    wire::Decoder binding_input(binding_bytes);
-    const auto bound = q::decode_work(binding_input, bindings);
-    bindings.release(91);
-    require(std::get<q::ContextWork>(bound.operation).bindings[0].vision == vision,
-            "decoded binding lost its input owner");
-    std::weak_ptr<const models::qwen::VisionExecutionInput> owner = vision;
-    vision.reset();
-    std::get<q::ContextWork>(bind.operation).bindings.clear();
-    require(!owner.expired(), "decoded binding did not retain the installed input");
-    wire::Decoder missing_binding(binding_bytes);
-    rejects([&] { (void)q::decode_work(missing_binding, bindings); });
+    auto window         = std::make_shared<models::vision::WindowPlan>();
+    window->features    = 2;
+    window->consume_end = 23;
+    window->outputs     = {{0, 0, {21, 22}}};
+    auto input_owner    = std::make_shared<models::qwen::VisionWindowInput>();
+    const models::vision::WindowUse use{91, original.member, window, true};
+    bindings.install({use, input_owner});
+    q::ForwardWork producer;
+    producer.rows   = {original};
+    producer.visual = models::qwen::VisionWork{use, input_owner};
+    q::Work producing{{}, producer};
+    wire::Encoder encoded_producer;
+    q::encode_work(encoded_producer, producing, bindings, 0);
+    const auto producer_bytes = std::move(encoded_producer).take();
+    wire::Decoder producer_input(producer_bytes);
+    const auto produced = q::decode_work(producer_input, bindings);
+    producer_input.finish();
+    require(std::get<q::ForwardWork>(produced.operation).visual->input == input_owner,
+            "producing ticket must retain its raw input owner");
+    bindings.release_payload(91);
+    const auto continuation = bindings.get(91, false);
+    require(!continuation.input && continuation.window.plan == window,
+            "input retirement must retain the frozen output mapping");
+    rejects([&] { (void)bindings.get(91, true); });
 
     auto prefill_row           = original;
     prefill_row.ids            = {23, 24};
-    prefill_row.window_ends    = {1};
     prefill_row.rope_positions = {7, 8, 9, 10, 11, 12};
     q::Work forward{{},
                     q::ForwardWork{q::ForwardKind::Prefill,
@@ -144,7 +346,7 @@ void native_work() {
     contract.validate(forward_copy, runtime::FrameKind::Compute);
     const auto& f = std::get<q::ForwardWork>(forward_copy.operation);
     require(f.prefetch->ids == std::vector<TokenId>{31, 32} && f.prefetch->frontier == 23 &&
-                f.rows[0].window_ends == std::vector<std::uint32_t>{1},
+                f.rows[0].window_ends.empty(),
             "prefill window or PLE prefetch changed in transit");
 
     auto scoring_contract          = contract;
@@ -166,7 +368,7 @@ void native_work() {
     contract.validate(work, request, masks);
     masks.rows[0].words.pop_back();
     rejects([&] { contract.validate(work, request, masks); });
-    q::ComputeResult result{{{1, 3, 1, {5, 6}, {23, 5}, 0}}};
+    q::ComputeResult result{{{1, 3, 1, {5, 6}, 0}}};
     q::Commit commit{
         {{original.member, {{0, {2048, 6144}}, {1, {8192, 24576}}}, 2, false, false, false}}, {}};
     contract.validate(work, q::Result{result}, commit);
@@ -200,8 +402,38 @@ void native_work() {
     wire::Decoder result_input(result_bytes);
     const auto received_result = std::get<q::ComputeResult>(q::decode_result(result_input));
     require(received_result.rows[0].tokens == result.rows[0].tokens &&
-                received_result.rows[0].input_tokens == result.rows[0].input_tokens,
+                received_result.rows[0].accepted_drafts == result.rows[0].accepted_drafts,
             "result changed in transit");
+}
+
+void context_observations() {
+    q::ContextResult result;
+    result.transfers = {{.direction   = runtime::ContextTransferDirection::PeerDeviceToDevice,
+                         .image_count = 1,
+                         .work        = {4096, 2},
+                         .elapsed_ns  = 7000,
+                         .rank        = 1,
+                         .peer        = runtime::ContextPeerTransfer{0, 1}},
+                        {.resource    = {.pool = runtime::KvPoolId{2}},
+                         .direction   = runtime::ContextTransferDirection::DeviceToDevice,
+                         .page_groups = 3,
+                         .work        = {512, 1},
+                         .elapsed_ns  = 2000,
+                         .rank        = 1}};
+    wire::Encoder out;
+    q::encode_result(out, result);
+    const auto bytes = std::move(out).take();
+    wire::Decoder in(bytes);
+    const auto decoded = std::get<q::ContextResult>(q::decode_result(in));
+    in.finish();
+    require(decoded.transfers.size() == 2 &&
+                decoded.transfers[0].direction ==
+                    runtime::ContextTransferDirection::PeerDeviceToDevice &&
+                decoded.transfers[0].peer == runtime::ContextPeerTransfer{0, 1} &&
+                decoded.transfers[0].rank == 1 && decoded.transfers[0].elapsed_ns == 7000 &&
+                decoded.transfers[0].work.payload_bytes == 4096 && !decoded.transfers[1].peer &&
+                decoded.transfers[1].direction == runtime::ContextTransferDirection::DeviceToDevice,
+            "context observations lost peer endpoints or conflated local and remote copies");
 }
 
 void queues() {
@@ -227,7 +459,7 @@ void queues() {
     const auto until     = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (received != 2) {
         require(std::chrono::steady_clock::now() < until, "control transport stalled");
-        if (auto value = target.poll()) {
+        if (auto value = poll_message(target)) {
             require(value->message.epoch == 11 &&
                         value->message.kind ==
                             (received ? wire::Kind::Discard : wire::Kind::Submit) &&
@@ -238,10 +470,115 @@ void queues() {
             std::this_thread::yield();
     }
     source.close();
-    while (target.failure().empty()) {
-        require(std::chrono::steady_clock::now() < until, "closed owner left its socket alive");
-        std::this_thread::yield();
+    const auto event   = next_event(target);
+    const auto& closed = std::get<dist::PeerStatus>(event);
+    require(closed.receive_closed && !closed.stopped && target.failure().empty(),
+            "peer termination was not separated from transport failure");
+}
+
+void compact_payloads() {
+    models::TokenCountBuilder builder;
+    for (const std::vector<TokenId> history :
+         {std::vector<TokenId>{}, {2, 2, 2}, {0, 1, 2, 3, 4, 5, 6, 7, 2}}) {
+        auto counts = builder.build(history, 8);
+        wire::Encoder encoded;
+        models::encode_token_counts(encoded, counts);
+        const auto bytes = std::move(encoded).take();
+        require(bytes.size() <= models::TokenCounts::encoded_capacity(8),
+                "count encoding exceeded its vocabulary bound");
+        wire::Decoder in(bytes);
+        auto restored = models::decode_token_counts(in);
+        in.finish();
+        restored.validate(8, history.size());
+        std::vector<std::int32_t> actual(8), expected(8);
+        restored.restore(actual);
+        for (auto token : history) ++expected[token];
+        require(actual == expected, "count snapshot changed across ranks");
     }
+    q::WorkContract contract{
+        {1048576, 8, 4096, 3, KvCacheStorage::BFloat16, EnginePurpose::Generation},
+        248320,
+        248320,
+        true,
+        true,
+        64};
+    auto control               = row();
+    control.ids                = {23, 5};
+    control.control_last_token = 8;
+    control.rope_positions.clear();
+    control.window_ends = {1};
+    q::Work work{{}, q::ForwardWork{q::ForwardKind::Control, q::SampleKind::None, {control}}};
+    contract.validate(work, runtime::FrameKind::Compute);
+    q::VisionInputBindings bindings;
+    wire::Encoder encoded;
+    q::encode_work(encoded, work, bindings, 0);
+    const auto bytes = std::move(encoded).take();
+    wire::Decoder input(bytes);
+    const auto decoded = q::decode_work(input, bindings);
+    input.finish();
+    contract.validate(decoded, runtime::FrameKind::Compute);
+    const auto& r = q::work_rows(decoded).front();
+    std::array<TokenId, 2> forced{};
+    models::ControlTokens{r.ids, *r.control_last_token}.copy(forced);
+    require(forced == std::array<TokenId, 2>{5, 8} &&
+                r.window_ends == std::vector<std::uint32_t>{1},
+            "Control lost its committed token sequence or execution split");
+    const auto p = contract.payload_capacity(2);
+    runtime::protocol::validate_control_capacity(
+        {p.compute_work, p.context_work, p.decision, p.commit, 4096, 4096}, {1, 1}, {}, 2);
+    contract.vocabulary += 8;
+    auto& control_row  = std::get<q::ForwardWork>(work.operation).rows[0];
+    control_row.ids[1] = contract.public_tokens;
+    rejects([&] { contract.validate(work, runtime::FrameKind::Compute); });
+    control_row.ids[1] = 5;
+    std::get<q::ForwardWork>(work.operation).rows[0].ids.resize(65, 5);
+    rejects([&] { contract.validate(work, runtime::FrameKind::Compute); });
+}
+
+void retained_payload() {
+    wire::Payload retained;
+    {
+        int sockets[2];
+        require(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sockets) == 0,
+                "socketpair failed");
+        const dist::TransportLimits limits{64, 84, 1, 0, 0, 0, 0};
+        dist::Transport source(limits), target(limits);
+        source.add(1, dist::Socket(sockets[0]));
+        target.add(0, dist::Socket(sockets[1]));
+        source.start();
+        target.start();
+        const std::array messages{
+            dist::OutgoingMessage{1, std::make_shared<wire::Message>(wire::Message{
+                                         wire::Kind::Submit, 1, wire::Bytes(64, std::byte{42})})}};
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        const auto receive  = [&] {
+            for (;;) {
+                if (auto incoming = poll_message(target))
+                    return std::move(incoming->message.payload);
+                require(std::chrono::steady_clock::now() < deadline, "retained payload stalled");
+                std::this_thread::yield();
+            }
+        };
+        require(source.try_send(messages), "initial send failed");
+        retained = receive();
+        while (source.sending()) {
+            require(std::chrono::steady_clock::now() < deadline, "send did not drain");
+            std::this_thread::yield();
+        }
+        require(source.try_send(messages), "second send failed");
+        const auto held_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(20);
+        while (std::chrono::steady_clock::now() < held_until) {
+            require(!poll_message(target),
+                    "poll released credit while the payload was still retained");
+            std::this_thread::yield();
+        }
+        retained = {};
+        retained = receive();
+        source.close();
+        target.close();
+    }
+    require(retained.back() == std::byte{42}, "closing transport invalidated retained bytes");
+    retained = {};
 }
 
 void inputs() {
@@ -263,8 +600,8 @@ void inputs() {
     data.reset();
     require(!owner.expired() && !transfers.ready(keys), "input owner was released before upload");
     transfers.progress(source, 11);
-    const auto control =
-        std::make_shared<wire::Message>(wire::Message{wire::Kind::Commit, 11, {std::byte{23}}});
+    const auto control = std::make_shared<wire::Message>(
+        wire::Message{wire::Kind::Commit, 11, wire::Bytes{std::byte{23}}});
     const dist::OutgoingMessage message{1, control};
     require(source.try_send({&message, 1}, dist::Traffic::Continuation),
             "bulk input consumed continuation capacity");
@@ -276,7 +613,7 @@ void inputs() {
     while (!ended) {
         require(std::chrono::steady_clock::now() < until, "bounded input transfer stalled");
         transfers.progress(source, 11);
-        auto value = target.poll();
+        auto value = poll_message(target);
         if (!value) {
             std::this_thread::yield();
             continue;
@@ -310,12 +647,129 @@ void inputs() {
     require(transfers.ready(keys) && owner.expired(), "ready input retained its source payload");
     transfers.release(7);
 }
+
+void startup_diagnostics() {
+    std::vector<wire::Bytes> sent;
+    dist::StartupReporter reporter([&](wire::Bytes bytes) {
+        sent.push_back(std::move(bytes));
+        return true;
+    });
+    const auto observer = reporter.observer();
+    {
+        StartupPhaseScope phase(observer, StartupPhase::WeightsMaterialize,
+                                StartupProgressUnit::Bytes, 100);
+        for (std::uint64_t i = 1; i <= 100; ++i) phase.progress(i, 100);
+        phase.complete(100, 100);
+    }
+    require(sent.size() < 10, "startup progress was not coalesced");
+    auto snapshot = dist::decode_startup(reporter.snapshot());
+    require(snapshot.size() == 1 && snapshot[0].status == StartupStatus::Complete &&
+                snapshot[0].current == 100 && snapshot[0].elapsed_ns > 0,
+            "startup final snapshot lost producer timing or completion");
+    reporter.attempt(1);
+    {
+        StartupPhaseScope phase(observer, StartupPhase::ProgramInitialize);
+        phase.fail();
+    }
+    const auto failure = dist::decode_failure(
+        dist::encode_failure({"allocation rejected", reporter.failure_context()}));
+    require(failure.reason == "allocation rejected" && failure.startup &&
+                failure.startup->attempt == 1 &&
+                failure.startup->phase == StartupPhase::ProgramInitialize,
+            "failure lost its startup attempt or phase");
+    reporter.close();
+    const auto count = sent.size();
+    observer.callback({.phase = StartupPhase::CudaGraphPrepare});
+    require(sent.size() == count && reporter.snapshot().empty(),
+            "retained startup observer remained connected after Ready");
+    StartupObserver throwing{[](const StartupEvent&) { throw std::runtime_error("log failed"); }};
+    StartupPhaseScope phase(throwing, StartupPhase::TargetPlan);
+    phase.complete();
+}
+
+void terminal_messages() {
+    for (bool truncated : {false, true}) {
+        int sockets[2], healthy[2];
+        require(
+            ::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sockets) == 0 &&
+                ::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, healthy) == 0,
+            "terminal socketpair failed");
+        dist::Socket sender(sockets[0]), other(healthy[0]);
+        dist::Transport target;
+        target.add(1, dist::Socket(sockets[1]));
+        target.add(2, dist::Socket(healthy[1]));
+        target.start();
+        wire::Message failed{wire::Kind::Failed, 11,
+                             dist::encode_failure({"missing /models/example.ninfer", {}})};
+        auto frame = wire::encode_header(failed);
+        frame.insert(frame.end(), failed.payload.begin(), failed.payload.end());
+        if (truncated) frame.pop_back();
+        // Fragment both header and payload; EOF immediately follows the final byte.
+        for (const auto byte : frame)
+            require(::send(sender.fd(), &byte, 1, MSG_NOSIGNAL) == 1, "fragment send failed");
+        sender.close();
+        if (!truncated) {
+            auto event           = next_event(target);
+            const auto& incoming = std::get<dist::IncomingMessage>(event);
+            require(incoming.peer == 1 && incoming.message.kind == wire::Kind::Failed &&
+                        dist::decode_failure(incoming.message.payload).reason ==
+                            "missing /models/example.ninfer",
+                    "complete failure was lost before EOF");
+        }
+        const auto event   = next_event(target);
+        const auto& closed = std::get<dist::PeerStatus>(event);
+        require(closed.peer == 1 && closed.receive_closed && !closed.stopped &&
+                    (!truncated || closed.error.find("inside a message") != std::string::npos),
+                "EOF did not distinguish a complete failure from a truncated frame");
+        dist::send_message(other, {wire::Kind::Ready, 11, {}},
+                           std::chrono::steady_clock::now() + std::chrono::seconds(2));
+        const auto next = next_event(target);
+        require(std::get<dist::IncomingMessage>(next).peer == 2 && target.failure().empty() &&
+                    target.failure_signal()->load(),
+                "one failed peer stopped reception from another peer");
+    }
+}
+
+void diagnostic_backpressure() {
+    int sockets[2];
+    require(::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, sockets) == 0,
+            "diagnostic socketpair failed");
+    dist::Socket sender(sockets[0]);
+    dist::TransportLimits limits;
+    limits.diagnostic_messages = 1;
+    dist::Transport target(limits);
+    target.add(0, dist::Socket(sockets[1]));
+    target.start();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    dist::send_message(sender, {wire::Kind::StartupProgress, 11, wire::Bytes(64)}, until);
+    auto retained = next_event(target);
+    dist::send_message(sender, {wire::Kind::StartupProgress, 11, wire::Bytes(64)}, until);
+    dist::send_message(sender, {wire::Kind::Stopped, 11, {}}, until);
+    sender.close();
+    const auto stopped = next_event(target);
+    require(std::get<dist::IncomingMessage>(stopped).message.kind == wire::Kind::Stopped,
+            "full diagnostic credit blocked a control response");
+    const auto closed = std::get<dist::PeerStatus>(next_event(target));
+    require(closed.stopped && closed.receive_closed && closed.error.empty() &&
+                !target.failure_signal()->load(),
+            "normal shutdown was reported as transport failure");
+}
+
 } // namespace
 
 int main() {
     try {
+        topology_identity();
+        model_preparation();
+        cache_profiles_roundtrip();
         native_work();
+        context_observations();
         queues();
+        startup_diagnostics();
+        terminal_messages();
+        diagnostic_backpressure();
+        retained_payload();
+        compact_payloads();
         inputs();
         RankSnapshot memory;
         memory.rank                                             = 1;
@@ -323,7 +777,16 @@ int main() {
         memory.memory.workspace                                 = {64, 96, 80};
         memory.memory.experts.emplace().fixed_experts_per_layer = {1, 7, 3};
         RankMemoryBudget budget;
-        budget.graphs = GraphMemorySummary{42, -12, 5, -8};
+        budget.headroom_bytes         = 512;
+        budget.host_reservation_bytes = 1024;
+        budget.planned_slack_bytes    = 7;
+        budget.graphs                 = GraphMemorySummary{.rebuild_estimate_bytes      = 42,
+                                                           .warmup_increment_bytes      = -8,
+                                                           .preparation_increment_bytes = -12,
+                                                           .preparation_peak_bytes      = 23,
+                                                           .calibration_increment_bytes = 5};
+        memory.communication.push_back(
+            {.group = 1, .size = 2, .startup_memory = CommunicationMemory{100, 20, 80}});
         wire::Encoder out;
         runtime::protocol::encode(out, memory);
         runtime::protocol::encode(out, budget);
@@ -334,13 +797,41 @@ int main() {
         in.finish();
         require(report.rank == 1 && report.node == 3 &&
                     report.memory.workspace.required_peak_bytes == 96 &&
+                    planning.headroom_bytes == 512 && planning.host_reservation_bytes == 1024 &&
+                    planning.planned_slack_bytes == 7 &&
                     planning.graphs->preparation_increment_bytes == -12 &&
+                    planning.graphs->preparation_peak_bytes == 23 &&
+                    report.communication.at(0).startup_memory->tracked_device_bytes == 100 &&
                     report.memory.experts->fixed_experts_per_layer ==
                         std::vector<std::uint32_t>{1, 7, 3},
                 "resource observation lost rank identity, values or signed calibration");
+        wire::Encoder snapshot;
+        runtime::protocol::encode(snapshot, memory);
+        const auto snapshot_bytes = std::move(snapshot).take().size();
+        for (const auto& error :
+             {std::string{}, std::string(runtime::protocol::kMeasurementErrorBytes + 1, 'x')}) {
+            wire::Encoder boundary;
+            runtime::protocol::encode_measurement_report(boundary, 17, error, memory);
+            const auto payload = std::move(boundary).take();
+            require(payload.size() <=
+                        runtime::protocol::measurement_report_capacity(snapshot_bytes),
+                    "measurement envelope exceeds its reserved report capacity");
+            wire::Decoder input(payload);
+            require(input.u64() == 17, "measurement query identity changed");
+            const auto detail = input.string();
+            require(detail.size() <= runtime::protocol::kMeasurementErrorBytes &&
+                        detail.empty() == error.empty(),
+                    "measurement error exceeded its bound or lost success status");
+            const auto measured = runtime::protocol::rank_snapshot(input);
+            input.finish();
+            require(measured.rank == memory.rank &&
+                        measured.memory.workspace.measurement_peak_bytes == 80,
+                    "measurement framing changed the resource snapshot");
+        }
         RankExecutionObservation completion;
         completion.path                                 = ExecutionPath::Graph;
-        completion.gpu                                  = {123, {}, 456, {}};
+        completion.gpu                                  = {123, {}, 456, {}, 45, 67};
+        completion.attention                            = {ExecutionKind::Decode, {1, 3, 10, 16}};
         completion.communication_graph.calls[0]         = 37;
         completion.communication_graph.payload_bytes[0] = 8192;
         wire::Encoder observed;
@@ -350,7 +841,12 @@ int main() {
         const auto completed = runtime::protocol::rank_execution_observation(completed_input);
         completed_input.finish();
         require(completed.path == ExecutionPath::Graph && completed.gpu.result_stream_ns == 123 &&
-                    !completed.gpu.commit_stream_ns &&
+                    !completed.gpu.commit_stream_ns && completed.gpu.draft_stream_ns == 45 &&
+                    completed.gpu.target_stream_ns == 67 && completed.attention &&
+                    completed.attention->kind == ExecutionKind::Decode &&
+                    completed.attention->work.rows == 3 &&
+                    completed.attention->work.valid_positions == 10 &&
+                    completed.attention->work.scheduled_positions == 16 &&
                     completed.communication_graph.calls[0] == 37 &&
                     completed.communication_graph.payload_bytes[0] == 8192,
                 "completion observations lost GPU coverage or replayed communication work");

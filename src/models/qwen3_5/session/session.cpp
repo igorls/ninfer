@@ -19,8 +19,8 @@ const runtime::RequestPlanSummary& RequestBasePlan::summary() const noexcept {
     return impl_ != nullptr ? impl_->summary : empty;
 }
 
-const qwen::PreparedContextCache& RequestBasePlan::context_cache() const noexcept {
-    static const qwen::PreparedContextCache empty;
+const models::frontend::PreparedContextCache& RequestBasePlan::context_cache() const noexcept {
+    static const models::frontend::PreparedContextCache empty;
     return impl_ != nullptr ? impl_->context_cache : empty;
 }
 
@@ -80,8 +80,38 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
 std::optional<SourceCandidate>
 Session::inspect_source(const RequestBasePlan& base, std::optional<CheckpointHandle> checkpoint,
                         bool consume_source, std::span<const CheckpointHandle> private_points,
-                        std::span<const CheckpointHandle> retired_points) const {
-    return impl_->inspect_source(base, checkpoint, consume_source, private_points, retired_points);
+                        std::span<const CheckpointHandle> retired_points,
+                        runtime::PlacementId target, const ResumeState* resume) const {
+    return impl_->inspect_source(base, checkpoint, consume_source, private_points, retired_points,
+                                 target, resume);
+}
+
+std::vector<PlacementDescriptor> Session::placement_descriptions() const { return {{0, {0}}}; }
+
+std::span<const runtime::PlacementId> Session::placements(const RequestBasePlan&) const {
+    static constexpr std::array<runtime::PlacementId, 1> placements{{{0}}};
+    return placements;
+}
+
+runtime::PlacementId Session::placement(SequenceHandle sequence) const {
+    (void)impl_->lane(sequence);
+    return {0};
+}
+
+std::uint64_t Session::load_tokens(SequenceHandle sequence) const {
+    const auto lane     = impl_->lane(sequence);
+    const auto& control = impl_->requests[lane];
+    const auto& state   = impl_->sequences[lane];
+    return std::max({control.base->summary.prompt_tokens,
+                     state.continuation.metadata.execution_frontier,
+                     control.recovery ? control.recovery->frontier : 0U});
+}
+
+BindingEvaluation Session::assess_binding(const RequestBasePlan& base, runtime::LaneId lane,
+                                          const SourceCandidate& candidate,
+                                          const ResumeState* resume, ExecutionUnitKind kind,
+                                          std::uint32_t tokens) const {
+    return impl_->plan_binding(base, lane, candidate, resume, kind, tokens).evaluation;
 }
 
 PrefixShortlistKey Session::checkpoint_key(CheckpointHandle h, std::uint32_t f) const {
@@ -106,7 +136,9 @@ std::uint64_t Session::released_bytes(const ContextReleaseSet& releases,
                                       const ContextAssessment& assessment) const {
     ContextReleaseSet relevant = releases;
     std::erase_if(relevant.records, [&](const auto& record) {
-        return record.domain.memory != assessment.demand.memory;
+        return std::none_of(assessment.placement.domains.begin(),
+                            assessment.placement.domains.end(),
+                            [&](const auto& item) { return item.domain == record.domain; });
     });
     return impl_->directory.released_bytes(relevant);
 }
@@ -114,6 +146,15 @@ std::uint64_t Session::released_bytes(const ContextReleaseSet& releases,
 std::uint64_t Session::useful_release_bytes(const ContextReleaseSet& released,
                                             const ContextAssessment& assessment) const {
     return impl_->directory.useful_release_bytes(released, assessment);
+}
+
+std::vector<std::uint64_t> Session::release_limits(const ContextAssessment& assessment) const {
+    return impl_->directory.release_limits(assessment);
+}
+
+runtime::ContextReleaseMeasure Session::release_measure(const ContextReleaseSet& released,
+                                                        const ContextAssessment& assessment) const {
+    return impl_->directory.release_measure(released, assessment);
 }
 
 runtime::ContextStart Session::start_maintenance(const ContextAssessment& assessment) {
@@ -144,7 +185,7 @@ Session::evaluate_recovery(std::span<const CheckpointHandle> advertised) const {
     return impl_->recovery_index.evaluate(advertised);
 }
 
-std::size_t Session::checkpoint_capacity() const noexcept { return impl_->checkpoints.capacity(); }
+std::size_t Session::checkpoint_extent() const noexcept { return impl_->checkpoints.size(); }
 
 std::vector<runtime::ContextTransferRequirement>
 Session::checkpoint_restore_requirements(CheckpointHandle h) const {
@@ -165,11 +206,6 @@ bool Session::revoke_snapshot(ResumeState& paused) noexcept {
 
 std::size_t Session::host_bytes_released(std::span<const CheckpointHandle> checkpoints) const {
     return impl_->host_bytes_released(checkpoints);
-}
-
-std::optional<Session::HostRequirement>
-Session::pause_host_requirements(SequenceHandle sequence) const {
-    return impl_->pause_host_requirements(sequence);
 }
 
 std::size_t Session::release_redundant_host(std::span<const CheckpointHandle> excluded,
@@ -227,9 +263,18 @@ runtime::ContextStart Session::start_demote(const ContextDemotion& plan,
     return impl_->start_demote(plan, host_victims);
 }
 
-bool Session::prepare_pause(SequenceHandle sequence, bool save_snapshot,
+std::vector<PauseOption> Session::pause_options(SequenceHandle sequence) const {
+    return impl_->pause_options(sequence);
+}
+
+bool Session::pause_contributes(SequenceHandle sequence, const PauseOption& option,
+                                const ContextAssessment& assessment) const {
+    return impl_->pause_contributes(sequence, option, assessment);
+}
+
+bool Session::prepare_pause(SequenceHandle sequence, runtime::PauseAction action,
                             std::span<const CheckpointHandle> host_victims) {
-    return impl_->prepare_pause(sequence, save_snapshot, host_victims);
+    return impl_->prepare_pause(sequence, action, host_victims);
 }
 
 Session::HostRequirement Session::demotion_host_requirements(const ContextDemotion& plan) const {
@@ -270,7 +315,9 @@ Session::plan_releases(std::span<const CheckpointHandle> allowed,
     return impl_->plan_releases(allowed, excluded, demand);
 }
 
-bool Session::start_pause(SequenceHandle h, bool save) { return impl_->start_pause(h, save); }
+bool Session::start_pause(SequenceHandle h, runtime::PauseAction action) {
+    return impl_->start_pause(h, action);
+}
 
 bool Session::context_blocks(SequenceHandle sequence) const noexcept {
     return impl_->context_blocks(sequence);
@@ -335,7 +382,16 @@ void Session::fail_all_cleanup() noexcept { impl_->fail_all_cleanup(); }
 
 PhysicalUsageSnapshot Session::physical_usage() const noexcept { return impl_->physical_usage(); }
 
-void Session::reset_measurement_peaks() { impl_->reset_measurement_peaks(); }
+std::optional<SequenceHandle> Session::prefill_continuation() const {
+    const auto owner = impl_->vision_window.owner();
+    if (owner && impl_->valid_sequence(owner->sequence)) return owner->sequence;
+    return {};
+}
+
+void Session::yield_prefill(SequenceHandle sequence) {
+    const auto owner = impl_->vision_window.owner();
+    if (owner && owner->sequence == sequence) impl_->vision_window.revoke(*owner);
+}
 
 bool Session::capture_is_discovered_prefix(SequenceHandle handle) const {
     return impl_->capture_is_discovered_prefix(handle);
@@ -369,8 +425,12 @@ SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> definition_in, S
       causal_scoring(plan.causal_scoring) {
     if (!definition || !plan.profile || plan.context.pools.empty())
         throw std::invalid_argument("Session preparation is incomplete");
-    checkpoints.configure(4ULL * plan.context.state.logical_capacity + 2ULL * max_concurrency,
-                          directory.metadata_budget());
+    checkpoints.configure(Checkpoints::capacity_for_metadata(directory.metadata_budget().limit()),
+                          directory.metadata_budget(), &recovery_index);
+    if (!causal_scoring) {
+        count_storage.acquire(TokenCountBuilder::capacity_bytes(plan.profile->public_tokens));
+        count_builder.prepare(plan.profile->public_tokens);
+    }
     releases.reserve(max_concurrency);
     for (std::uint32_t i = 0; i < max_concurrency; ++i) sequences[i].lane = i;
 }
@@ -427,6 +487,5 @@ AbortResult SessionImpl::abort(SequenceHandle h) noexcept {
     return out;
 }
 
-void SessionImpl::reset_measurement_peaks() { executor().reset_measurement_peaks(); }
 
 } // namespace ninfer::models::qwen3_5::detail

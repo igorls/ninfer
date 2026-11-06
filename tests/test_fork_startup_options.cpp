@@ -78,7 +78,7 @@ void fork_options() {
                                 "model.ninfer",
                                 "--desktop-reserve",
                                 "1700MiB",
-                                "--context-slack-floor",
+                                "--memory-headroom",
                                 "2GiB",
                                 "--context-capacity",
                                 "auto",
@@ -115,7 +115,7 @@ void fork_options() {
                                 "1.1"});
     const auto& engine = options.launch.engine;
     require(engine.desktop_reserve_bytes == 1700ULL * 1048576 &&
-                engine.min_slack_floor_bytes == 2ULL * 1073741824 &&
+                engine.memory_headroom_bytes == 2ULL * 1073741824 &&
                 engine.clamp_concurrency_to_pool,
             "desktop sizing controls were lost");
     require(options.model_aliases == std::vector<std::string>{"router", "worker"},
@@ -131,9 +131,9 @@ void fork_options() {
     require(options.launch.generation.sampling.repetition_penalty == 1.1F,
             "startup repetition penalty was lost");
     const auto zero = parse(
-        {"ninfer-serve", "model.ninfer", "--desktop-reserve", "0B", "--context-capacity", "8GiB", "--context-slack-floor", "4GiB"});
+        {"ninfer-serve", "model.ninfer", "--desktop-reserve", "0B", "--context-capacity", "8GiB", "--memory-headroom", "4GiB"});
     require(zero.launch.engine.desktop_reserve_bytes == 0 &&
-                zero.launch.engine.min_slack_floor_bytes == 0 &&
+                zero.launch.engine.memory_headroom_bytes == (4ULL << 30) &&
                 zero.launch.generation.preserve_thinking == false,
             "explicit pool, zero reserve or closed-turn reasoning policy changed");
     for (const auto& suffix :

@@ -29,6 +29,7 @@ public:
     void discard(runtime::ExecutionTicket, runtime::CommandSequence);
     [[nodiscard]] std::optional<runtime::ExecutionEvent<ExecutionTypes>> poll();
     void drain();
+    void wait_for_device() const;
 
     [[nodiscard]] RankMemoryUsage observe_resources() const;
     [[nodiscard]] std::optional<GraphMemorySummary> graph_memory_observation() const;
@@ -40,7 +41,8 @@ private:
 
     friend std::unique_ptr<RankProgram> create_rank_program(const execution::Parameters&,
                                                             SequencePlan&&, DeviceContext&,
-                                                            const StartupObserver&);
+                                                            const StartupObserver&,
+                                                            GraphPreparationMode);
 };
 
 } // namespace ninfer::models::qwen3_5

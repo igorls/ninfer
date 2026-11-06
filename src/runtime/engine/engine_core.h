@@ -6,9 +6,11 @@
 #include "runtime/contract/resources.h"
 #include "runtime/engine/request_record.h"
 #include "runtime/engine/context_cache/resource_manager.h"
+#include "runtime/engine/context_cache/placement_policy.h"
 #include "runtime/engine/scheduler.h"
 #include "runtime/engine/generation_budget.h"
 #include "runtime/executor/contract.h"
+#include "runtime/executor/measurement.h"
 #include "runtime/observability/snapshot.h"
 
 #include <algorithm>
@@ -18,6 +20,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -74,6 +77,9 @@ public:
           max_concurrency_(options.max_concurrency),
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
+          speculative_positions_(options.speculative.backend == SpeculativeBackend::None
+                                     ? 0
+                                     : options.speculative.draft_tokens),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
           resources_(options.context_cache.enabled, std::move(context_cost)),
           on_fatal_error_(options.on_fatal_error), route_observer_(options.expert_route_observer) {
@@ -94,16 +100,27 @@ public:
         for (const auto& pool : instance_.session->kv_pools()) {
             cumulative_stats_.kv_pools.push_back({pool.id.index, std::string(pool.label), 0});
         }
+        cumulative_stats_.speculative_attempted_per_position.resize(speculative_positions_);
+        cumulative_stats_.speculative_accepted_per_position.resize(speculative_positions_);
+        for (const auto& placement : instance_.session->placement_descriptions())
+            cumulative_stats_.placements.push_back({.id = placement.id});
         stats_snapshot_             = cumulative_stats_;
         published_snapshot_.runtime = cumulative_stats_;
         published_snapshot_.ranks.assign(instance_.executor->observations().begin(),
                                          instance_.executor->observations().end());
         paused_.reserve(max_outstanding_);
+        request_observations_.reserve(max_outstanding_ + 1);
+        published_requests_.reserve(max_outstanding_);
+        published_snapshot_.decode_by_batch.resize(max_concurrency_);
+        const auto frames = instance_.executor->capacity();
+        execution_observations_.reserve(frames.compute_frames + frames.context_frames);
+        published_snapshot_.in_flight.reserve(frames.compute_frames + frames.context_frames);
         std::promise<void> startup;
         std::future<void> started = startup.get_future();
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
             try {
                 instance_.executor->bind_to_current_thread();
+                publish_runtime_stats();
                 startup.set_value();
             } catch (...) {
                 startup.set_exception(std::current_exception());
@@ -152,6 +169,17 @@ public:
         Submission(const Submission&)            = delete;
         Submission& operator=(const Submission&) = delete;
 
+        [[nodiscard]] std::uint64_t request_id() const noexcept {
+            return request_ ? request_->id : 0;
+        }
+
+        void wait_for_admission(const CancellationView& cancellation) {
+            if (owner_ == nullptr || request_ == nullptr) {
+                throw std::logic_error("concurrent submission is empty");
+            }
+            owner_->wait_for_admission(request_, cancellation);
+        }
+
         GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) {
             if (owner_ == nullptr || request_ == nullptr) {
                 throw std::logic_error("concurrent submission is empty");
@@ -198,7 +226,11 @@ public:
         std::uint64_t request_id        = 0;
         std::uint64_t publication_order = 0;
         {
-            std::lock_guard lock(queue_mutex_);
+            std::unique_lock lock(queue_mutex_);
+            if (!queue_cv_.wait_until(lock, pending_deadline,
+                                      [&] { return stopping_ || failed_ || !measurement_; }))
+                throw RequestError(RequestErrorKind::QueueTimeout,
+                                   "inference request expired at a measurement boundary");
             if (stopping_ || failed_) {
                 throw RequestError(RequestErrorKind::Unavailable,
                                    "inference engine is unavailable");
@@ -210,6 +242,7 @@ public:
                 throw std::overflow_error("request identity space exhausted");
             }
             ++outstanding_;
+            ++preparing_requests_;
             request_id        = next_request_id_++;
             publication_order = next_publication_order_++;
         }
@@ -244,20 +277,29 @@ public:
                                                 std::move(options), consumer_mode,
                                                 std::move(observation), pending_deadline, ready);
             request->decode_by_batch.resize(max_concurrency_);
+            request->speculative_stats.attempted_per_position.resize(speculative_positions_);
+            request->speculative_stats.accepted_per_position.resize(speculative_positions_);
             request->context_transfers.resize(instance_.session->kv_pools().size() + 1);
         } catch (...) {
-            release_reserved_capacity();
+            {
+                std::lock_guard lock(queue_mutex_);
+                --preparing_requests_;
+                --outstanding_;
+            }
+            queue_cv_.notify_all();
             throw;
         }
 
         {
             std::lock_guard lock(queue_mutex_);
+            --preparing_requests_;
             if (stopping_ || failed_) {
                 --outstanding_;
                 throw RequestError(RequestErrorKind::Unavailable,
                                    "inference engine is unavailable");
             }
             pending_.push_back(request);
+            ++submitted_requests_;
         }
         request_admission_check();
         queue_cv_.notify_one();
@@ -265,15 +307,19 @@ public:
     }
 
     // Published observations are copied without waiting for the execution owner.
-    [[nodiscard]] std::optional<EngineSnapshot> try_snapshot() const {
+    [[nodiscard]] std::optional<EngineSnapshot> try_snapshot(SnapshotOptions options = {}) const {
         std::unique_lock lock(stats_mutex_, std::try_to_lock);
         if (!lock.owns_lock()) return std::nullopt;
-        return published_snapshot_;
+        auto result = published_snapshot_;
+        if (options.include_requests) result.requests = published_requests_;
+        return result;
     }
 
-    [[nodiscard]] EngineSnapshot snapshot() const {
+    [[nodiscard]] EngineSnapshot snapshot(SnapshotOptions options = {}) const {
         std::lock_guard lock(stats_mutex_);
-        return published_snapshot_;
+        auto result = published_snapshot_;
+        if (options.include_requests) result.requests = published_requests_;
+        return result;
     }
 
     [[nodiscard]] bool is_available() const {
@@ -281,14 +327,18 @@ public:
         return !stopping_ && !failed_;
     }
 
-    void reset_measurement_peaks() {
-        std::scoped_lock execution_lock(execution_mutex_);
-        if (!resident_empty() || instance_.executor->has_pending_work())
-            throw std::logic_error("measurement window requires an idle engine");
-        instance_.session->reset_measurement_peaks();
-        std::lock_guard stats_lock(stats_mutex_);
-        const auto ranks = instance_.executor->observations();
-        published_snapshot_.ranks.assign(ranks.begin(), ranks.end());
+    [[nodiscard]] EngineSnapshot measure(MeasurementCommand command) {
+        auto request     = std::make_unique<MeasurementRequest>();
+        request->command = command;
+        auto result      = request->completion.get_future();
+        {
+            std::lock_guard lock(queue_mutex_);
+            if (stopping_ || failed_) throw std::runtime_error("inference engine is unavailable");
+            if (measurement_) throw std::logic_error("a measurement boundary is already pending");
+            measurement_ = std::move(request);
+        }
+        queue_cv_.notify_all();
+        return result.get();
     }
 
     // Runs `work` on the worker at a boundary where no execution unit is in
@@ -327,6 +377,13 @@ public:
     }
 
 private:
+    struct MeasurementRequest {
+        MeasurementCommand command{};
+        std::promise<EngineSnapshot> completion;
+    };
+
+    bool process_measurement();
+
     enum class HostWorkClass : std::uint8_t {
         Decode,
         Prefill,
@@ -348,6 +405,9 @@ private:
         std::vector<ResidencyId> residencies;
         std::vector<std::uint32_t> lanes;
         std::vector<bool> cancelled;
+        std::array<bool, kMaximumConcurrency> progressed{};
+        std::optional<std::uint64_t> retired_ns;
+        bool service_accounted = false;
         std::vector<TokenId> control_tokens;
         std::uint32_t control_stride = 0;
         std::vector<std::size_t> generated_sizes;
@@ -470,6 +530,11 @@ private:
     };
 
     void publish_runtime_stats();
+    [[nodiscard]] RequestSnapshot observe_request(const Request&) const;
+    void record_completion(const std::shared_ptr<Request>&, FinishReason, bool failed);
+
+    void wait_for_admission(const std::shared_ptr<Request>& request,
+                            const CancellationView& cancellation);
 
     GenerationResult wait_for_request(std::shared_ptr<Request> request, OutputSink* sink,
                                       const CancellationView& cancellation);
@@ -530,19 +595,19 @@ private:
 
     void abandon_request(std::shared_ptr<Request> request) noexcept;
 
-    bool mark_completed(const std::shared_ptr<Request>& request) noexcept;
+    bool prepare_completion(const std::shared_ptr<Request>& request);
 
-    void release_planning_state(const std::shared_ptr<Request>& request) noexcept;
+    void release_request(const std::shared_ptr<Request>& request) noexcept;
+
+    // The worker publishes the matching scheduling snapshot before making the response visible.
+    void publish_completion(const std::shared_ptr<Request>& request, GenerationResult result,
+                            std::exception_ptr error = {});
 
     void complete_error(const std::shared_ptr<Request>& request, std::exception_ptr error);
 
     void complete_success(const std::shared_ptr<Request>& request, FinishReason reason);
 
     void complete_cancelled(const std::shared_ptr<Request>& request);
-
-    void complete_detached_cancelled(const std::shared_ptr<Request>& request);
-
-    void remove_completed_slot(std::uint32_t lane);
 
     [[nodiscard]] std::array<bool, kMaximumConcurrency> snapshot_cancellations() const noexcept;
 
@@ -563,7 +628,7 @@ private:
         return true;
     }
 
-    // Called by the worker at a boundary, holding execution_mutex_. Returns true
+    // Called by the worker at a boundary, as the sole execution owner. Returns true
     // when work ran, so the caller restarts the loop rather than executing a unit
     // against state the work may have changed.
     [[nodiscard]] bool run_quiescence_work_if_ready() {
@@ -584,7 +649,7 @@ private:
             quiescence_queue_.pop_front();
         }
         // The work's failure is the caller's to handle. Letting it reach the
-        // worker's catch would run fail_all_locked and exit the process, which
+        // worker's catch would run fail_all and exit the process, which
         // would turn "this capacity change is not possible" into "the engine
         // died".
         const auto held_at = Clock::now();
@@ -680,7 +745,6 @@ private:
         }
     }
 
-    [[nodiscard]] bool has_older_resident(std::uint64_t ticket) const noexcept;
 
     void record_context_work(const typename ModelContract::ContextProgress& progress,
                              const std::shared_ptr<Request>& owner);
@@ -690,12 +754,16 @@ private:
 
     ReclaimProgress reclaim(const ContextAssessment& assessment, bool allow_pause,
                             std::span<const Checkpoint> excluded               = {},
-                            typename ResourceManagement::ReclaimCursor* cursor = nullptr,
-                            std::optional<std::uint64_t> priority_ticket       = std::nullopt);
+                            typename ResourceManagement::ReclaimCursor* cursor = nullptr);
 
-    bool pause_reclaim_victim(std::optional<std::uint64_t> priority_ticket);
+    bool pause_reclaim_victim(const ContextAssessment&);
 
-    bool pause_resident(std::uint32_t lane);
+    enum class PauseGoal { YieldLane, ReleaseCapacity, RelocateOnly };
+    bool pause_resident(std::uint32_t lane, PauseGoal goal = PauseGoal::YieldLane,
+                        const ContextAssessment* pressure = nullptr);
+
+    void order_binding_sources(const std::shared_ptr<Request>&, LaneId,
+                               std::vector<typename ResourceManagement::SourceChoice>&);
 
     void finish_source_wait(const std::shared_ptr<Request>& request,
                             Clock::time_point now) noexcept;
@@ -716,6 +784,8 @@ private:
     [[nodiscard]] ExecutionUnit execution_unit(const Request& request) const;
 
     void reserve_resident_units(ReservationScope scope = ReservationScope::Round);
+    [[nodiscard]] std::optional<std::uint32_t>
+    next_prefill(const std::array<std::shared_ptr<Request>, kMaximumConcurrency>&) const;
 
     // Admission can pin an existing writer's tail after its reservation. Membership must
     // observe current context dependencies, including pauses selected during reclamation.
@@ -732,7 +802,7 @@ private:
 
     [[nodiscard]] bool start_control(const ControlMembership& membership);
 
-    void resolve_control(const ComputeFlight& flight);
+    void resolve_control(ComputeFlight& flight);
 
     void supply_decision(ExecutionTicket ticket, const DecisionRequest& decision);
 
@@ -744,9 +814,9 @@ private:
 
     [[nodiscard]] bool compute_pending() const noexcept;
 
-    // The worker holds execution_mutex_ across the failing operation and this cleanup, so no
-    // Session introspection can observe a partially cleared physical state.
-    void fail_all_locked(std::exception_ptr error) noexcept;
+    void record_service(ComputeFlight& flight) noexcept;
+    void log_worker_failure(std::exception_ptr error) const noexcept;
+    void fail_all(std::exception_ptr error) noexcept;
 
     void begin_cycle(HostPhaseMeasurement& boundary);
 
@@ -770,6 +840,7 @@ private:
     const std::uint32_t max_context_;
     const std::uint32_t max_concurrency_;
     const std::size_t max_outstanding_;
+    const std::uint32_t speculative_positions_;
     const std::chrono::milliseconds pending_timeout_;
     ResourceManagement resources_;
     const std::function<void(std::exception_ptr, const std::string&)> on_fatal_error_;
@@ -787,14 +858,17 @@ private:
     mutable std::mutex quiescence_mutex_;
     std::deque<QuiescenceRequest> quiescence_queue_;
     std::atomic<bool> quiescence_pending_{false};
+    PlacementId next_placement_tie_;
 
-    mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;
     mutable std::mutex stats_mutex_;
     std::condition_variable queue_cv_;
     std::deque<std::shared_ptr<Request>> pending_;
+    std::unique_ptr<MeasurementRequest> measurement_;
+    std::size_t preparing_requests_       = 0;
     std::size_t outstanding_              = 0;
     std::uint64_t next_request_id_        = 1;
+    std::uint64_t submitted_requests_     = 0;
     std::uint64_t next_publication_order_ = 1;
     std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
     std::optional<MaterializingRequest> materializing_;
@@ -811,6 +885,7 @@ private:
     std::array<std::optional<UnitPermit>, kMaximumConcurrency> reserved_units_{};
     std::atomic<bool> admission_check_pending_{false};
     std::atomic<std::uint64_t> schedule_revision_{0};
+    std::uint64_t published_revision_          = 0;
     Clock::time_point pending_deadline_        = Clock::time_point::max();
     std::uint64_t worker_accounted_elapsed_ns_ = 0;
     HostWorkClass current_host_work_class_     = HostWorkClass::Control;
@@ -819,6 +894,8 @@ private:
     RuntimeStats cumulative_stats_;
     RuntimeStats stats_snapshot_;
     EngineSnapshot published_snapshot_;
+    std::vector<RequestSnapshot> request_observations_, published_requests_;
+    std::vector<ExecutionProgress> execution_observations_;
     bool stopping_ = false;
     bool failed_   = false;
     std::thread worker_;

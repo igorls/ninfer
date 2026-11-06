@@ -131,6 +131,9 @@ public:
 
     void start();
     void record_stop();
+    // Records externally observable timing nodes inside a Graph capture.
+    void start_external();
+    void record_stop_external();
     [[nodiscard]] float elapsed_ms() const;
     float stop_ms();
 
@@ -157,6 +160,8 @@ public:
     // Only call during stream capture; this event must outlive every graph referencing it.
     void record_external(cudaStream_t stream);
     void wait(cudaStream_t stream) const;
+    // Capture an external dependency. Record the current producer generation before replay.
+    void wait_external(cudaStream_t stream) const;
     [[nodiscard]] bool ready() const;
     void synchronize() const;
 

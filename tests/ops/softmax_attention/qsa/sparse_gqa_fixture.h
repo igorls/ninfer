@@ -8,6 +8,7 @@
 #include <bit>
 #include <memory>
 #include <numeric>
+#include <thread>
 
 namespace ninfer::test::qsa::sparse {
 
@@ -68,7 +69,7 @@ struct Plane {
 };
 
 struct Fixture {
-    int T, B, history, table_width, table_stride, pages;
+    int T, B, q_heads, kv_heads, history, table_width, table_stride, pages;
     int live_limit = std::numeric_limits<int>::max();
     std::vector<std::uint16_t> qhost, ghost;
     std::vector<int> positions, valid, selectors, tables, ids, counts;
@@ -182,14 +183,14 @@ struct Fixture {
                 for (int j = C * 4; j <= p; ++j) visible[m].push_back(j);
                 std::sort(visible[m].begin(), visible[m].end());
                 if (visible[m].empty()) continue;
-                for (int i = 0; i < 6144; ++i) {
-                    const auto index = std::size_t(m) * 6144 + i;
+                for (int i = 0; i < 256 * q_heads; ++i) {
+                    const auto index = std::size_t(m) * (256 * q_heads) + i;
                     qhost[index]     = f32_to_bf16(sample(index + 711 + phase) * magnitude);
                     ghost[index]     = f32_to_bf16(sample(index + 129 + phase) * 4);
                 }
                 for (int j : visible[m]) {
                     const int page = tables[selectors[b] * table_stride + j / 64];
-                    for (int h = 0; h < 2; ++h)
+                    for (int h = 0; h < kv_heads; ++h)
                         for (int d = 0; d < 256; ++d) {
                             const auto seed =
                                 std::uint32_t((page * 128 + h * 64 + j % 64) * 256 + d);
@@ -245,27 +246,27 @@ struct Fixture {
         const auto run = [&](int first, int last) {
             for (int m = first; m < last; ++m) {
                 if (visible[m].empty()) continue;
-                std::array<double, 6144> transformed_query;
-                for (int h = 0; h < 24; ++h) {
+                std::vector<double> transformed_query(256 * q_heads);
+                for (int h = 0; h < q_heads; ++h) {
                     std::array<double, 256> row;
                     for (int d = 0; d < 256; ++d)
-                        row[d] = bf16_to_f32(qhost[(std::size_t(m) * 24 + h) * 256 + d]);
+                        row[d] = bf16_to_f32(qhost[(std::size_t(m) * q_heads + h) * 256 + d]);
                     if (encoded_key) prepare::hadamard(row);
                     std::copy(row.begin(), row.end(), transformed_query.begin() + h * 256);
                 }
                 naive_dense_softmax_attention(
-                    {256, 24, 2}, 1, int(visible[m].size()), 1.0 / 16,
+                    {256, q_heads, kv_heads}, 1, int(visible[m].size()), 1.0 / 16,
                     [&](int d, int h, int) { return transformed_query[h * 256 + d]; },
                     [&](int d, int h, int j) { return kv(keys, d, h, j, m); },
                     [&](int d, int h, int j) { return kv(values, d, h, j, m); },
                     [](int, int) { return true; },
                     [&](int d, int h, int, double x) {
-                        const auto i = (std::size_t(m) * 24 + h) * 256 + d;
+                        const auto i = (std::size_t(m) * q_heads + h) * 256 + d;
                         result[i]    = x;
                     },
-                    T * B == 1 ? 16 : 1);
-                for (int h = 0; h < 24; ++h) {
-                    const auto base = (std::size_t(m) * 24 + h) * 256;
+                    T * B == 1);
+                for (int h = 0; h < q_heads; ++h) {
+                    const auto base = (std::size_t(m) * q_heads + h) * 256;
                     std::array<double, 256> row;
                     std::copy_n(result.begin() + base, 256, row.begin());
                     if (encoded_value && encoded_value->format.rotate) prepare::hadamard(row);

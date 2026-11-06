@@ -21,6 +21,10 @@ namespace {
 using Json = nlohmann::ordered_json;
 using Kind = RequestErrorKind;
 
+// Structural whitespace stays legal at every JSON site, but each run is bounded: a sampled
+// whitespace run otherwise has no terminal state and can consume the whole output budget.
+constexpr int kMaxJsonWhitespace = 128;
+
 [[noreturn]] void fail(Kind kind, const std::string& path, const std::string& message) {
     throw RequestError(kind, message + " at " + (path.empty() ? "/" : path), path);
 }
@@ -409,8 +413,9 @@ xgrammar::Grammar build_json_grammar(const OutputConstraint& constraint) {
                                "expected JSON object or schema constraint");
         auto grammar = xgrammar::Grammar::FromJSONSchema(
             source, true, std::nullopt, std::pair<std::string, std::string>{",", ":"}, false,
-            std::nullopt, false, false);
-        auto whitespace = xgrammar::Grammar::FromEBNF(R"(root ::= [ \t\r\n]*)");
+            kMaxJsonWhitespace, false, false);
+        auto whitespace = xgrammar::Grammar::FromEBNF(
+            "root ::= [ \\t\\r\\n]{0," + std::to_string(kMaxJsonWhitespace) + "}");
         return xgrammar::Grammar::Concat({whitespace, grammar, whitespace});
     } catch (const xgrammar::JSONSchemaCompileError& error) {
         const auto kind = error.kind == xgrammar::SchemaErrorType::kUnsupportedSchema

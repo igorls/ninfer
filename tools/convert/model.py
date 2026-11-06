@@ -37,6 +37,7 @@ class Model:
     # Facts the architecture adapter decided while reading the source, such as the selected
     # chat template; the CLI records them in the artifact provenance and conversion report.
     provenance: dict = field(default_factory=dict)
+    proposal_domain: str = "indexed"
 
     @property
     def config(self) -> dict:

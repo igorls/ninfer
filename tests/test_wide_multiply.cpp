@@ -18,6 +18,9 @@ static_assert(ninfer::saturating_multiply(1ULL << 32U, 1ULL << 32U) == kMax);
 static_assert(ninfer::saturating_multiply(1ULL << 31U, 1ULL << 32U) == 1ULL << 63U);
 static_assert(ninfer::saturating_add(kMax - 1U, 1U) == kMax);
 static_assert(ninfer::saturating_add(kMax, 1U) == kMax);
+static_assert(ninfer::divide_wide_saturating({1, 0}, 3) == 6148914691236517205ULL);
+static_assert(ninfer::divide_wide_saturating({kMax - 1, 0}, kMax) == kMax - 1);
+static_assert(ninfer::divide_wide_saturating({1, 0}, 1) == kMax);
 
 // Independent oracle: schoolbook multiplication over 16-bit limbs with explicit carries.
 ninfer::WideProduct oracle(std::uint64_t a, std::uint64_t b) {
@@ -62,6 +65,19 @@ int main() {
         const std::uint64_t a = random() >> (random() % 64U);
         const std::uint64_t b = random() >> (random() % 64U);
         check(a, b);
+        if (b) {
+            // Construct N=q*d+r with an independent schoolbook product and r<d.
+            // This tests exact floor division including nonzero remainders and carries.
+            auto numerator = oracle(a, b);
+            const auto remainder = random() % b;
+            const auto before = numerator.low;
+            numerator.low += remainder;
+            numerator.high += numerator.low < before;
+            if (ninfer::divide_wide_saturating(numerator, b) != a) {
+                std::cerr << "wide division violated N=q*d+r\n";
+                ++failures;
+            }
+        }
     }
     return failures == 0 ? 0 : 1;
 }

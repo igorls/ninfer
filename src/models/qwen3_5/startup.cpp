@@ -15,9 +15,9 @@ Startup::Startup(const artifact::Reader& definition_source, const artifact::Read
         const auto& deployment = *options.deployment;
         const auto& parallel   = deployment.parallel;
         if (deployment.ranks.size() != 1 || parallel.tp != 1 || parallel.ep != 1 ||
-            parallel.dp != 1 || parallel.pp != 1)
+            parallel.dp != 1 || parallel.pp != 1 || parallel.adp != 1)
             throw std::invalid_argument(
-                "Qwen3_5 model preparation supports one rank with TP=EP=DP=PP=1");
+                "Qwen3_5 model preparation supports one rank with TP=EP=DP=PP=ADP=1");
     }
     profile       = execution::describe_model(*definition_);
     auto resident = resolve_load(reader_, definition_, device);
@@ -45,19 +45,18 @@ Startup::plan(DeviceContext& device, const EngineOptions& options, WeightPlaceme
     const auto chunk = std::min(options.max_context, options.prefill_chunk ? options.prefill_chunk
                                                      : host_experts        ? 4096U
                                                                            : 1024U);
-    trial.prefill_chunk             = chunk;
-    auto policy                     = options.context_capacity;
-    policy.automatic_headroom_bytes = 0;
-    constexpr bool shared_memory    = NINFER_SHARED_PHYSICAL_MEMORY != 0;
-    auto prototype                  = host_experts ? offload_ : nullptr;
-    auto planner                    = make_sequence_planner(profile, device, trial, prototype);
-    const auto& capacity_plan       = planner.capacity_plan();
-    const auto required_context     = policy.mode == ContextCapacityMode::Explicit
-                                          ? runtime::ContextCapacity{policy.explicit_bytes}
-                                          : capacity_plan.minimum_capacity();
+    trial.prefill_chunk          = chunk;
+    const auto& policy           = options.context_capacity;
+    constexpr bool shared_memory = NINFER_SHARED_PHYSICAL_MEMORY != 0;
+    auto prototype               = host_experts ? offload_ : nullptr;
+    auto planner                 = make_sequence_planner(profile, device, trial, prototype);
+    const auto& capacity_plan    = planner.capacity_plan();
+    const auto required_context  = policy.mode == ContextCapacityMode::Explicit
+                                       ? runtime::ContextCapacity{policy.explicit_bytes}
+                                       : capacity_plan.minimum_capacity();
     if (required_context.device_bytes < capacity_plan.minimum_capacity().device_bytes)
         return std::nullopt;
-    const auto required_bytes       = capacity_plan.reservation_bytes(required_context) +
+    const auto required_bytes    = capacity_plan.reservation_bytes(required_context) +
                                 (shared_memory ? capacity_plan.control_bytes(required_context) : 0);
     if (required_bytes > available) return std::nullopt;
     if (!host_experts) {

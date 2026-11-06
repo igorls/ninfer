@@ -5,17 +5,11 @@
 #include <charconv>
 #include <cstdlib>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <stdexcept>
 
 namespace ninfer::runtime {
-
-std::size_t startup_planning_headroom(const EngineOptions& options) noexcept {
-    return std::max({kDefaultContextHeadroomBytes, options.context_capacity.automatic_headroom_bytes,
-                     options.context_capacity.mode == ContextCapacityMode::Automatic
-                         ? options.min_slack_floor_bytes
-                         : std::size_t{0}});
-}
 
 std::size_t device_budget(std::size_t available) {
     const char* value = std::getenv("NINFER_VRAM_BUDGET_MIB");
@@ -40,25 +34,50 @@ StartupMemoryBudget::StartupMemoryBudget(DeviceMemorySnapshot initial, std::size
         throw std::invalid_argument("Host reservation exceeds available RAM");
 }
 
-std::size_t StartupMemoryBudget::available(DeviceMemorySnapshot current) const {
+std::size_t StartupMemoryBudget::planning_available(DeviceMemorySnapshot current) const noexcept {
+    const auto available = allocation_available(current);
+    return available > headroom_ ? available - headroom_ : 0;
+}
+
+std::size_t StartupMemoryBudget::allocation_available(DeviceMemorySnapshot current) const noexcept {
     const auto consumed = static_cast<std::size_t>(
         std::max<std::int64_t>(0, device_memory_growth(initial_, current)));
     const auto remaining =
         std::min(current.available_bytes(), consumed < limit_ ? limit_ - consumed : 0);
-    return remaining > headroom() ? remaining - headroom() : 0;
+    const auto reserve = initial_.shared_physical_memory ? host_reservation_ : 0;
+    return remaining > reserve ? remaining - reserve : 0;
 }
 
 bool StartupMemoryBudget::fits(DeviceMemorySnapshot current) const noexcept {
+    return shortfall(current) == 0;
+}
+
+std::size_t StartupMemoryBudget::shortfall(DeviceMemorySnapshot current) const noexcept {
     const auto consumed       = device_memory_growth(initial_, current);
     const auto device_reserve = initial_.shared_physical_memory ? host_reservation_ : 0;
-    return consumed <= static_cast<std::int64_t>(limit_ - device_reserve) &&
-           current.system_available_bytes >= host_reservation_;
+    const auto device_shortfall =
+        std::max<std::int64_t>(0, consumed - static_cast<std::int64_t>(limit_ - device_reserve));
+    const auto host_shortfall = current.system_available_bytes < host_reservation_
+                                    ? host_reservation_ - current.system_available_bytes
+                                    : 0;
+    return std::max(static_cast<std::size_t>(device_shortfall), host_shortfall);
 }
 
 std::size_t StartupMemoryBudget::available_host(DeviceMemorySnapshot current) const noexcept {
     return current.system_available_bytes > host_reservation_
                ? current.system_available_bytes - host_reservation_
                : 0;
+}
+
+std::size_t StartupMemoryBudget::corrected_runtime_limit(DeviceMemorySnapshot current,
+                                                         std::size_t previous_runtime_bytes) const {
+    if (!initial_.shared_physical_memory && current.system_available_bytes < host_reservation_)
+        throw std::runtime_error("runtime preparation leaves " +
+                                 std::to_string(current.system_available_bytes) +
+                                 " bytes of Host RAM, below the reserved " +
+                                 std::to_string(host_reservation_) + " bytes");
+    const auto deficit = shortfall(current);
+    return previous_runtime_bytes > deficit ? previous_runtime_bytes - deficit : 0;
 }
 
 std::int64_t StartupMemoryBudget::retained(DeviceMemorySnapshot current,

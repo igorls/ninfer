@@ -110,6 +110,22 @@ void whitespace_contracts(ninfer::text::GrammarCompiler& compiler) {
         check(accepts(compiler, object, text), "JSON object rejected structural whitespace");
     check(accepts(compiler, object, "{" + std::string(80, ' ') + "}"),
           "JSON whitespace has an arbitrary length limit");
+    // Each run is bounded so sampling cannot spend the whole output budget before the value.
+    const std::string longest(128, ' ');
+    const std::string excess(129, '\n');
+    const auto bounded = Constraint::json_schema(R"({"type":"object","properties":{
+        "x":{"type":"integer"}},"required":["x"],"additionalProperties":false})");
+    const auto literal = Constraint::json_schema(R"({"const":{"x":1}})");
+    for (const auto& constraint : {object, bounded, literal}) {
+        check(accepts(compiler, constraint,
+                      longest + "{" + longest + "\"x\"" + longest + ":" + longest + "1" + longest +
+                          "}" + longest),
+              "JSON whitespace rejected a run inside its bound");
+        for (const std::string text :
+             {excess + "{\"x\":1}", "{\"x\":1}" + excess, "{" + excess + "\"x\":1}",
+              "{\"x\":" + excess + "1}", "{\"x\":1" + excess + "}"})
+            check(!accepts(compiler, constraint, text), "JSON whitespace run exceeded its bound");
+    }
     for (const std::string text : {" \t\n", "[]", "{} {}", "{\"x\":1,}", "{\"x\":t rue}",
                                    "{\"x\":1 2}", "{\v\"x\":1}", "{\"x\":\"a\nb\"}"})
         check(!accepts(compiler, object, text), "JSON whitespace relaxed its value language");
@@ -188,6 +204,16 @@ void whitespace_token_masks() {
 }
 
 void contracts(ninfer::text::GrammarCompiler& compiler) {
+    for (const auto* source : {R"({"type":"string","allOf":[{"pattern":"^a$"},{"pattern":"^b$"}]})",
+                               R"({"type":"string","pattern":"^a$","maxLength":0})"}) {
+        bool rejected = false;
+        try {
+            (void)compiler.compile(Constraint::json_schema(source), {}, {});
+        } catch (const ninfer::RequestError& error) {
+            rejected = error.kind() == ninfer::RequestErrorKind::UnsatisfiableJsonSchema;
+        }
+        check(rejected, "empty string intersection was not rejected as unsatisfiable");
+    }
     auto object = Constraint::json_object();
     for (const std::string text : {"{}", R"({"x":[1,true,null,{"y":"你好"}]})"})
         check(accepts(compiler, object, text), "JSON object rejected valid content");

@@ -3,6 +3,12 @@
 #include "distributed/wire.h"
 #include "runtime/executor/contract.h"
 
+#include <string_view>
+
+namespace ninfer::distributed {
+struct TransportLimits;
+}
+
 namespace ninfer::runtime::protocol {
 void encode(distributed::wire::Encoder&, const RankMemoryBudget&);
 [[nodiscard]] RankMemoryBudget memory_budget(distributed::wire::Decoder&);
@@ -10,8 +16,15 @@ void encode(distributed::wire::Encoder&, const RankSnapshot&);
 [[nodiscard]] RankSnapshot rank_snapshot(distributed::wire::Decoder&);
 void encode(distributed::wire::Encoder&, const RankExecutionObservation&);
 [[nodiscard]] RankExecutionObservation rank_execution_observation(distributed::wire::Decoder&);
+[[nodiscard]] std::size_t rank_execution_observation_capacity();
 
-// Payload ceilings include the envelope. The prepared model supplies these from its frame shape.
+inline constexpr std::size_t kMeasurementErrorBytes = 2048;
+[[nodiscard]] std::size_t measurement_report_capacity(std::size_t snapshot_bytes);
+void encode_measurement_report(distributed::wire::Encoder&, std::uint64_t query,
+                               std::string_view error, const RankSnapshot&);
+
+// Execution payload ceilings include their envelopes; report is the encoded RankSnapshot bound.
+// Runtime owns measurement framing around that snapshot.
 struct ControlBudget {
     std::size_t compute_work, context_work, decision, commit, event, report;
 
@@ -19,6 +32,16 @@ struct ControlBudget {
         return kind == FrameKind::Compute ? compute_work : context_work;
     }
 };
+
+[[nodiscard]] constexpr std::size_t envelope_capacity(std::size_t owners) {
+    return 57 + 4 * owners;
+}
+
+[[nodiscard]] std::size_t work_payload_memory(const WorkPayloadCapacity&, ExecutionCapacity,
+                                              std::size_t ranks, bool coordinator);
+
+void validate_control_capacity(const ControlBudget&, ExecutionCapacity,
+                               const distributed::TransportLimits&, std::size_t ranks);
 
 struct Scope {
     std::vector<distributed::RankId> owners;

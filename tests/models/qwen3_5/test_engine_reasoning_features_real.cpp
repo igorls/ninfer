@@ -23,7 +23,7 @@ int main() try {
     options.artifact_path         = artifact;
     options.max_context           = 4096;
     options.prefill_chunk         = 1024;
-    options.kv_cache              = ninfer::KvCacheStorage::Fp8E4M3Row256;
+    options.kv_cache              = ninfer::KvCacheStorage::Fp8E4m3fnGroup128Ue8m0;
     options.context_cache.enabled = false;
     ninfer::test::qwen3_5::set_context_capacity(options);
     ninfer::Engine engine(options);
@@ -56,7 +56,7 @@ int main() try {
         direct.reasoning_features != repeated.reasoning_features ||
         direct.reasoning_features.size() != different.reasoning_features.size() ||
         direct.reasoning_features == different.reasoning_features ||
-        !unrequested.reasoning_features.empty() || direct.reused_prompt_tokens != 0) {
+        !unrequested.reasoning_features.empty() || direct.stats.reused_prompt_tokens != 0) {
         throw std::runtime_error("feature boundary, repeatability or lane reset failed");
     }
     for (const float value : direct.reasoning_features) {

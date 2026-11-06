@@ -66,7 +66,8 @@ void test_arguments() {
     const auto defaults = parse({"ninfer", "--prompt", "hello", "model.ninfer"});
     const auto& engine  = defaults.launch.engine;
     require(engine.max_context == 8192 &&
-                engine.context_capacity.mode == ninfer::ContextCapacityMode::Automatic,
+                engine.context_capacity.mode == ninfer::ContextCapacityMode::Automatic &&
+                engine.memory_headroom_bytes == (1ULL << 30),
             "shared context defaults differ");
     require(!engine.context_cache.enabled && engine.context_cache.host_capacity_bytes == 0,
             "CLI cache defaults differ");
@@ -123,11 +124,57 @@ void test_arguments() {
     }
 }
 
+void test_memory_headroom(const Files& files) {
+    using namespace ninfer::product;
+    const auto path = files.write(R"(
+model.path = 'model.ninfer'
+engine.context_capacity = '2GiB'
+engine.memory_headroom = '768MiB'
+cli.prompt = 'hello'
+)");
+    for (const auto entry :
+         {EntryPoint::Cli, EntryPoint::Serve, EntryPoint::Bench, EntryPoint::Perplexity}) {
+        const auto parse_shared = [&](std::vector<std::string> arguments) {
+            std::vector<char*> argv;
+            for (auto& argument : arguments) argv.push_back(argument.data());
+            return parse_launch_options(static_cast<int>(argv.size()), argv.data(), entry);
+        };
+        const auto file = parse_shared({"ninfer", "--config", path.string()});
+        require(file.launch.engine.memory_headroom_bytes == (768ULL << 20) &&
+                    file.launch.engine.context_capacity.explicit_bytes == (2ULL << 30),
+                "file headroom was lost with explicit Context capacity");
+        for (const auto* capacity : {"auto", "2GiB"}) {
+            const auto overridden =
+                parse_shared({"ninfer", "--config", path.string(), "--memory-headroom", "0B",
+                              "--context-capacity", capacity});
+            require(overridden.launch.engine.memory_headroom_bytes == 0,
+                    "Context policy reset explicit zero headroom");
+            bool shown = false;
+            for (const auto& item : configuration_view(overridden.launch, entry).items) {
+                if (item.key != "engine.memory_headroom") continue;
+                shown = std::get<std::uint64_t>(item.value) == 0 &&
+                        item.unit == ConfigurationUnit::Bytes &&
+                        item.source.kind == ConfigSourceKind::CommandLine;
+            }
+            require(shown, "startup configuration lost effective headroom or its source");
+        }
+        const auto fractional =
+            parse_shared({"ninfer", "--config", path.string(), "--memory-headroom", "0.25GiB"});
+        require(fractional.launch.engine.memory_headroom_bytes == (256ULL << 20),
+                "headroom quantity lost exact bytes");
+    }
+    for (const auto* value : {"-1", "auto", "1.1B", "18446744073709551616B"}) {
+        rejection([&] { serve({"ninfer-serve", "model.ninfer", "--memory-headroom", value}); });
+    }
+}
+
 void test_file_merge(const Files& files) {
     const auto path = files.write(R"(
 [model]
 path = "weights/model.ninfer"
 vision = true
+[vision]
+memory_budget = "512MiB"
 [engine]
 max_context = 16384
 context_capacity = "1.5GiB"
@@ -157,7 +204,8 @@ regex = "file"
     require(base.launch.engine.artifact_path == files.root / "weights/model.ninfer",
             "file-relative model path changed");
     require(base.launch.engine.context_capacity.explicit_bytes == (1536ULL << 20) &&
-                base.launch.engine.context_cache.host_capacity_bytes == 65536,
+                base.launch.engine.context_cache.host_capacity_bytes == 65536 &&
+                base.launch.engine.vision_memory_budget_bytes == (512ULL << 20),
             "file values or exact capacity conversion failed");
     require(base.launch.generation.sampling.seed == UINT64_MAX,
             "uint64 seed string lost precision");
@@ -168,6 +216,8 @@ regex = "file"
                                  "--messages",
                                  "local.json",
                                  "--no-vision",
+                                 "--vision-memory-budget",
+                                 "768MiB",
                                  "--spec",
                                  "none",
                                  "--temperature",
@@ -187,7 +237,8 @@ regex = "file"
     require(replaced.launch.engine.max_context == 32768 &&
                 replaced.launch.engine.context_capacity.mode ==
                     ninfer::ContextCapacityMode::Automatic &&
-                !replaced.launch.engine.enable_vision,
+                !replaced.launch.engine.enable_vision &&
+                replaced.launch.engine.vision_memory_budget_bytes == (768ULL << 20),
             "command-line overrides were applied before the file");
     require(replaced.prompt.empty() && replaced.messages_path == fs::absolute("local.json"),
             "input choice or argv path base failed");
@@ -251,7 +302,7 @@ void test_file_errors_and_example(const Files& files) {
 }
 
 void test_deployment(const Files& files) {
-    const std::string source = R"(
+    std::string source = R"(
 model.path = 'model.ninfer'
 cli.prompt = 'hello'
 [distributed]
@@ -282,6 +333,12 @@ rank = 1
 node = 20
 device = 0
 )";
+#if defined(_WIN32)
+    // This parsing fixture uses absolute paths for its host platform; it does not launch nodes.
+    constexpr std::string_view prefix = "/home/neroued/ninfer";
+    for (std::size_t position = 0; (position = source.find(prefix, position)) != std::string::npos;)
+        source.replace(position, prefix.size(), "C:/ninfer-fixture");
+#endif
     const auto path          = files.write(source);
     const auto cli           = parse({"ninfer", "--config", path.string()});
     const auto server        = serve({"ninfer-serve", "--config", path.string()});
@@ -289,21 +346,38 @@ device = 0
             "entry lost deployment configuration");
     const auto& d = *cli.launch.engine.deployment;
     require(d.coordinator_node == 10 && d.parallel.tp == 2 && d.parallel.ep == 2 &&
-                d.parallel.dp == 1 && d.ranks.size() == 2 && d.connect_timeout_ms == 15000 &&
-                d.shutdown_timeout_ms == 2000 && d.control_port == 0 &&
+                d.parallel.dp == 1 && d.parallel.adp == 1 && d.ranks.size() == 2 &&
+                d.connect_timeout_ms == 15000 && d.shutdown_timeout_ms == 2000 &&
+                d.control_port == 0 &&
                 d.nodes[1].environment.at("NCCL_SOCKET_IFNAME") == "=enp1s0f0np0",
             "deployment values differ");
     const auto printed =
         ninfer::product::format_configuration(ninfer::product::configuration_view(cli));
     require(printed.find("nodes[1].ssh") != std::string::npos &&
-                printed.find("192.168.100.50") != std::string::npos,
+                printed.find("192.168.100.50") != std::string::npos &&
+                printed.find("parallel.adp") != std::string::npos,
             "deployment is missing from startup display");
+    auto adp_source                        = source;
+    constexpr std::string_view adp_setting = "adp = 2\n";
+    adp_source.insert(adp_source.find("[[distributed.nodes]]"), adp_setting);
+    const auto adp_path   = files.write(adp_source);
+    const auto adp_cli    = parse({"ninfer", "--config", adp_path.string()});
+    const auto adp_server = serve({"ninfer-serve", "--config", adp_path.string()});
+    require(adp_cli.launch.engine.deployment->parallel.adp == 2 &&
+                adp_server.launch.engine.deployment->parallel.adp == 2 &&
+                adp_cli.launch.engine.deployment->parallel.dp == 1,
+            "attention DP was not preserved independently of full-model replicas");
+    adp_source.replace(adp_source.find(adp_setting), adp_setting.size(), "adp = 0\n");
+    const auto invalid_adp = files.write(adp_source);
+    const auto adp_error = rejection([&] { parse({"ninfer", "--config", invalid_adp.string()}); });
+    require(adp_error.find(invalid_adp.string() + ":") != std::string::npos,
+            "attention DP diagnostic lost its source location");
     for (const auto& [before, after] :
          std::vector<std::pair<std::string, std::string>>{{"rank = 1", "rank = 0"},
                                                           {"node = 20", "node = 99"},
                                                           {"tp = 2", "tp = 0"},
                                                           {"connect_timeout", "connect_timout"},
-                                                          {"worker = '/", "worker = '"}}) {
+                                                          {"worker = '", "worker = 'relative/"}}) {
         auto invalid = source;
         invalid.replace(invalid.find(before), before.size(), after);
         const auto file  = files.write(invalid);
@@ -313,15 +387,34 @@ device = 0
     }
 }
 
+void test_context_display() {
+    ninfer::EngineDescription description;
+    description.ranks.resize(2);
+    description.max_context                     = 262144;
+    description.context_token_capacity_estimate = 1048576;
+    description.context_pools = {{0, ninfer::ContextMemoryDomain::Device, 8ULL << 30, 1ULL << 20},
+                                 {1, ninfer::ContextMemoryDomain::Device, 6ULL << 30, 1ULL << 20},
+                                 {0, ninfer::ContextMemoryDomain::Host, 1ULL << 30, 1ULL << 20}};
+    const auto text           = ninfer::product::format_context_capacity(description);
+    require(text.find("across 2 ranks") != std::string::npos &&
+                text.find("host ") != std::string::npos &&
+                text.find("KV ~1,048,576 tokens") != std::string::npos &&
+                text.find("~4.0 x 262144-token contexts") != std::string::npos &&
+                text.find('\n') == std::string::npos,
+            "Context display lost the shared estimate or expanded beyond one line");
+}
+
 } // namespace
 
 int main() {
     try {
         Files files;
         test_arguments();
+        test_memory_headroom(files);
         test_file_merge(files);
         test_file_errors_and_example(files);
         test_deployment(files);
+        test_context_display();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {

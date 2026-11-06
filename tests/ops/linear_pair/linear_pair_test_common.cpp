@@ -212,9 +212,17 @@ int run_q8_a16_shape(std::string_view label, const ShapeCase& shape) {
         quantized_weight::materialize_rows_fp32(second_storage, second_physical_rows);
     const std::vector<std::uint16_t> activation =
         make_activation(shape.k, maximum_t, shape.seed + 2U);
+    const std::vector<std::uint16_t> second_activation =
+        shape.distinct_inputs ? make_activation(shape.k, maximum_t, shape.seed + 3U)
+                              : std::vector<std::uint16_t>{};
 
     test::GuardedDeviceBuffer device_activation(activation.size() * sizeof(std::uint16_t));
     device_activation.copy_from_host(activation.data(), device_activation.bytes());
+    test::GuardedDeviceBuffer second_device_activation(
+        shape.distinct_inputs ? second_activation.size() * sizeof(std::uint16_t) : 1U);
+    if (shape.distinct_inputs)
+        second_device_activation.copy_from_host(second_activation.data(),
+                                                 second_device_activation.bytes());
     test::GuardedDeviceBuffer first_device_weight(fixture.first_storage.payload.size());
     first_device_weight.copy_from_host(fixture.first_storage.payload.data(),
                                        fixture.first_storage.payload.size());
@@ -254,13 +262,16 @@ int run_q8_a16_shape(std::string_view label, const ShapeCase& shape) {
         second_output.fill(0xff);
 
         Tensor input(device_activation.span(), DType::BF16, {shape.k, t});
+        Tensor second_input(shape.distinct_inputs ? second_device_activation.span()
+                                                  : device_activation.span(),
+                             DType::BF16, {shape.k, t});
         Tensor first(first_output.span(), DType::BF16, {kOutputRows, t});
         Tensor second(second_output.span(), DType::BF16, {kOutputRows, t});
 
         const std::string case_label =
             std::string(label) + " [1024," + std::to_string(shape.k) + "] T=" + std::to_string(t);
         try {
-            ops::linear_pair(input, first_weight, second_weight, first, second,
+            ops::linear_pair(input, second_input, first_weight, second_weight, first, second,
                              ninfer::test::cuda_environment().default_execution);
             test::cuda_check(cudaDeviceSynchronize(), "synchronize linear_pair");
         } catch (const std::exception& error) {
@@ -283,7 +294,8 @@ int run_q8_a16_shape(std::string_view label, const ShapeCase& shape) {
                                activation, columns);
         const std::vector<double> second_reference =
             linear_pair_oracle(second_oracle, shape.k,
-                               static_cast<std::int32_t>(oracle_rows.size()), activation, columns);
+                               static_cast<std::int32_t>(oracle_rows.size()),
+                               shape.distinct_inputs ? second_activation : activation, columns);
         failures += compare_output(case_label + " first", first_actual.selected, first_reference);
         failures +=
             compare_output(case_label + " second", second_actual.selected, second_reference);
@@ -296,6 +308,12 @@ int run_q8_a16_shape(std::string_view label, const ShapeCase& shape) {
     }
     failures += verify_preserved(device_activation.data(), std::as_bytes(std::span(activation)),
                                  "linear_pair activation");
+    if (shape.distinct_inputs) {
+        failures += second_device_activation.verify_guards("linear_pair second activation");
+        failures += verify_preserved(second_device_activation.data(),
+                                     std::as_bytes(std::span(second_activation)),
+                                     "linear_pair second activation");
+    }
     failures += verify_preserved(first_device_weight.data(),
                                  std::as_bytes(std::span(fixture.first_storage.payload)),
                                  "linear_pair first weight");

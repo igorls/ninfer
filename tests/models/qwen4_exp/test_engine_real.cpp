@@ -20,6 +20,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -896,9 +897,11 @@ bool prefill_chunk_invariance() {
                         return true;
                     }
                     std::size_t differing = 0;
+                    std::size_t first_difference = scores.size();
                     double worst          = 0.0;
                     for (std::size_t i = 0; i < scores.size(); ++i) {
                         if (scores[i] != reference[i]) {
+                            if (first_difference == scores.size()) first_difference = i;
                             ++differing;
                             worst = std::max(
                                 worst, std::abs(static_cast<double>(scores[i]) - reference[i]));
@@ -907,6 +910,10 @@ bool prefill_chunk_invariance() {
                     std::cout << "prefill chunk " << chunk << " vs 4096: " << differing << " of "
                               << scores.size() << " scores differ, max |dlogprob| = " << worst
                               << '\n';
+                    if (first_difference != scores.size())
+                        std::cout << "first differing target=" << first_difference + 1
+                                  << " reference=" << reference[first_difference]
+                                  << " actual=" << scores[first_difference] << '\n';
                     return differing == 0 ? true : fail("prefill chunking changes the scores");
                 }) &&
             passed;
@@ -977,6 +984,14 @@ bool represents_color(const std::string& content, bool blue) {
            normalized.find(blue ? "#0000ff" : "#ff0000") != std::string::npos;
 }
 
+// Resource snapshots are rate-limited and a fast fixture can finish before the first sample.
+// A small ordinary request after the sampling interval publishes the state left by earlier work.
+auto published_memory(ninfer::Engine& engine) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    (void)engine.generate(engine.prepare_tokens({198}), greedy(1, false));
+    return engine.snapshot().ranks.at(0).memory;
+}
+
 bool video_color_sequence(ninfer::Engine& engine) {
     const auto path = std::filesystem::path(__FILE__).parent_path() / "fixtures/red-blue.mp4";
     std::ifstream stream(path, std::ios::binary);
@@ -1000,8 +1015,8 @@ bool video_color_sequence(ninfer::Engine& engine) {
         red > blue) {
         return fail("video did not preserve the red-to-blue temporal sequence");
     }
-    const auto memory = engine.snapshot().ranks.at(0).memory;
-    return memory.vision && memory.vision->handoff_active_bytes == 0 &&
+    const auto memory = published_memory(engine);
+    return memory.vision && memory.vision->output_active_bytes == 0 &&
            memory.workspace.required_peak_bytes <= memory.allocations.workspace_device_bytes;
 }
 
@@ -1012,9 +1027,9 @@ bool vision_generation_and_reuse() {
     return with_engine(options, [&](ninfer::Engine& engine) {
         engine.reset_measurement_peaks();
         const auto before = engine.snapshot().ranks.at(0).memory;
-        if (!before.vision || before.vision->handoff_active_bytes != 0 ||
-            before.vision->handoff_peak_bytes != 0) {
-            return fail("Vision startup does not expose its bounded handoff");
+        if (!before.vision || before.vision->output_active_bytes != 0 ||
+            before.vision->output_peak_bytes != 0) {
+            return fail("Vision startup does not expose its bounded output window");
         }
         auto input = user_prompt("Name the dominant color in this image.", "flash-vision");
         input.messages.front().parts.insert(input.messages.front().parts.begin(),
@@ -1043,14 +1058,22 @@ bool vision_generation_and_reuse() {
             reused.generated_token_ids.front() != cold.generated_token_ids.front()) {
             return fail("Vision append/reuse differs from cold execution at the first token");
         }
-        const auto after = engine.snapshot().ranks.at(0).memory;
-        if (!after.vision || after.vision->handoff_active_bytes != 0 ||
-            after.vision->handoff_peak_bytes == 0 ||
-            after.vision->handoff_peak_bytes >
-                after.vision->handoff_capacity_bytes ||
+        const auto after = published_memory(engine);
+        std::cout << "Vision memory active="
+                  << (after.vision ? after.vision->output_active_bytes : 0)
+                  << " peak=" << (after.vision ? after.vision->output_peak_bytes : 0)
+                  << " capacity=" << (after.vision ? after.vision->output_capacity_bytes : 0)
+                  << " required=" << after.workspace.required_peak_bytes
+                  << " workspace=" << after.allocations.workspace_device_bytes
+                  << " startup_workspace=" << before.allocations.workspace_device_bytes
+                  << std::endl;
+        if (!after.vision || after.vision->output_active_bytes != 0 ||
+            after.vision->output_peak_bytes == 0 ||
+            after.vision->output_peak_bytes >
+                after.vision->output_capacity_bytes ||
             after.workspace.required_peak_bytes > after.allocations.workspace_device_bytes ||
             after.allocations.workspace_device_bytes != before.allocations.workspace_device_bytes) {
-            return fail("Vision execution escaped its startup workspace or retained a handoff");
+            return fail("Vision execution escaped its startup workspace or retained a Vision output window");
         }
         return video_color_sequence(engine);
     });
@@ -1466,7 +1489,7 @@ bool mtp_long_fp8() {
     std::vector<ninfer::TokenId> eager;
     for (const bool graphs : {false, true}) {
         auto options                     = base_options();
-        options.kv_cache                 = ninfer::KvCacheStorage::Fp8E4M3Row256;
+        options.kv_cache                 = ninfer::KvCacheStorage::Fp8E4m3fnGroup128Ue8m0;
         options.context_cache.enabled    = false;
         options.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
         options.speculative.draft_tokens = 5;

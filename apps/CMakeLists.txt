@@ -41,12 +41,14 @@ endif()
 
 add_executable(ninfer-perplexity
   perplexity/main.cpp
+  perplexity/options.cpp
+  perplexity/report.cpp
   perplexity/corpus.cpp
   perplexity/evaluation.cpp
   perplexity/reference.cpp)
 ninfer_internal_includes(ninfer-perplexity)
 target_link_libraries(ninfer-perplexity PRIVATE
-  ninfer_engine ninfer_product_logging ninfer::json)
+  ninfer_engine ninfer_product_config ninfer_product_logging ninfer::json)
 
 add_executable(ninfer-reasoning-collect reasoning-collect/main.cpp)
 ninfer_internal_includes(ninfer-reasoning-collect)

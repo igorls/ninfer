@@ -33,7 +33,7 @@ int main() {
 
     bool protected_artifact_rejected = false;
     try {
-        JsonlRequestLog unsafe("same-path.ninfer", "same-path.ninfer");
+        JsonlRequestLog unsafe("test-instance", "same-path.ninfer", "same-path.ninfer");
     } catch (const std::invalid_argument&) { protected_artifact_rejected = true; }
     failures += check(protected_artifact_rejected,
                       "request log accepted the model artifact as its output path");
@@ -48,11 +48,11 @@ int main() {
     options.launch.engine.max_context    = 262144;
     options.launch.engine.context_capacity =
         ninfer::ContextCapacityPolicy::explicit_capacity(8ULL << 30);
-    options.launch.engine.prefill_chunk             = 1024;
-    options.launch.logging.stats_interval_ms        = 2500;
-    options.launch.engine.kv_cache                  = ninfer::KvCacheStorage::Fp8E4M3Row256;
-    options.launch.engine.speculative.backend       = ninfer::SpeculativeBackend::Mtp;
-    options.launch.engine.speculative.draft_tokens  = 3;
+    options.launch.engine.prefill_chunk            = 1024;
+    options.launch.logging.stats_interval_ms       = 2500;
+    options.launch.engine.kv_cache                 = ninfer::KvCacheStorage::Fp8E4m3fnGroup128Ue8m0;
+    options.launch.engine.speculative.backend      = ninfer::SpeculativeBackend::Mtp;
+    options.launch.engine.speculative.draft_tokens = 3;
     options.launch.engine.speculative.proposal_head = ninfer::ProposalHead::Optimized;
     options.launch.engine.enable_vision             = false;
     options.launch.engine.context_cache.enabled     = true;
@@ -120,36 +120,42 @@ int main() {
     startup_report.ranks.resize(1);
     ninfer::EngineSnapshot snapshot;
     snapshot.ranks.resize(1);
-    auto& memory                               = snapshot.ranks[0].memory;
-    auto& budget                               = startup_report.ranks[0];
-    description.max_context                    = 262144;
-    description.kv_cache                       = ninfer::KvCacheStorage::Fp8E4M3Row256;
-    memory.allocations.device_weights_bytes    = 100;
-    memory.allocations.persistent_device_bytes = 200;
-    memory.allocations.workspace_device_bytes  = 500;
-    memory.vision                              = ninfer::VisionWorkspaceMemorySummary{
-                                     .aggregate_prompt_tokens = 32768,
-                                     .max_item_tokens         = 16384,
-                                     .general_capacity_bytes  = 300,
-                                     .encode_required_bytes   = 400,
-                                     .handoff_offset_bytes    = 300,
-                                     .handoff_capacity_bytes  = 200,
-                                     .handoff_active_bytes    = 0,
-                                     .handoff_peak_bytes      = 150,
-    };
-    budget.minimum_runtime_reservation_bytes = 1300;
-    budget.context_capacity_bytes            = 8ULL << 30;
-    budget.runtime_reservation_bytes         = 1600;
-    budget.available_after_weights_bytes     = 1700;
-    budget.available_after_startup_bytes     = 180;
-    budget.planned_slack_bytes               = 100;
-    budget.graphs                            = ninfer::GraphMemorySummary{600, -30, 800, 200};
-    budget.retained_bytes                    = 1000;
-    snapshot.runtime.context_pools           = {{.rank           = 0,
-                                                 .domain         = ninfer::ContextMemoryDomain::Host,
-                                                 .capacity_bytes = 64ULL << 20,
-                                                 .live_bytes     = 8ULL << 20,
-                                                 .reserved_bytes = 4ULL << 20}};
+    auto& memory                                = snapshot.ranks[0].memory;
+    auto& budget                                = startup_report.ranks[0];
+    description.max_context                     = 262144;
+    description.context_token_capacity_estimate = 1048576;
+    description.kv_cache                        = ninfer::KvCacheStorage::Fp8E4m3fnGroup128Ue8m0;
+    memory.allocations.device_weights_bytes     = 100;
+    memory.allocations.persistent_device_bytes  = 200;
+    memory.allocations.workspace_device_bytes   = 500;
+    memory.vision                               = ninfer::VisionMemorySummary{.budget_bytes            = 600,
+                                                                              .max_window_features     = 16384,
+                                                                              .encoder_workspace_bytes = 400,
+                                                                              .output_capacity_bytes   = 200,
+                                                                              .input_staging_bytes     = 256,
+                                                                              .output_active_bytes     = 0,
+                                                                              .output_peak_bytes       = 150};
+    budget.minimum_runtime_reservation_bytes    = 1300;
+    budget.context_capacity_bytes               = 8ULL << 30;
+    budget.runtime_reservation_bytes            = 1600;
+    budget.available_after_weights_bytes        = 1700;
+    budget.available_after_startup_bytes        = 180;
+    budget.planned_slack_bytes                  = 100;
+    budget.headroom_bytes                       = 500;
+    budget.host_reservation_bytes               = 800;
+    budget.graphs                  = ninfer::GraphMemorySummary{.rebuild_estimate_bytes      = 600,
+                                                                .warmup_increment_bytes      = 200,
+                                                                .preparation_increment_bytes = -30,
+                                                                .preparation_peak_bytes      = 40,
+                                                                .calibration_increment_bytes = 800,
+                                                                .calibration_peak_bytes      = 900,
+                                                                .rebuild_increment_bytes     = 500};
+    budget.retained_bytes          = 1000;
+    snapshot.runtime.context_pools = {{.rank           = 0,
+                                       .domain         = ninfer::ContextMemoryDomain::Host,
+                                       .capacity_bytes = 64ULL << 20,
+                                       .live_bytes     = 8ULL << 20,
+                                       .reserved_bytes = 4ULL << 20}};
 
     ServerLogEnvironment environment;
     environment.device                    = 0;
@@ -179,6 +185,8 @@ int main() {
               "server weights id missing");
     failures += check(server.at("artifact").at("size_bytes") == 123456, "artifact size missing");
     failures += check(server.at("engine").at("max_context") == 262144, "max context missing");
+    failures += check(server.at("engine").at("context_token_capacity_estimate") == 1048576,
+                      "Context token capacity estimate missing");
     failures += check(server.at("engine").at("context_capacity_mode") == "explicit" &&
                           server.at("engine").at("context_pools").at(0).at("capacity_bytes") ==
                               (8ULL << 30) &&
@@ -190,7 +198,7 @@ int main() {
                       "request log path missing");
     failures += check(server.at("server").at("default_thinking_budget") == 512,
                       "server thinking budget missing");
-    failures += check(server.at("engine").at("kv_cache") == "fp8-e4m3-row256", "KV type missing");
+    failures += check(server.at("engine").at("kv_cache") == "fp8", "KV type missing");
     options.launch.engine.kv_cache = ninfer::KvCacheStorage::Nvfp4Group16;
     engine_options.kv_cache        = options.launch.engine.kv_cache;
     description.kv_cache           = options.launch.engine.kv_cache;
@@ -246,20 +254,20 @@ int main() {
                                   .at("ranks")
                                   .at(0)
                                   .at("resources")
-                                  .at("vision_workspace")
-                                  .at("general_capacity_bytes") == 300 &&
+                                  .at("vision")
+                                  .at("encoder_workspace_bytes") == 400 &&
                           server.at("resources")
                                   .at("ranks")
                                   .at(0)
                                   .at("resources")
-                                  .at("vision_workspace")
-                                  .at("handoff_capacity_bytes") == 200 &&
+                                  .at("vision")
+                                  .at("output_capacity_bytes") == 200 &&
                           server.at("resources")
                                   .at("ranks")
                                   .at(0)
                                   .at("resources")
-                                  .at("vision_workspace")
-                                  .at("handoff_peak_bytes") == 150,
+                                  .at("vision")
+                                  .at("output_peak_bytes") == 150,
                       "Vision workspace layout missing");
     failures += check(server.at("resources")
                               .at("ranks")
@@ -286,7 +294,7 @@ int main() {
                     .at(0)
                     .at("budget")
                     .at("graph_calibration")
-                    .at("calibration_retained_bytes") == 200 &&
+                    .at("warmup_increment_bytes") == 200 &&
             server.at("resources").at("ranks").at(0).at("budget").at("retained_bytes") == 1000,
         "signed Graph and startup deltas missing");
     failures += check(
@@ -302,7 +310,9 @@ int main() {
                     .at(0)
                     .at("budget")
                     .at("available_after_startup_bytes") == 180 &&
-            server.at("resources").at("ranks").at(0).at("budget").at("headroom_bytes") == 0 &&
+            server.at("resources").at("ranks").at(0).at("budget").at("headroom_bytes") == 500 &&
+            server.at("resources").at("ranks").at(0).at("budget").at("host_reservation_bytes") ==
+                800 &&
             server.at("resources").at("ranks").at(0).at("budget").at("planned_slack_bytes") == 100,
         "adaptive KV memory ledger missing");
     failures +=
@@ -580,6 +590,7 @@ int main() {
     first.context_transfers.state[0] = {.bytes = 9007199254740993ULL, .seconds = 0.010};
     first.context_transfers.kv[0][1] = {.bytes = 2113536, .seconds = 0.011};
     first.context_transfers.kv[1][2] = {.bytes = 16384, .seconds = 0.012};
+    first.context_transfers.state[4] = {.bytes = 32768, .seconds = 0.015};
     const Json observed_done =
         Json::parse(format_request_done_json("serve-test", 3001, context, observed));
     const auto& first_json = observed_done.at("first_output_timing");
@@ -686,6 +697,10 @@ int main() {
                      {"bytes", 0},
                      {"seconds", 0.0}},
         "first-output transfer resource, direction or integer precision changed");
+    failures += check(
+        first_json.at("context_transfers").at("state").at("peer_d2d").at("bytes") == 32768 &&
+            first_json.at("context_transfers").at("state").at("peer_d2d").at("seconds") == 0.015,
+        "peer context transfer statistics were lost in request logs");
 
     ThroughputReport window;
     window.interval_seconds                                                                 = 5;
@@ -766,8 +781,8 @@ int main() {
         make_internal_request_failure(RequestFailurePhase::Generation, "sentinel-internal-detail"));
     failures +=
         check(internal_failure.severity == OperationalSeverity::Error &&
-                  internal_failure.message.find("sentinel-internal-detail") == std::string::npos,
-              "operational internal failure severity or data policy mismatch");
+                  internal_failure.message.find("sentinel-internal-detail") != std::string::npos,
+              "operational internal failure lost its diagnostic cause");
     const OperationalRecord disconnected = render_request_failure(
         context, make_client_disconnected_failure(RequestFailurePhase::Transport));
     failures += check(disconnected.severity == OperationalSeverity::Info &&
@@ -944,11 +959,11 @@ int main() {
          ".jsonl");
     std::filesystem::remove(log_path);
     {
-        JsonlRequestLog writer(log_path.string());
+        JsonlRequestLog writer("test-instance", log_path.string());
         writer.write_request_start(context);
     }
     {
-        JsonlRequestLog writer(log_path.string());
+        JsonlRequestLog writer("test-instance", log_path.string());
         writer.write_request_rejected(rejected_context);
         writer.write_request_error(context, "generation failed");
     }

@@ -29,11 +29,7 @@ void validate_sampling(const ResolvedSamplingParameters& sampling) {
 
 bool RequestBasePlanImpl::accepts_capture(std::uint32_t frontier) const noexcept {
     if (frontier == 0 || frontier > summary.prompt_tokens) { return false; }
-    if (vision_control_plan) {
-        for (const auto& item : vision_control_plan->items) {
-            if (item.token_begin < frontier && frontier < item.token_end) { return false; }
-        }
-    }
+    if (vision && !vision->can_checkpoint(frontier)) return false;
     return true;
 }
 
@@ -70,6 +66,7 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
     }
     for (std::size_t i = 0; i < prompt.media_payloads.size(); ++i) {
         if (!prompt.media_payloads[i] ||
+            prompt.media_payloads[i]->features_per_patch != qwen::kPreparedVisionPatchFeatures ||
             prompt.media_payloads[i]->patch_elements !=
                 prompt.vision_items[i].patch_count * qwen::kPreparedVisionPatchFeatures) {
             throw std::invalid_argument("prepared prompt media item payload has an invalid shape");
@@ -110,21 +107,11 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
                                          options.allow_prefix_publication &&
                                          prompt.identity.reusable && context_cache.enabled;
     if (prompt.has_media()) {
-        if (!plan.vision_workspace) {
+        if (!plan.vision_max_features) {
             throw std::logic_error("Vision prompt has no startup workspace plan");
         }
-        auto vision = std::make_shared<qwen::VisionControlPlan>(
-            qwen::plan_vision_control(prompt, *plan.profile->config.vision));
-        std::uint32_t previous_end = 0;
-        for (std::size_t index = 0; index < vision->items.size(); ++index) {
-            const qwen::VisionItemControlPlan& item = vision->items[index];
-            if (item.token_begin < previous_end)
-                throw std::invalid_argument("vision item consumer spans overlap");
-            if (item.merged_count > plan.vision_workspace->max_merged_tokens)
-                throw std::invalid_argument("vision item exceeds the prepared execution envelope");
-            previous_end = item.token_end;
-        }
-        base->vision_control_plan = std::move(vision);
+        base->vision = qwen::prepare_vision_input(prompt, *plan.profile->config.vision,
+                                                  plan.vision_max_features);
     }
 
     base->prefix_digests.assign(prompt);
@@ -157,21 +144,20 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
                 base->capture_groups.push_back(base->capture_group(frontier));
                 it = std::prev(base->capture_groups.end());
             }
+            it->evidence |= evidence;
             if (std::find(it->roles.begin(), it->roles.end(), role) == it->roles.end()) {
                 it->roles.push_back(role);
             }
-            it->shared_evidence |= evidence;
         };
         const auto& rewrite = prepared.identity.rewrite_checkpoint;
         add(rewrite ? rewrite->recovery_frontier : base->summary.prompt_tokens,
             runtime::CheckpointRole::InputReplay);
         for (const auto& opportunity : prepared.context_cache.opportunities) {
-            if (opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor) {
-                add(opportunity.frontier, runtime::CheckpointRole::LongAnchor);
-            } else {
-                add(opportunity.frontier, runtime::CheckpointRole::SharedPrefix,
-                    opportunity.evidence);
-            }
+            add(opportunity.frontier,
+                opportunity.kind == PromptCacheMarkerKind::PrivateLongAnchor
+                    ? runtime::CheckpointRole::LongAnchor
+                    : runtime::CheckpointRole::SharedPrefix,
+                opportunity.evidence);
         }
         std::sort(base->capture_groups.begin(), base->capture_groups.end(),
                   [](const auto& a, const auto& b) { return a.frontier < b.frontier; });
@@ -197,11 +183,14 @@ UnitDemand SessionImpl::next_unit(const SequenceState& state, const RequestContr
     case ExecutionUnitKind::Prefill:
         if (request.lifecycle != Lifecycle::Prefilling || !request.prefill)
             throw std::logic_error("prefill demand requires a prefill cursor");
-        return prefill_unit(request.prefill->prompt_tokens, request.prefill->cursor);
+        out.main_frontier = window_end(state, request, request.prefill->cursor,
+                                       request.prefill->prompt_tokens, vision::Window{});
+        break;
     case ExecutionUnitKind::Replay:
         if (request.lifecycle != Lifecycle::Replaying)
             throw std::logic_error("request is not replaying");
-        out.main_frontier = std::min(request.replay_target, request.replay_cursor + prefill_chunk);
+        out.main_frontier = window_end(state, request, request.replay_cursor, request.replay_target,
+                                       vision::Window{});
         break;
     case ExecutionUnitKind::Decode:
         if (request.lifecycle != Lifecycle::Active || !tokens || f >= capacity)
@@ -244,19 +233,40 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
         auto& request     = requests[lane];
         const auto& state = active_sequence(lane);
         demands[lane]     = next_unit(state, request, unit.kind, unit.tokens);
-        coverage[lane]    = request.recovery ? request.recovery->coverage : demands[lane];
-        if (demands[lane].main_frontier > coverage[lane].main_frontier ||
-            demands[lane].backend_frontier > coverage[lane].backend_frontier) {
-            throw std::logic_error("execution exceeds the retained recovery capacity");
+        if (unit.kind == ExecutionUnitKind::Prefill || unit.kind == ExecutionUnitKind::Replay) {
+            auto& demand = demands[lane];
+            demand.main_frontier =
+                window_end(state, request, state.continuation.metadata.execution_frontier,
+                           demand.main_frontier, vision_window);
+            demand.backend_frontier = speculative_backend == SpeculativeBackend::Mtp
+                                          ? (demand.main_frontier ? demand.main_frontier - 1 : 0)
+                                      : has_backend_pool() ? demand.main_frontier
+                                                           : 0;
         }
+        if ((unit.kind == ExecutionUnitKind::Prefill || unit.kind == ExecutionUnitKind::Replay) &&
+            demands[lane].main_frontier == state.continuation.metadata.execution_frontier &&
+            state.continuation.metadata.execution_frontier < request.base->summary.prompt_tokens)
+            return {.status = runtime::UnitReservationStatus::ExecutionUnavailable};
         if (request.permit) {
-            if (request.permit->kind != unit.kind || request.permit->tokens != unit.tokens ||
-                request.permit->main_frontier != demands[lane].main_frontier ||
-                request.permit->backend_frontier != demands[lane].backend_frontier) {
-                throw std::logic_error("an existing execution permit cannot be replaced");
-            }
-            continue;
+            const auto& permit = *request.permit;
+            if (permit.kind != unit.kind || permit.tokens != unit.tokens)
+                throw std::logic_error("an existing execution permit cannot change its operation");
+            if (unit.kind == ExecutionUnitKind::Prefill || unit.kind == ExecutionUnitKind::Replay) {
+                // A permit retains capacity through its frontier. A checkpoint or an execution
+                // window may shorten the next prefix, but cannot enlarge that retained grant.
+                demands[lane].main_frontier =
+                    std::min(demands[lane].main_frontier, permit.main_frontier);
+                demands[lane].backend_frontier =
+                    std::min(demands[lane].backend_frontier, permit.backend_frontier);
+            } else if (permit.main_frontier != demands[lane].main_frontier ||
+                       permit.backend_frontier != demands[lane].backend_frontier)
+                throw std::logic_error("an existing execution permit cannot change its frontier");
         }
+        coverage[lane] = request.recovery ? request.recovery->coverage : demands[lane];
+        if (demands[lane].main_frontier > coverage[lane].main_frontier ||
+            demands[lane].backend_frontier > coverage[lane].backend_frontier)
+            throw std::logic_error("execution exceeds the retained recovery capacity");
+        if (request.permit) continue;
         const auto main = text_kv_histories->write_pages(state.kv->text.handle(),
                                                          state.continuation.metadata.text_kv_valid,
                                                          coverage[lane].main_frontier);
@@ -272,23 +282,21 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
         }
     }
     ContextDemand bundle;
+    std::array<context::ContextDemandId, kMaximumConcurrency> main_ids, backend_ids;
     for (const auto& unit : units) {
         const auto lane = this->lane(unit.sequence);
         if (requests[lane].permit) continue;
         const auto& state = active_sequence(lane);
-        bundle.add_growth(*text_kv_histories, state.kv->text.handle(), add_main[lane]);
+        main_ids[lane] =
+            bundle.add_growth(*text_kv_histories, state.kv->text.handle(), add_main[lane]);
         if (state.kv->backend)
-            bundle.add_growth(*backend_kv_histories, state.kv->backend->handle(),
-                              add_backend[lane]);
+            backend_ids[lane] = bundle.add_growth(*backend_kv_histories,
+                                                  state.kv->backend->handle(), add_backend[lane]);
     }
     auto assessment = directory.assess(bundle);
     if (!assessment.ready()) return {.assessment = std::move(assessment)};
     auto reserved = directory.reserve(bundle);
     if (!reserved) return {.assessment = std::move(reserved.assessment)};
-    auto main_records    = reserved.reservation->take_history(kTextKvPool.index);
-    auto backend_records = backend_kv_histories
-                               ? reserved.reservation->take_history(kBackendKvPool.index)
-                               : context::RecordReservation{};
     std::array<bool, kMaximumConcurrency> added{};
     try {
         for (const auto& unit : units) {
@@ -296,11 +304,11 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
             if (requests[lane].permit) { continue; }
             auto& state = active_sequence(lane);
             added[lane] = true;
-            auto main   = main_records.split(add_main[lane]);
+            auto main   = reserved.reservation->take(main_ids[lane]);
             text_kv_histories->prepare_growth(state.kv->text.handle(), main);
             text_kv_histories->adopt_growth(state.kv->text.handle(), std::move(main));
             if (state.kv->backend) {
-                auto backend = backend_records.split(add_backend[lane]);
+                auto backend = reserved.reservation->take(backend_ids[lane]);
                 backend_kv_histories->prepare_growth(state.kv->backend->handle(), backend);
                 backend_kv_histories->adopt_growth(state.kv->backend->handle(), std::move(backend));
             }
@@ -318,7 +326,7 @@ ResourceReservation SessionImpl::reserve_units(std::span<const ExecutionUnit> un
         }
         throw;
     }
-    return {.reserved = true};
+    return {.status = runtime::UnitReservationStatus::Granted};
 }
 
 void SessionImpl::release_units(std::span<const SequenceHandle> handles) noexcept {

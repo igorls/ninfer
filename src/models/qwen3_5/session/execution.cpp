@@ -15,6 +15,7 @@ SessionImpl::submit_execution(Execution&& pending, runtime::ExecutionReservation
         work.context      = execution->preparation->actions();
         const auto ticket = executor().submit(std::move(reservation), std::move(work));
         execution->ticket = ticket;
+        if (execution->vision_id) vision_window.submitted(execution->vision_id, ticket);
         execution->preparation->mark_submitted();
         return ticket;
     } catch (const std::exception& error) {
@@ -37,8 +38,10 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_prefill(SequenceHandl
     try {
         prepare_capture_boundary(l);
         const auto begin = state.continuation.metadata.execution_frontier;
-        const auto end   = window_end(
-            l, begin, std::min(request.permit->main_frontier, request.base->summary.prompt_tokens));
+        const auto end =
+            window_end(state, request, begin,
+                       std::min(request.permit->main_frontier, request.base->summary.prompt_tokens),
+                       vision_window);
         const bool sample = end == request.base->summary.prompt_tokens;
         Execution pending{.kind = OperationKind::Prefill};
         pending.members     = {handle};
@@ -55,6 +58,9 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_prefill(SequenceHandl
         forward.purpose = ForwardPurpose::Prefill;
         forward.rows.push_back(execution_row(state));
         forward.inputs.push_back(input_window(state, begin, end));
+        forward.inputs.back().visual = prepare_visual(state, begin, end);
+        if (forward.inputs.back().visual)
+            pending.vision_id = forward.inputs.back().visual->window.id;
         forward.sample = sample ? SamplePurpose::FirstToken : SamplePurpose::None;
         forward.sampling.push_back({request.sampling_host, constrained, request.base->logprobs});
         if (!request.base->logprobs.prompt_positions.empty() || request.base->reasoning_feature_position) {
@@ -92,8 +98,9 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_replay(SequenceHandle
     try {
         prepare_capture_boundary(l);
         const auto begin = state.continuation.metadata.execution_frontier;
-        const auto end =
-            window_end(l, begin, std::min(request.permit->main_frontier, request.replay_target));
+        const auto end   = window_end(state, request, begin,
+                                      std::min(request.permit->main_frontier, request.replay_target),
+                                      vision_window);
         Execution pending{.kind = OperationKind::Replay};
         pending.members     = {handle};
         pending.bases       = {state.continuation};
@@ -109,6 +116,9 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_replay(SequenceHandle
         forward.purpose = ForwardPurpose::Replay;
         forward.rows.push_back(execution_row(state));
         forward.inputs.push_back(input_window(state, begin, end));
+        forward.inputs.back().visual = prepare_visual(state, begin, end);
+        if (forward.inputs.back().visual)
+            pending.vision_id = forward.inputs.back().visual->window.id;
         return submit_execution(std::move(pending), std::move(*reservation),
                                 Work{.operation = std::move(forward)});
     } catch (const std::exception& error) {
@@ -175,7 +185,8 @@ SessionImpl::start_control(std::span<const SequenceHandle> members, std::span<co
                            std::span<const std::optional<std::uint32_t>> splits) {
     if (execution) return {};
     if (members.empty() || members.size() > max_concurrency || !stride ||
-        tokens.size() != members.size() * stride || splits.size() != members.size())
+        stride > plan.profile->control_token_limit || tokens.size() != members.size() * stride ||
+        splits.size() != members.size())
         throw std::invalid_argument("forced control shape is invalid");
     auto reservation = executor().try_reserve(runtime::FrameKind::Compute);
     if (!reservation) return {};
@@ -218,7 +229,7 @@ SessionImpl::start_control(std::span<const SequenceHandle> members, std::span<co
                         static_cast<std::int32_t>(f + j) + state.continuation.metadata.rope_delta;
             forward.rows.push_back(execution_row(state));
             forward.inputs.push_back(std::move(input));
-            forward.committed_tokens.emplace_back(forced.begin(), forced.end());
+            forward.control_last_tokens.push_back(forced.back());
             forward.sampling.push_back({request.sampling_host, false});
         }
         return submit_execution(std::move(pending), std::move(*reservation),
@@ -229,13 +240,12 @@ SessionImpl::start_control(std::span<const SequenceHandle> members, std::span<co
     }
 }
 
-std::optional<runtime::ExecutionTicket> SessionImpl::start_normalize(SequenceHandle handle) {
+std::optional<runtime::ExecutionTicket>
+SessionImpl::start_normalize(SequenceHandle handle, runtime::ExecutionReservation reservation) {
     if (execution) return {};
     const auto l = lane(handle);
     auto& state  = sequences[l];
     require_unit(l, ExecutionUnitKind::Normalize);
-    auto reservation = executor().try_reserve(runtime::FrameKind::Compute);
-    if (!reservation) return {};
     try {
         Execution pending{.kind = OperationKind::Normalize};
         pending.members     = {handle};
@@ -247,7 +257,7 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_normalize(SequenceHan
             has_backend_pool() ? state.continuation.metadata.execution_frontier : 0,
             *pending.preparation);
         NormalizeWork work{{execution_row(state)}};
-        return submit_execution(std::move(pending), std::move(*reservation),
+        return submit_execution(std::move(pending), std::move(reservation),
                                 Work{.operation = std::move(work)});
     } catch (const std::exception& error) {
         executor().fail(error.what());

@@ -829,7 +829,7 @@ int run_record_fold_rounds(bool q8 = false) {
 
         const std::array fold_rows{
             ops::GdnReplayFoldRow{state_offset(kInitialSlot), state_offset(kInitialSlot), commit}};
-        execute(ninfer::test::cuda_environment().default_execution);
+        fold_plan.execute(fold_rows, ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
         for (std::int32_t layer = 0; layer < kProfile.layers; ++layer) {
             const Tensor folded_recurrent = state_pool.recurrent_tensor(

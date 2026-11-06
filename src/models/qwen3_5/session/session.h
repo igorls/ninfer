@@ -9,8 +9,10 @@
 #include "models/qwen3_5/planning.h"
 #include "models/qwen3_5/work.h"
 #include "runtime/executor/executor.h"
+#include "runtime/contract/placement.h"
 
 #include <array>
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -53,7 +55,7 @@ struct PrefixShortlistKey {
     std::array<std::uint64_t, 2> digests{};
     std::uint32_t frontier                                                  = 0;
     std::uint32_t identity_tag                                              = 0;
-    friend bool operator==(PrefixShortlistKey, PrefixShortlistKey) noexcept = default;
+    friend auto operator<=>(PrefixShortlistKey, PrefixShortlistKey) noexcept = default;
 };
 
 class RequestBasePlan {
@@ -66,7 +68,7 @@ public:
     RequestBasePlan& operator=(const RequestBasePlan&) = delete;
 
     [[nodiscard]] const runtime::RequestPlanSummary& summary() const noexcept;
-    [[nodiscard]] const qwen::PreparedContextCache& context_cache() const noexcept;
+    [[nodiscard]] const models::frontend::PreparedContextCache& context_cache() const noexcept;
     [[nodiscard]] std::optional<PrefixShortlistKey>
     prefix_shortlist_key(std::uint32_t frontier) const noexcept;
 
@@ -80,10 +82,12 @@ private:
 using CheckpointHandle = context::CheckpointHandle;
 
 struct CheckpointMetadata {
+    runtime::PlacementId placement;
     std::uint32_t frontier           = 0;
     runtime::CheckpointRole role     = runtime::CheckpointRole::Continuation;
     bool leased                      = false;
     runtime::CheckpointOrigin origin = runtime::CheckpointOrigin::Semantic;
+    SharedCandidateEvidence evidence = SharedCandidateEvidence::None;
 };
 
 struct CheckpointSummary {
@@ -96,6 +100,8 @@ struct CheckpointSummary {
 enum class StateBindingAction : std::uint8_t { Root, Move, Fork, Restore, Split, BackupSplit };
 
 struct SourceCandidate {
+    runtime::PlacementId placement;
+    bool local_device = false;
     std::optional<CheckpointHandle> checkpoint;
     std::uint32_t reused_tokens = 0;
     runtime::PrefillWork remaining_work;
@@ -111,6 +117,12 @@ struct SourceCandidate {
     std::vector<CheckpointHandle> retired_points;
 };
 
+struct BindingEvaluation {
+    bool source_valid      = true;
+    bool capacity_possible = true;
+    ContextAssessment assessment;
+};
+
 struct BindingReservation {
     bool reserved          = false;
     bool source_valid      = true;
@@ -120,6 +132,14 @@ struct BindingReservation {
     std::optional<CheckpointHandle> consumed_source;
 
     explicit operator bool() const noexcept { return reserved; }
+};
+
+struct PauseOption {
+    runtime::PauseAction action;
+    ContextDemand demand;
+    ContextReleaseSet released;
+    std::optional<context::HostWriteRequirements> host_write;
+    std::vector<CheckpointHandle> sources;
 };
 
 struct ContextDemotion {
@@ -255,6 +275,7 @@ struct CapturePreparation {
     std::vector<CheckpointHandle> retired_points;
     context::HostWriteRequirements host;
     runtime::CheckpointOrigin origin = runtime::CheckpointOrigin::Semantic;
+    SharedCandidateEvidence evidence = SharedCandidateEvidence::None;
 };
 enum class ContextOperationKind : std::uint8_t { Bind, Capture, Demote, Pause, Maintenance };
 
@@ -293,6 +314,9 @@ struct SessionEvent {
 
 class Session {
 public:
+    [[nodiscard]] std::optional<SequenceHandle> prefill_continuation() const;
+    void yield_prefill(SequenceHandle);
+
     using ContextDemand     = qwen3_5::ContextDemand;
     using ContextAssessment = qwen3_5::ContextAssessment;
     using ContextReleaseSet = qwen3_5::ContextReleaseSet;
@@ -304,6 +328,9 @@ public:
                                                const ContextAssessment&) const;
     [[nodiscard]] std::uint64_t useful_release_bytes(const ContextReleaseSet&,
                                                      const ContextAssessment&) const;
+    [[nodiscard]] std::vector<std::uint64_t> release_limits(const ContextAssessment&) const;
+    [[nodiscard]] runtime::ContextReleaseMeasure release_measure(const ContextReleaseSet&,
+                                                                 const ContextAssessment&) const;
     [[nodiscard]] runtime::ContextStart start_maintenance(const ContextAssessment&);
     [[nodiscard]] std::span<const runtime::KvPoolDescriptor> kv_pools() const noexcept;
     Session(PreparedSession&&, runtime::Executor<ExecutionTypes>&);
@@ -316,7 +343,17 @@ public:
     inspect_source(const RequestBasePlan& base, std::optional<CheckpointHandle> checkpoint,
                    bool consume_source                              = false,
                    std::span<const CheckpointHandle> private_points = {},
-                   std::span<const CheckpointHandle> retired_points = {}) const;
+                   std::span<const CheckpointHandle> retired_points = {},
+                   runtime::PlacementId target = {}, const ResumeState* resume = nullptr) const;
+    [[nodiscard]] std::vector<PlacementDescriptor> placement_descriptions() const;
+    [[nodiscard]] std::span<const runtime::PlacementId> placements(const RequestBasePlan&) const;
+    [[nodiscard]] runtime::PlacementId placement(SequenceHandle) const;
+    [[nodiscard]] std::uint64_t load_tokens(SequenceHandle) const;
+    [[nodiscard]] BindingEvaluation assess_binding(const RequestBasePlan&, runtime::LaneId,
+                                                   const SourceCandidate&,
+                                                   const ResumeState*   = nullptr,
+                                                   ExecutionUnitKind    = ExecutionUnitKind::Decode,
+                                                   std::uint32_t tokens = 1) const;
     [[nodiscard]] PrefixShortlistKey checkpoint_key(CheckpointHandle, std::uint32_t frontier) const;
     [[nodiscard]] CheckpointSummary checkpoint_summary(CheckpointHandle checkpoint) const;
     [[nodiscard]] CheckpointMetadata checkpoint_metadata(CheckpointHandle checkpoint) const;
@@ -328,7 +365,7 @@ public:
     // Borrows this Session's index; checkpoint publication or retirement invalidates the view.
     [[nodiscard]] context::RecoveryEvaluation<>
     evaluate_recovery(std::span<const CheckpointHandle> advertised) const;
-    [[nodiscard]] std::size_t checkpoint_capacity() const noexcept;
+    [[nodiscard]] std::size_t checkpoint_extent() const noexcept;
     [[nodiscard]] std::vector<runtime::ContextTransferRequirement>
         checkpoint_restore_requirements(CheckpointHandle) const;
     [[nodiscard]] bool valid_checkpoint(CheckpointHandle checkpoint) const noexcept;
@@ -338,8 +375,10 @@ public:
     [[nodiscard]] std::size_t
     host_bytes_released(std::span<const CheckpointHandle> checkpoints) const;
     using HostRequirement = context::HostWriteRequirements;
-    [[nodiscard]] std::optional<HostRequirement> pause_host_requirements(SequenceHandle) const;
-    [[nodiscard]] bool prepare_pause(SequenceHandle, bool save_snapshot,
+    [[nodiscard]] std::vector<PauseOption> pause_options(SequenceHandle) const;
+    [[nodiscard]] bool pause_contributes(SequenceHandle, const PauseOption&,
+                                         const ContextAssessment&) const;
+    [[nodiscard]] bool prepare_pause(SequenceHandle, runtime::PauseAction,
                                      std::span<const CheckpointHandle> host_victims = {});
     [[nodiscard]] HostRequirement demotion_host_requirements(const ContextDemotion&) const;
     // Combine disjoint quotes from one synchronous reclaim plan; start_demote revalidates them.
@@ -378,7 +417,7 @@ public:
                   std::span<const CheckpointHandle> excluded, const ContextDemand&) const;
     [[nodiscard]] runtime::ContextStart
     start_demote(const ContextDemotion&, std::span<const CheckpointHandle> host_victims = {});
-    [[nodiscard]] bool start_pause(SequenceHandle sequence, bool save_snapshot);
+    [[nodiscard]] bool start_pause(SequenceHandle sequence, runtime::PauseAction);
     [[nodiscard]] bool has_context_operation() const noexcept;
     void cancel_context() noexcept;
     [[nodiscard]] bool context_blocks(SequenceHandle sequence) const noexcept;
@@ -406,7 +445,6 @@ public:
     [[nodiscard]] AbortResult abort(SequenceHandle sequence) noexcept;
     void fail_all_cleanup() noexcept;
     [[nodiscard]] PhysicalUsageSnapshot physical_usage() const noexcept;
-    void reset_measurement_peaks();
     [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::span<const float> reasoning_features(std::uint32_t lane) const;

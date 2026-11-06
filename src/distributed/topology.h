@@ -12,22 +12,21 @@ namespace ninfer::distributed {
 using RankId  = std::uint32_t;
 using GroupId = std::uint32_t;
 
+enum class GroupUsage : std::uint8_t { General, PeerExchange };
+
 struct GroupDescription {
     GroupId id = 0;
     std::vector<RankId> members;
+    GroupUsage usage = GroupUsage::General;
 
     [[nodiscard]] std::uint32_t index(RankId rank) const;
-};
-
-struct ParallelCoordinate {
-    std::uint32_t rank = 0, size = 1;
 };
 
 struct RankIdentity {
     RankId rank        = 0;
     std::uint32_t node = 0, local_rank = 0;
     int device = 0;
-    ParallelCoordinate tp, ep, dp, pp;
+    ParallelCoordinate tp, ep, dp, pp, adp;
 };
 
 struct RoleGroup {

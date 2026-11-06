@@ -23,7 +23,7 @@ std::optional<runtime::ExecutionTicket> Session::start_score(qwen::PreparedPromp
         readout.reference_tokens.size() != std::size_t(count) * readout.reference_count)
         throw std::invalid_argument("causal reference readout has an invalid shape");
     for (auto token : readout.reference_tokens)
-        if (token < 0 || static_cast<std::uint32_t>(token) >= p.definition->resources().public_token_count)
+        if (token < 0 || static_cast<std::uint32_t>(token) >= p.definition->resources().text.public_token_count)
             throw std::invalid_argument("causal reference token is outside the public vocabulary");
     auto scoring          = std::make_unique<detail::Scoring>();
     scoring->first_target = first_target;

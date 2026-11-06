@@ -83,6 +83,16 @@ void basic_contracts(ninfer::text::GrammarCompiler& compiled) {
     require(arguments == Json{{"b", 1}, {"a", "007"}, {"extra-key.键", true}},
             "non-strict value normalization changed");
     require(accepts(compiled, *basic, "An ordinary answer."), "default auto forced a call");
+    for (const Json& property : {Json{{"$ref", "#/$defs/text"}}, Json{{"enum", {"123", "456"}}}}) {
+        auto source             = schema(property);
+        source["$defs"]["text"] = {{"type", "string"}};
+        const auto bound        = contract(source, false);
+        require(accepts(compiled, *bound, call("123")), "basic type hint rejected raw string");
+        frontend::ToolCallOutputDecoder decoder(bound, 64);
+        (void)feed(decoder, call("123"));
+        require(Json::parse(finish(decoder).tool_calls.at(0).arguments_json)["x"] == "123",
+                "basic reference or enum lost its string encoding");
+    }
     require(
         !accepts(compiled, *basic, "<tool_call>\n<function=missing>\n</function>\n</tool_call>"),
         "default auto admitted an undeclared function");
@@ -147,6 +157,29 @@ void basic_contracts(ninfer::text::GrammarCompiler& compiled) {
     require(contract(source, false, automatic)->constrained, "auto relaxed a required choice");
     require(contract(schema({{"type", "integer"}}), true, automatic)->constrained,
             "auto relaxed strict arguments");
+}
+
+void parameter_names(ninfer::text::GrammarCompiler& compiled) {
+    const auto bound = contract({{"type", "object"},
+                                 {"properties",
+                                  {{"n", {{"type", "integer"}}},
+                                   {"name", {{"type", "integer"}}},
+                                   {"names", {{"type", "string"}}},
+                                   {"键", {{"type", "integer"}}}}}},
+                                false);
+    const auto wire  = [](std::string_view name, std::string_view value) {
+        return "<tool_call>\n<function=call>\n<parameter=" + std::string(name) + ">\n" +
+               std::string(value) + "\n</parameter>\n</function>\n</tool_call>";
+    };
+    for (const auto* name : {"n", "name", "键"}) {
+        require(accepts(compiled, *bound, wire(name, "1")), "known JSON name rejected");
+        require(!accepts(compiled, *bound, wire(name, "raw")), "known name bypassed JSON encoding");
+    }
+    for (const auto* name : {"na", "names", "named", "键名"})
+        require(accepts(compiled, *bound, wire(name, "raw")), "open name prefix rejected");
+    for (const auto* name : {"", "<other", "a>b", "a\nb", "a\rb"})
+        require(!accepts(compiled, *bound, wire(name, "raw")),
+                "invalid Qwen parameter name admitted");
 }
 
 void selected_contracts(ninfer::text::GrammarCompiler& compiled) {
@@ -344,6 +377,7 @@ void run() {
     name_transactions();
     auto compiled = compiler();
     basic_contracts(compiled);
+    parameter_names(compiled);
     selected_contracts(compiled);
     json_body_contracts(compiled);
     ninfer::ToolChoice required;

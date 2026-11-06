@@ -50,7 +50,7 @@ bool same_config(const ops::SamplingConfig& a, const ops::SamplingConfig& b) {
            a.repetition_penalty == b.repetition_penalty && a.prompt_presence == b.prompt_presence &&
            a.history_overlay == b.history_overlay &&
            a.history_overlay_size == b.history_overlay_size &&
-           a.commit_token_counts == b.commit_token_counts && a.seed == b.seed &&
+           a.seed == b.seed &&
            a.token_counts == b.token_counts && a.mask.words == b.mask.words &&
            a.mask.stride == b.mask.stride;
 }
@@ -385,8 +385,7 @@ int greedy_contract() {
                      greedy_oracle(logits, physical_rows, token_domain, batch, config, counts));
     for (std::size_t row = 0; row < result.counts.size(); ++row) {
         std::vector<int> expected_counts = counts;
-        ++expected_counts[static_cast<std::size_t>(result.tokens[row])];
-        failures += verify_exact("sample greedy increments selected token", result.counts[row],
+        failures += verify_exact("sample greedy preserves token counts", result.counts[row],
                                  expected_counts);
     }
     return failures;
@@ -424,11 +423,10 @@ int deterministic_stochastic_contract() {
                                                  ops::kSamplePurposeDecode, &test_case.counts);
 
         std::vector<int> expected_counts = test_case.counts;
-        ++expected_counts[static_cast<std::size_t>(oracle.tokens.front())];
         failures += result.integrity_failures;
         failures += verify_exact(test_case.label, result.tokens, {oracle.tokens.front()});
-        failures += verify_exact("sample increments only selected token", result.counts.front(),
-                                 expected_counts);
+        failures +=
+            verify_exact("sample preserves token counts", result.counts.front(), expected_counts);
     }
     return failures;
 }
@@ -472,10 +470,6 @@ int heterogeneous_batch_contract() {
     int failures = result.integrity_failures;
     failures += verify_exact("sample heterogeneous batch tokens", result.tokens, {5, 11, 17, 19});
     std::vector<std::vector<int>> expected = counts;
-    for (int row = 0; row < batch; ++row) {
-        ++expected[static_cast<std::size_t>(row)]
-                  [static_cast<std::size_t>(result.tokens[static_cast<std::size_t>(row)])];
-    }
     for (int row = 0; row < batch; ++row) {
         failures += verify_exact("sample heterogeneous batch isolated token counts",
                                  result.counts[static_cast<std::size_t>(row)],
@@ -728,7 +722,6 @@ int qualify_repetition_penalty() {
                     config.prompt_presence      = static_cast<const int*>(device_prompt.data());
                     config.history_overlay      = static_cast<const int*>(device_overlay.data());
                     config.history_overlay_size = source == 2 ? 2 : 0;
-                    config.commit_token_counts  = false;
                     const double raw            = values[repeated];
                     const double adjusted       = raw < 0 ? raw * penalty : raw / penalty;
                     const int expected          = adjusted > values[unseen] ? repeated : unseen;
@@ -763,7 +756,6 @@ int qualify_repetition_penalty() {
             configs[col].token_counts         = static_cast<int*>(device_counts.data());
             configs[col].history_overlay      = static_cast<const int*>(device_overlay.data());
             configs[col].history_overlay_size = std::min(col, 2);
-            configs[col].commit_token_counts  = false;
         }
         configs[3].mask.words = static_cast<const std::uint32_t*>(device_allowed.data());
         auto result = run_batch(repeat_column(column, 4), domain, domain, configs, {0, 1, 2, 3}, 0);
@@ -787,7 +779,6 @@ int qualify_repetition_penalty() {
         mixed.frequency_penalty    = 0.125f;
         mixed.history_overlay      = static_cast<const int*>(device_overlay.data());
         mixed.history_overlay_size = 2;
-        mixed.commit_token_counts  = false;
         result                     = run_batch(column, domain, domain, {mixed}, {0}, 0);
         failures += result.integrity_failures;
         failures += verify_exact("repetition before presence and frequency", result.tokens, {1});

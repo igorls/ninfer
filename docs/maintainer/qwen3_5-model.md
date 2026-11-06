@@ -1,8 +1,9 @@
-# Qwen3.5 model reference
+# Qwen3.5 架构
 
-This reference describes the Qwen3.5 Dense and MoE mathematics implemented by NInfer, including
-Text, MTP, Vision and their state semantics. The Qwen3.6 and Qwen3.8 releases used by the official
-artifacts are instances of these architectures. Their release names do not choose another graph.
+Qwen3.5 Dense 与 MoE 共用混合 attention 架构，FFN 使用各自数学实现。
+Qwen3.6/3.8 的已注册 27B 和 35B-A3B 是它们的实例；名称与量化组合不创建新的执行入口。
+配置和绑定分别由 [config](../../src/models/qwen3_5/config.cpp)与
+[load](../../src/models/qwen3_5/load/)维护。
 
 [Engine architecture](engine-architecture.md) defines ownership and execution;
 [artifact container](artifact-container.md) defines stored objects and bindings;
@@ -116,83 +117,61 @@ last. H is hidden width, D is an attention head dimension, and T is the current 
 The two Text norm forms are:
 
 ```text
-offset_rmsnorm(x,w) = (1 + w) * x / sqrt(mean(x^2) + eps)
-plain_rmsnorm(x,w)  =       w  * x / sqrt(mean(x^2) + eps)
+embedding / Vision features
+  → 多层 pre-norm residual：GQA 或 GDN → Dense FFN 或 MoE
+  → final norm → Main head
 ```
 
-Text/MTP input, post-attention, final, stem and Q/K norms use the offset form. GDN's internal
-output norm uses the plain form. Vision uses LayerNorm with weight and bias.
+Config 决定层序、head、宽度和组件关系，原生代码决定固定数学。Text 使用 offset RMSNorm，
+gain 为 `1+w`；不能在转换时先把它舍入成普通 BF16 gain。完整 GQA 带输出 gate，
+Q/K 使用 head norm 和部分 interleaved MRoPE。GDN 使用因果卷积、Q/K normalization、
+gated delta recurrence 和 gated norm，状态按层/head 独立。
 
-Every Text block follows:
+Dense 使用 SwiGLU；MoE 使用全局 top-k softmax routed experts 与独立 sigmoid gate 的 shared
+expert。表示选择不改变 route 或 shared 的数学位置。具体公式、alias 与舍入合同在
+[Ops](../../include/ninfer/ops/)，模型只负责层组合与实际参数。
 
-```text
-h = offset_rmsnorm(x, input_norm)
-x = x + mixer(h)
-h = offset_rmsnorm(x, post_attention_norm)
-x = x + ffn(h)
-```
+## 表示与执行
 
-The mixer is gated GQA or GDN according to `layer_types`. Dense FFN is
-`down(SiLU(gate(h)) * up(h))`; MoE is defined below. Text/MTP projections and GDN convolution are
-bias-free. Fusion may combine projection, activation, normalization and residual work while
-preserving the declared mathematical and observable precision boundaries.
+Converter 可以为不同逻辑角色选择 groupwise INT、NVFP4、BF16 等表示。
+Activation permission 属于使用位置；实际 Op 负责其格式和几何支持。Norm、卷积与逻辑行序
+由 converter/load 对齐，运行期不重打包。通用关系见[权重与加载](weights-and-loading.md)。
 
-### Gated full attention
+本地执行使用原生 Session 和 RankProgram。27B Dense 与 35B MoE 保持各自 FFN 组合，
+MoE 可以使用 GPU resident 或 RTX 5090 的[混合执行](expert-weight-cache.md)。
+Speculative backend、proposal head 和 Vision 在启动选择，未选择的组件不占用执行资源。
 
-```text
-q    = query(h)
-gate = gate_projection(h)
-k    = key(h)
-v    = value(h)
+## State 与历史
 
-q = offset_rmsnorm(q, query_norm)
-k = offset_rmsnorm(k, key_norm)
-q, k = partial_interleaved_mrope(q, k)
-a = causal_gqa(q, k, v, scale=1/sqrt(D))
-y = output(a * sigmoid(gate))
-```
+完整续算状态包含 GDN recurrent/conv、continuation hidden 和所选 draft backend 的定长状态。
+Main GQA、MTP 和需要 full context 的 DFlash 层分别有自己的 history。
+DFlash local cyclic KV 属于 State；临时 query KV、verify records 与候选分布属于 frame。
 
-Q and gate have one D-dimensional vector per query head. K and V have one per KV head, with each
-KV head serving a consecutive group of query heads. The gate is neither normalized nor rotated.
-The logical cached values are normalized/rotated K and projected V. Prefill appends a chunk and
-uses causal attention; decode appends one column and attends over the visible prefix.
+Checkpoint 保留同一次真实执行的 State、history coverage 与位置身份。
+Prefill/Replay 可在一个 Work 内推进多个数学或媒体段，保存与调度边界由 Session 统一决定。
+存储、引用、Host 恢复与抢占复用[Context 管理](context-management.md)，不按模型另建缓存策略。
 
-Paging and KV quantization are storage choices. Their contracts are
-[`kv_cache_append.h`](../../include/ninfer/ops/kv_cache_append.h),
-[`softmax_attention.h`](../../include/ninfer/ops/softmax_attention.h) and
-[paged KV cache](paged-kv-cache.md).
+## Speculative backend
 
-### Gated DeltaNet
+MTP 是一个私有 attention＋FFN block，conditioning 使用 Main 最终归一化 hidden，
+输入为分别归一化后的 embedding 与 hidden 拼接。Main/MTP 稳定前沿为
+`F / max(F-1,0)`；token、hidden 和位置按真实配对解释。媒体占位使用对应的 composed embedding。
 
-Normalized input produces Q, K, V, output gate Z and per-value-head A/B projections. Only Q/K/V
-pass through depthwise causal convolution and SiLU. The convolution retains the preceding
-`linear_conv_kernel_dim - 1` projected columns. GDN has no RoPE or position-ID input.
+DFlash/DFlash2 从指定 Main 层的 residual 捕获 conditioning，一次 masked block 提出多个 token。
+DFlash2 还有动态卷积与条件候选路径。它们的 context append、proposal 分布与状态恢复和 MTP
+不同，详见[Speculative 执行](speculative-decoding.md)。
 
-For value head j, use Q/K head `j // (value_heads / key_heads)`. Let the recurrent state be
-`S[Dv,Dk]`. One token performs:
+Indexed proposal head 是独立可选表示，通过 row map 回到真实 token ID；target 仍使用完整
+Main head。不同 proposal 只改变接受行为和成本，不改变 target 验证职责。
 
-```text
-g     = -exp(A_log) * softplus(a + dt_bias)
-alpha = exp(g)
-beta  = sigmoid(b)
-k     = k / sqrt(sum(k^2) + 1e-6)
-q     = q / sqrt(sum(q^2) + 1e-6)
-Sbar  = alpha * S
-u     = beta * (v - Sbar @ k)
-S     = Sbar + u outer k
-o     = (S @ q) * (1/sqrt(Dk))
-y     = out_projection(plain_rmsnorm(o, gdn_norm) * SiLU(z))
-```
+## Vision 与 Frontend
 
-The delta error uses the already-decayed state. GDN controls and recurrent state are FP32. The Op
-receives raw BF16 q/k; normalization precision and the chunked/recurrent implementation are private
-to its qualified route. Large prefill can use parallel state passing, while decode uses recurrence.
+Qwen Vision 使用 patch projection、带位置编码的 transformer tower 和空间 merger。
+其 LayerNorm、Q/K RoPE 与 GELU 形式由 Vision 数学维护，不套用 Text 的 offset norm。
+共享 Qwen processor 产生 patches、媒体 spans 和三轴位置；Main 在 embedding 后替换媒体列。
 
-Ordinary decode updates the lane's current state. Speculative verification leaves persistent state
-unchanged and writes convolution and recurrent records. After output resolution, one Fold applies
-the committed prefix of that recorded physical block. The projection/convolution/record fusion
-remains in the model's finite execution choices. [ReplaySSM](replayssm-gdn.md) defines the record
-and commit semantics, including their numerical boundary.
+Text 位置随媒体 grid 延伸，decode 保留相应位置偏移。媒体内容和位置共同参与前缀身份，
+仅比较占位 token 不足以复用。预处理和 GPU 窗口采用[公共有界媒体机制](frontend.md#有界媒体准备)。
 
 ### Sparse MoE
 

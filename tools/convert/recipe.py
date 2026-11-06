@@ -28,6 +28,7 @@ from .methods import (
     METHODS,
     cast_direct,
     grouped_absmax,
+    fp8_block_maxabs,
     fp8_row_maxabs,
     import_encoded,
     nvfp4_maxabs,
@@ -549,6 +550,7 @@ class Recipe:
             import_encoded,
             nvfp4_maxabs,
             u4z8_maxabs,
+            fp8_block_maxabs,
         )
         for names in self.model.packing_groups:
             if any(

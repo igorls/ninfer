@@ -12,15 +12,16 @@
 namespace ninfer::models::qwen3_5 {
 
 struct FrameSpec {
-    std::int32_t hidden          = 0;
-    std::int32_t output_rows     = 0;
-    std::int32_t public_tokens   = 0;
-    std::uint32_t prefill_chunk  = 0;
-    std::uint32_t batch_capacity = 1;
-    std::uint32_t draft_window   = 0;
-    SpeculativeBackend backend   = SpeculativeBackend::None;
-    bool causal_scoring          = false;
-    bool vision                  = false;
+    std::int32_t hidden               = 0;
+    std::int32_t output_rows          = 0;
+    std::int32_t public_tokens        = 0;
+    std::uint32_t prefill_chunk       = 0;
+    std::uint32_t batch_capacity      = 1;
+    std::uint32_t draft_window        = 0;
+    SpeculativeBackend backend        = SpeculativeBackend::None;
+    bool causal_scoring               = false;
+    bool vision                       = false;
+    std::uint32_t control_token_limit = 0;
 };
 
 // Arrays are compact-row indexed. Tensor views bind only the current exact-B prefix.
@@ -39,11 +40,18 @@ struct FrameIngress {
     std::array<std::int32_t, kMaximumConcurrency> residency_slots{};
     std::array<std::int32_t, kMaximumConcurrency> rope_deltas{};
     std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    std::array<std::int32_t, kMaximumConcurrency> sampling_positions{}, history_skip{};
+    std::array<std::int32_t, 3 * kMaximumConcurrency> previous_rope{};
+    std::array<std::int32_t, 16 * kMaximumConcurrency> decode_positions{};
+    std::array<std::int32_t, 48 * kMaximumConcurrency> decode_rope{};
+    std::array<std::int32_t, 5 * kMaximumConcurrency> step_positions{}, step_valid{};
+    std::array<std::int32_t, 15 * kMaximumConcurrency> step_rope{};
 };
 
 struct FrameCommit {
     std::array<std::int64_t, kMaximumConcurrency> state_destination_offsets{};
-    std::array<std::int32_t, kMaximumConcurrency> history_columns{};
+    std::array<std::int32_t, kMaximumConcurrency> last_columns{}, accepted_columns{};
+    std::array<std::int32_t, kMaximumConcurrency> count_columns{};
     std::array<std::int32_t, kMaximumConcurrency> draft_append_starts{};
     std::array<std::int32_t, kMaximumConcurrency> draft_append_ends{};
 };
@@ -51,7 +59,6 @@ struct FrameCommit {
 struct FrameEgress {
     std::array<TokenId, kMaximumConcurrency * 16> tokens{};
     std::array<std::int32_t, kMaximumConcurrency> counts{};
-    std::array<std::int32_t, kMaximumConcurrency> accepted_drafts{};
 };
 
 struct MtpFrameLayout {
@@ -62,12 +69,8 @@ struct MtpFrameLayout {
     TensorRegion proposal_logits;
     TensorRegion history_conditioning;
     TensorRegion history_ids;
-    TensorRegion history_positions;
+    TensorRegion history_positions, history_columns;
     TensorRegion history_rope_positions;
-    TensorRegion step_ids;
-    TensorRegion step_positions;
-    TensorRegion step_rope_positions;
-    TensorRegion step_valid_columns;
 };
 
 struct DFlashFrameLayout {
@@ -91,9 +94,7 @@ struct FrameHostLayout {
     std::optional<TensorRegion> control_tokens;
     std::optional<TensorRegion> masks;
     std::optional<TensorRegion> drafts;
-    std::optional<TensorRegion> step_positions;
-    std::optional<TensorRegion> step_rope_positions;
-    std::optional<TensorRegion> step_valid_columns;
+    std::optional<TensorRegion> step_positions, step_rope_positions, step_valid_columns;
     std::optional<TensorRegion> score_logprobs, score_targets, score_argmax, score_best, score_hidden;
     std::size_t bytes = 0;
 };
@@ -115,6 +116,7 @@ struct FrameLayout {
     std::optional<TensorRegion> masks;
     std::optional<TensorRegion> score_targets;
     std::optional<TensorRegion> score_logprobs, score_argmax, score_best;
+    std::optional<TensorRegion> control_ids;
     std::optional<MtpFrameLayout> mtp;
     std::optional<DFlashFrameLayout> dflash;
     FrameHostLayout host;
@@ -128,11 +130,13 @@ struct MtpStepView {
 
 struct MtpFrame {
     Tensor base_conditioning, ar_hidden, next_hidden, drafts, proposal_logits;
-    Tensor history_conditioning, history_ids, history_positions, history_rope_positions;
-    Tensor step_ids, step_positions, step_rope_positions, step_valid_columns;
+    Tensor history_conditioning, history_ids, history_positions, history_rope_positions,
+        history_columns;
+    Tensor step_positions, step_rope_positions, step_valid_columns;
 
     MtpFrame(MemorySpan backing, const MtpFrameLayout& layout);
     [[nodiscard]] MtpStepView step_view(std::int32_t step, std::int32_t batch) const;
+    [[nodiscard]] Tensor proposals(std::int32_t batch) const;
 };
 
 struct DFlashFrame {
@@ -156,6 +160,8 @@ public:
 
     [[nodiscard]] FrameInputView input_view(std::int32_t width, std::int32_t batch) const;
     [[nodiscard]] FrameInputView host_input_view(std::int32_t width, std::int32_t batch) const;
+    [[nodiscard]] FrameInputView decode_view(std::int32_t width, std::int32_t batch) const;
+    [[nodiscard]] FrameInputView host_decode_view(std::int32_t width, std::int32_t batch) const;
 
     const FrameSpec spec;
     const std::int32_t input_capacity;
@@ -166,6 +172,7 @@ public:
     Tensor host_input_ids, host_cache_positions, host_rope_positions;
     Tensor host_visual_indices;
     Tensor host_control_tokens;
+    Tensor control_ids;
     Tensor host_masks, host_drafts, host_score_logprobs;
     Tensor host_score_targets, host_score_argmax, host_score_best, host_score_hidden;
     Tensor host_step_positions, host_step_rope_positions, host_step_valid_columns;
@@ -174,9 +181,11 @@ public:
     Tensor proposal_valid_columns, budgets, main_table_rows, backend_table_rows;
     Tensor state_source_offsets, state_destination_offsets, residency_slots, rope_deltas;
     const ops::SamplingConfig* sampling = nullptr;
-    Tensor commit_destination_offsets, history_columns;
+    Tensor sampling_positions, history_skip, previous_rope;
+    Tensor decode_positions, decode_rope;
+    Tensor commit_destination_offsets, last_columns, count_columns, accepted_columns;
     Tensor draft_append_starts, draft_append_ends;
-    Tensor output_tokens, output_counts, accepted_drafts;
+    Tensor output_tokens, output_counts;
     Tensor input_ids, cache_positions, rope_positions, hidden;
     Tensor input_embeddings;
     Tensor visual_indices;

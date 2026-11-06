@@ -1,3 +1,8 @@
+add_library(ninfer_op_suite STATIC "${CMAKE_CURRENT_LIST_DIR}/suite.cpp")
+ninfer_test_includes(ninfer_op_suite)
+ninfer_op_oracle_options(ninfer_op_suite)
+target_link_libraries(ninfer_op_suite PUBLIC ninfer_core)
+
 set(ninfer_op_tests
   add_bias
   gelu
@@ -38,6 +43,12 @@ ninfer_add_op_test(ninfer_candidate_selector_test
 ninfer_add_op_test(ninfer_softmax_attention_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/main.cpp"
           "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/causal_cache.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/causal/cache.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/causal/device_cache.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/causal/oracle.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/causal/runner.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/causal/cases.cpp"
+
           "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/plain_and_packed.cpp"
           "${CMAKE_CURRENT_LIST_DIR}/softmax_attention/context.cpp"
   LIBRARIES ninfer_ops)
@@ -47,7 +58,9 @@ ninfer_add_op_test(ninfer_sliding_window_attention_test
   LIBRARIES ninfer_ops)
 
 ninfer_add_op_test(ninfer_kv_cache_append_test
-  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kv_cache_append.cpp"
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/kv_cache/append_main.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/kv_cache/append_full.cpp"
+          "${CMAKE_CURRENT_LIST_DIR}/kv_cache/append_prefix.cpp"
   LIBRARIES ninfer_ops)
 
 ninfer_add_op_test(ninfer_rmsnorm_rope_test
@@ -59,10 +72,10 @@ ninfer_add_op_test(ninfer_context_kv_materialize_test
   LIBRARIES ninfer_ops)
 
 add_test(NAME ninfer_kv_cache_append_nvfp4_test
-  COMMAND ninfer_kv_cache_append_test --nvfp4-only)
+  COMMAND ninfer_kv_cache_append_test --format nvfp4)
 
 add_test(NAME ninfer_kv_cache_append_k8v4_test
-  COMMAND ninfer_kv_cache_append_test --k8v4-only)
+  COMMAND ninfer_kv_cache_append_test --format k8v4)
 
 set_tests_properties(
   ninfer_kv_cache_append_nvfp4_test
@@ -106,3 +119,9 @@ include("${CMAKE_CURRENT_LIST_DIR}/linear_attention/gated_delta_net/tests.cmake"
 include("${CMAKE_CURRENT_LIST_DIR}/rmsnorm/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/gdn_control/tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/gated_residual/tests.cmake")
+
+target_link_libraries(ninfer_softmax_attention_test PRIVATE ninfer_op_suite)
+target_link_libraries(ninfer_kv_cache_append_test PRIVATE ninfer_op_suite)
+
+target_link_libraries(ninfer_qsa_sparse_gqa_test PRIVATE ninfer_op_suite)
+target_link_libraries(ninfer_sliding_window_attention_test PRIVATE ninfer_op_suite)

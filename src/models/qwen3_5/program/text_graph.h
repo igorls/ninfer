@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/device.h"
+#include "models/common/graph_preparation.h"
 #include "models/qwen3_5/execution/text.h"
 
 #include <functional>
@@ -27,7 +28,7 @@ public:
     void prepare(TextRun&, const Parameters&, moe::Schedule*, std::span<const GraphProfile>,
                  std::uint32_t width, const std::function<void()>& prologue,
                  const std::function<void()>& epilogue, MemoryArena&, DeviceContext&,
-                 const TextGraph* shared = nullptr);
+                 GraphPreparation&);
     void select(std::uint32_t frontier);
     [[nodiscard]] bool start(CudaExecutionView);
     [[nodiscard]] bool poll();

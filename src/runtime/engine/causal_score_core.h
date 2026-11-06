@@ -2,6 +2,7 @@
 
 #include "ninfer/types.h"
 #include "runtime/engine/context_capacity.h"
+#include "runtime/executor/measurement.h"
 #include "runtime/observability/snapshot.h"
 
 #include <condition_variable>
@@ -27,6 +28,11 @@ public:
     using PreparedPrompt = typename ModelContract::PreparedPrompt;
 
     explicit CausalScoreCore(Instance& instance) : instance_(instance) {
+        for (const auto& pool : instance_.session->kv_pools())
+            published_snapshot_.runtime.kv_pools.push_back(
+                {pool.id.index, std::string(pool.label), 0});
+        published_snapshot_.runtime.context_transfers.kv.resize(
+            instance_.session->kv_pools().size());
         published_snapshot_.ranks.assign(instance_.executor->observations().begin(),
                                          instance_.executor->observations().end());
         std::promise<void> startup;
@@ -34,6 +40,7 @@ public:
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
             try {
                 instance_.executor->bind_to_current_thread();
+                publish();
                 startup.set_value();
             } catch (...) {
                 startup.set_exception(std::current_exception());
@@ -85,15 +92,19 @@ public:
     }
 
     // Published observations are copied without waiting for the execution owner.
-    [[nodiscard]] std::optional<EngineSnapshot> try_snapshot() const {
+    [[nodiscard]] std::optional<EngineSnapshot> try_snapshot(SnapshotOptions options = {}) const {
         std::unique_lock lock(stats_mutex_, std::try_to_lock);
         if (!lock.owns_lock()) return std::nullopt;
-        return published_snapshot_;
+        auto result = published_snapshot_;
+        if (options.include_requests) result.requests.emplace();
+        return result;
     }
 
-    [[nodiscard]] EngineSnapshot snapshot() const {
+    [[nodiscard]] EngineSnapshot snapshot(SnapshotOptions options = {}) const {
         std::lock_guard lock(stats_mutex_);
-        return published_snapshot_;
+        auto result = published_snapshot_;
+        if (options.include_requests) result.requests.emplace();
+        return result;
     }
 
     [[nodiscard]] bool is_available() const {
@@ -101,23 +112,46 @@ public:
         return !stopping_ && !failed_;
     }
 
-    void reset_measurement_peaks() {
-        std::scoped_lock execution_lock(execution_mutex_);
-        if (instance_.executor->has_pending_work())
-            throw std::logic_error("measurement window requires an idle engine");
-        instance_.session->reset_measurement_peaks();
-        std::lock_guard stats_lock(stats_mutex_);
-        const auto ranks = instance_.executor->observations();
-        published_snapshot_.ranks.assign(ranks.begin(), ranks.end());
+    [[nodiscard]] EngineSnapshot measure(MeasurementCommand command) {
+        std::scoped_lock call_lock(call_mutex_);
+        auto request     = std::make_unique<MeasurementRequest>();
+        request->command = command;
+        auto result      = request->completion.get_future();
+        {
+            std::lock_guard lock(queue_mutex_);
+            if (stopping_ || failed_)
+                throw std::runtime_error("causal scoring engine is unavailable");
+            measurement_ = std::move(request);
+        }
+        queue_cv_.notify_one();
+        return result.get();
     }
 
 private:
     void publish() {
+        EngineStatus status;
+        {
+            std::lock_guard lock(queue_mutex_);
+            status = stopping_ ? EngineStatus::Stopping
+                     : failed_ ? EngineStatus::Failed
+                               : EngineStatus::Ready;
+        }
+        const auto usage = instance_.session->physical_usage();
         std::lock_guard lock(stats_mutex_);
         published_snapshot_.stamp = {published_snapshot_.stamp.sequence + 1, observation_time_ns()};
         published_snapshot_.scoring    = scoring_;
         published_snapshot_.executions = instance_.executor->execution_statistics();
-        const auto ranks               = instance_.executor->observations();
+        published_snapshot_.status     = status;
+        published_snapshot_.in_flight.clear();
+        instance_.executor->observe_in_flight(published_snapshot_.in_flight);
+        published_snapshot_.runtime.context_pools     = usage.pools;
+        published_snapshot_.runtime.context_resources = usage.resources;
+        published_snapshot_.runtime.context_metadata  = usage.metadata;
+        published_snapshot_.runtime.state_objects     = usage.state_objects;
+        published_snapshot_.runtime.history_objects   = usage.history_objects;
+        for (auto& pool : published_snapshot_.runtime.kv_pools)
+            pool.occupied_page_groups = usage.kv_page_groups.at(pool.id);
+        const auto ranks = instance_.executor->observations();
         published_snapshot_.ranks.assign(ranks.begin(), ranks.end());
     }
 
@@ -129,17 +163,64 @@ private:
         std::promise<CausalScores> promise;
     };
 
+    struct MeasurementRequest {
+        MeasurementCommand command{};
+        std::promise<EngineSnapshot> completion;
+    };
+
+    void process_measurement(MeasurementRequest& request) noexcept {
+        try {
+            while (instance_.session->has_context_operation() ||
+                   instance_.executor->has_pending_work()) {
+                if (instance_.session->poll()) {
+                    instance_.executor->fail("scoring measurement received an unsettled result");
+                    throw std::logic_error("scoring measurement received an unsettled result");
+                }
+                instance_.executor->flush();
+                instance_.executor->wait_for_progress();
+            }
+            instance_.executor->measure(request.command);
+            publish();
+            request.completion.set_value(snapshot());
+        } catch (...) {
+            const auto error = std::current_exception();
+            if (!instance_.executor->failed()) {
+                try {
+                    instance_.executor->measure({MeasurementAction::Cancel});
+                } catch (...) { instance_.executor->fail("failed to close scoring measurement"); }
+            }
+            if (instance_.executor->failed()) {
+                instance_.session->fail_all_cleanup();
+                std::lock_guard lock(queue_mutex_);
+                failed_ = true;
+            }
+            request.completion.set_exception(error);
+        }
+    }
+
     void worker_loop() noexcept {
         for (;;) {
             std::unique_ptr<Job> job;
+            std::unique_ptr<MeasurementRequest> measurement;
             {
                 std::unique_lock lock(queue_mutex_);
-                queue_cv_.wait(lock, [&] { return stopping_ || job_ != nullptr; });
-                if (job_ == nullptr) {
-                    if (stopping_) { return; }
-                    continue;
+                queue_cv_.wait(lock, [&] { return stopping_ || job_ || measurement_; });
+                if (stopping_ && !job_) {
+                    measurement = std::move(measurement_);
+                    lock.unlock();
+                    instance_.session->fail_all_cleanup();
+                    publish();
+                    if (measurement)
+                        measurement->completion.set_exception(std::make_exception_ptr(
+                            std::runtime_error("causal scoring engine is shutting down")));
+                    return;
                 }
-                job = std::move(job_);
+                job         = std::move(job_);
+                measurement = std::move(measurement_);
+            }
+            if (measurement) {
+                process_measurement(*measurement);
+                continue;
             }
             bool execution_started = false;
             const auto started     = observation_time_ns();
@@ -148,7 +229,6 @@ private:
             try {
                 CausalScores result;
                 {
-                    std::scoped_lock lock(execution_mutex_);
                     const auto ticket =
                         instance_.session->start_score(std::move(job->prompt), job->first_target, *job->readout);
                     if (!ticket) {
@@ -156,7 +236,9 @@ private:
                         throw std::logic_error("scoring execution slot is occupied");
                     }
                     execution_started = true;
+                    publish();
                     instance_.executor->flush();
+                    auto next_observation = observation_time_ns() + 100'000'000;
                     for (;;) {
                         auto event = instance_.session->poll();
                         if (event) {
@@ -172,7 +254,12 @@ private:
                             break;
                         }
                         instance_.executor->flush();
-                        std::this_thread::yield();
+                        const auto now = observation_time_ns();
+                        if (now >= next_observation) {
+                            publish();
+                            next_observation = now + 100'000'000;
+                        }
+                        instance_.executor->wait_for_progress();
                     }
                 }
                 ++scoring_.completed_jobs;
@@ -184,10 +271,7 @@ private:
             } catch (...) {
                 const auto error = std::current_exception();
                 if (execution_started || instance_.executor->failed()) {
-                    {
-                        std::scoped_lock lock(execution_mutex_);
-                        instance_.session->fail_all_cleanup();
-                    }
+                    instance_.session->fail_all_cleanup();
                     {
                         std::lock_guard lock(queue_mutex_);
                         failed_ = true;
@@ -204,7 +288,6 @@ private:
     }
 
     Instance& instance_;
-    mutable std::mutex execution_mutex_;
     mutable std::mutex stats_mutex_;
     EngineSnapshot published_snapshot_;
     ScoringStatistics scoring_;
@@ -212,6 +295,7 @@ private:
     mutable std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::unique_ptr<Job> job_;
+    std::unique_ptr<MeasurementRequest> measurement_;
     bool stopping_ = false;
     bool failed_   = false;
     std::thread worker_;

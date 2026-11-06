@@ -187,7 +187,7 @@ struct QsaSparseGqaExecutionEnvelope {
  *
  * Domain / numeric:
  * T>0, B=1..8. Query, gate and out are contiguous, 16-byte-aligned BF16 [256,Hq,T,B], (Hq,Hkv) in
- * {(24,2),(12,1)}. Cache supports BFloat16 (BF16 K / FP16 V), Fp8E4M3Row256, Int8Group64,
+ * {(24,2),(12,1)}. Cache supports BFloat16 (BF16 K / FP16 V), Fp8E4m3fnGroup128Ue8m0, Int8Group64,
  * Nvfp4Group16 and Fp8KeyNvfp4Value. Data/scale planes follow paged_kv_storage_layout(storage,256),
  * with dense, naturally aligned [leading_extent,64,Hkv] geometry per 64-token record. Q and softmax
  * probabilities are not quantized to low-bit operands. The A16 numerical policy applies to the
@@ -264,7 +264,8 @@ void qsa_sparse_gqa(const Tensor& query, const Tensor& output_gate,
  *
  * - BFloat16: BF16 K / FP16 V [256,64,Hkv] per record; no scales.
  * - Int8Group64: I8 K/V [256,64,Hkv] per record; FP16 scales [4,64,Hkv] per record.
- * - Fp8E4M3Row256: FP8_E4M3FN K/V [256,64,Hkv] per record; FP16 scales [1,64,Hkv] per record.
+ * - Fp8E4m3fnGroup128Ue8m0: FP8_E4M3FN K/V [256,64,Hkv] per record; UE8M0 U8 scales [2,64,Hkv] per
+ * record.
  * - Nvfp4Group16: packed U8 K/V [128,64,Hkv] per record; U8 E4M3 scales [16,64,Hkv] per record.
  * - Fp8KeyNvfp4Value: the FP8 key planes and NVFP4 value planes above.
  *
@@ -336,8 +337,10 @@ void qsa_prepare_kv(const QsaKvProjectionView& projected, const QsaKvPreparePara
  * that block's first token coordinates, or three I32 zeros when F0%4==0.
  *
  * Logical shapes / supported domain:
- * View rules above apply. B is in [1,8]; R is positive. Each state's two
- * fields agree on B, and both record planes agree on R/B.
+ * B is in [1,8]; R and L are positive. Each state's two fields agree on B/L.
+ * Record raw keys are BF16 [128,R,B,L], coordinates I32 [3,R,B,L], with contiguous features
+ * and explicit disjoint outer strides. Each layer independently applies the equations above;
+ * base_positions, valid_columns and accepted_columns are shared across layers.
  * accepted_columns is contiguous Device I32 [B]. Each row has 0<=a<=u<=R, F0>=0, and F0+u
  * representable as nonnegative I32. The caller supplies the input-prefix length, not an emitted
  * token count, and ensures that before corresponds to F0. Source/destination record offsets are

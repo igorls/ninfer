@@ -1,110 +1,103 @@
-# Qwen4Exp 模型与权重
+# Qwen4Exp 架构
 
-本文维护 Qwen4Exp 的模型结构、Flash Next 实例、量化 recipe 和持久权重布局。
-当前执行能力、资源所有权与状态恢复见[执行与状态](qwen4_exp-execution.md)；
-转换命令见[权重转换](../weight-conversion.md)。通用数值表示、字节布局和文件合同分别由
-[数值格式](tensor-formats.md)、[存储布局](storage-layouts.md)、
-[V3 容器](artifact-container.md)维护。
+Qwen3.8-Flash-Next 使用 Qwen4Exp：GDN/QSA、四路 Gated Residual、MoE 与 PLE 的组合。
+实例维度来自 config，逻辑权重来自绑定；不根据 checkpoint 名称选择另一套层实现。
+主要入口为 [config](../../src/models/qwen4_exp/config.cpp)、
+[load](../../src/models/qwen4_exp/load/)和 [execution](../../src/models/qwen4_exp/execution/)。
 
-## 1. 架构与实例
+## 主干与状态
 
-Qwen3.8-Flash-Next 使用 `Qwen4ExpForCausalLM / qwen4_exp_text`。
-Converter 接受源 `Qwen4ExpForConditionalGeneration` 或 `Qwen4ExpForCausalLM`，
-统一输出这一架构；Vision 和原生 MTP 是 target 为 `text` 的可选组件。
-Qwen3.8-27B 使用另一套 Qwen3.5 架构，两者不因名称相近而共用 Text 层实现。
+```text
+embedding / Vision features → 四路 residual
+  → attention HC → GDN 或 QSA → HC combine
+  → FFN HC → routed + shared MoE → HC combine
+  → final HC mixer → Main head
+```
 
-下表是 Flash Next checkpoint 的实例值。模型执行从 config 读取层序和几何，
-Binding 描述实际权重，Parameters/Ops 决定可执行表示与 shape；recipe 名称不参与执行注册。
+PLE 在配置指定层的 attention HC 前加入。HC 的 streams 是特征轴，不增加 GDN、QSA 或 MoE
+的 token 数。Final mixer 的 sample hidden 与 mixer 前的四流 residual 是不同结果，
+MTP conditioning 使用后者。
 
-| 参数 | Flash Next |
+GDN 从 HC 输入形成 QKVZ 和 controls。Q/K/V 经过因果卷积与 SiLU，Z 绕过卷积；
+递推输出经过直接 gamma 的 head norm 和 `sigmoid(Z)`，再投影回 hidden。
+Conv 的 SiLU 与输出 gate 的 sigmoid 分属不同位置。
+
+QSA 保存完整主 K/V；四 token 压缩只作用于 index key。完整块的 pooled key 经 norm/RoPE
+参与打分，所有 query heads 共用 TopK 块集合；Sparse GQA 另消费未完成块的可见 tail。
+Indexer score 不加入 attention logits。Raw index tail 与位置属于定长 State，完整历史属于 KV。
+
+完整 checkpoint 还包含 GDN、PLE conv、continuation hidden 及启用 MTP 时所需的状态。
+Raw token 账本与模型前沿归 Session。具体恢复、共享和分配沿用[Context 管理](context-management.md)。
+
+## 权重选择与合并
+
+Flash Next recipe 采用以下主要取舍；精确参数映射由
+[converter](../../tools/convert/qwen4_exp.py)维护。
+
+| 角色 | 选择 |
 |---|---|
-| Text hidden / vocabulary | 2560 / 248320；embedding 与 head 不绑权重 |
-| Main | 48 层；零基层号 `l%4==3` 为 QSA，共 12 层，其余 36 层为 GDN |
-| HC streams / lowrank | 4 / 320；residual 宽度 10240 |
-| GDN heads / dimension | Q/K 16 heads、V 48 heads，维度均为 128；每组 Q/K 服务连续三个 V heads |
-| GDN QKV / Z / convolution | 10240 / 6144；4 taps、dilation=1 |
-| QSA Q / KV | 24 / 2 heads，head dimension=256 |
-| QSA indexer | 4 个 query heads、1 个 key head，dimension=128 |
-| QSA compression / selection | 四 token 一块；最多 512 个完整块，另加未完成块的至多三个可见 token |
-| Routed experts | 每层 512 个，top-10，intermediate=640 |
-| Shared expert | 每层一个 SwiGLU，intermediate=640，独立标量 sigmoid gate |
-| PLE 位置 | 零基第 1 层的 attention HC 之前；源 `ple_layer_ids=[2]` 规范化为 `[1]` |
-| PLE heads / embedding | 2-gram、3-gram 各 8 heads；16 行 × 160 维，拼成 2560 维 |
-| PLE table | 128 个 `[2500012,160]` shards，共 320001536 行 |
-| PLE convolution | 10240 通道，4 taps、dilation=3，九列历史 |
-| MTP | 一个独立 HC/QSA/MoE 层，无 PLE；共享 Main embedding，默认共享 Main head，可选独立量化 draft head |
-| Vision blocks | 27 层，hidden=1152，16 heads × 72，MLP intermediate=4304 |
-| Vision patch / merger | patch `[3,2,16,16]`；2×2 merge，4608→4608→2560 |
-| RoPE | theta=10000000；Main 与 indexer 都旋转前 64 维；interleaved MRoPE sections `[11,11,10]` |
-| Context / norm epsilon / EOS | 262144 / `1e-6` / 248044 |
+| Main routed experts | 导入 NVIDIA NVFP4，允许 A4 |
+| GDN 大投影、Main QSA Q/gate 与 O | Q8 A16 |
+| MTP routed experts | Block-FP8，允许 A8 |
+| HC、控制投影、shared、主 head、Vision、其他保留投影 | BF16，保留对应数学边界 |
+| PLE table | NF4，精确 BF16 lookup 出口 |
+| Optimized MTP head | 从 Main 源 head 额外生成完整词表 Q4 A16，不裁词表 |
 
-Adapter 将源 `full_attention` 规范化为 `indexed_attention`，并将
-`norm_topk_prob=true` 等数学配置写入产物。字段和源参数映射由
-[adapter](../../tools/convert/qwen4_exp.py)维护，原生配置解释见
-[config](../../src/models/qwen4_exp/config.cpp)。
+Offset norm 保留源 offset words，`1+w` 与 HC 缩放不提前折入低精度权重。
+GDN/PLE convolution 转为 tap 外、channel 连续的布局，保持 tap 时间次序。
+NVFP4 weight divisor 与 activation divisor 分属权重和 Use，见[权重与加载](weights-and-loading.md)。
 
-## 2. 模型计算与数值边界
+合并投影保留逻辑角色。Main QSA 的不同表示分开；MTP 的 K、V、index-K 放在同一个 BF16 parent
+的连续前缀，随后才是 Q、gate、index-Q。完整投影与 history-only 计算共享权重，避免补齐历史时
+多次小 Linear。TP 先按角色切片再合并，不能把整个 QKV 类 parent 简单对半截断。
+LinearSplit 直接写各段连续输出，模型不重复整理这些投影结果。
 
-### 2.1 Main 与 HC
+## PLE
 
-```text
-token embedding，在视觉位置替换为 Vision 特征
-  → 复制为四条 HC residual streams
-  → 每层：attention HC → GDN/QSA → HC combine
-          MoE HC       → MoE     → HC combine
-          （零基第 1 层入口先加入 PLE）
-  → final HC norm/mixer → 2560 维 sample hidden → LM head
-```
+PLE 根据 raw token 的二、三元组 hash 查表，组合 lookup embedding，再经投影、gate 与
+带 dilation 的卷积作用于 residual。视觉特征不替换 hash 输入的 token IDs。
+Lookup、投影和卷积有各自表示与历史合同，表的驻留位置不改变 Main 的消费语义。
 
-四条 streams 是特征轴，GDN/QSA/MoE 仍消费一个 2560 维 block 输入。
-HC 对每条 stream 独立做 offset RMSNorm；低秩 down/up 产生逐特征的 sigmoid mixing，
-block injection 为四个 `2*sigmoid(logit/4)` 系数。Combine 将同一个 block 输出按
-这些系数加回各 stream，形成公开的 BF16 residual；下一次 norm 消费这些实际 BF16 words。
-Final mixer 不产生 injection，其后没有额外 final RMSNorm。
+磁盘路径从 V3 NF4 表按行读取，使用有界行缓存和准备/上传槽；输入已知部分可以增量准备，
+计算消费稳定的 embedding 与就绪依赖。上传槽直到最后 GPU 消费者结束才复用。
 
-[HC 合同](../../include/ninfer/ops/gated_residual.h)维护完整公式。
-模型保留两种末端特征：final mixer 的 2560 维输出，以及其 norm/mixer 之前的
-10240 维 residual。MTP conditioning 使用后者，不能从前者反推。
+双机 Device 路径按表 shards 放置，各 rank lookup 后合并精确 words，再执行复制的 PLE 计算。
+数据生产可与前序计算重叠；Main 抓图不按磁盘或 Device 来源任意切碎。
+PLE 缓存不属于请求 State，只有卷积历史和真实 token 前沿参与恢复。
 
-### 2.2 GDN、QSA 与 MoE
+实现入口：[PLE](../../src/models/qwen4_exp/ple/)、
+[Device lookup 组合](../../src/models/qwen4_exp/program/device_ple.cpp)。
 
-GDN 将 HC 输入投影为 QKVZ 和 AB。Q/K/V 经过因果卷积与 SiLU，再做 Q/K L2
-normalization 和 gated delta-rule；Z 绕过卷积。Recurrent state 为
-FP32 `S[value_dim,key_dim]`。输出使用直接 gamma 的 head-wise RMSNorm，
-乘 `sigmoid(Z)` 后投影回 2560 维。卷积 SiLU 与输出 sigmoid 是两个不同的非线性。
-计算合同见 [GDN](../../include/ninfer/ops/gated_delta_net.h)、
-[controls](../../include/ninfer/ops/gdn_control.h)及
-[gated RMSNorm](../../include/ninfer/ops/rmsnorm.h)。
+## 并行与放置
 
-QSA 保留完整主 K/V 历史；4:1 压缩仅作用于 index key。每个完整块先将四列 raw index-K
-平均并舍入为 BF16，再做 offset norm 和块首坐标 RoPE。四个 index heads 的非负 dot
-之和决定共享 TopK；所有 24 个 query heads 消费同一选块集合。Sparse GQA 还读取当前
-未完成块的可见 token，输出乘逐元素 sigmoid gate 后进入 O projection。
-Index score 不加入主 attention logits。完整公式与 KV codec 边界见
-[QSA 合同](../../include/ninfer/ops/qsa.h)。
+| 部分 | 双 Spark 分工 |
+|---|---|
+| GDN / Sparse GQA | 按完整 heads TP；O 产生局部贡献后归约 |
+| QSA Indexer | 投影、评分、index cache/tail 复制，供本地 GQA 使用 |
+| HC / residual | 复制；消费完整归约结果 |
+| Routed experts | TP2/EP1 时每个 expert 的 intermediate TP；TP2/EP2 时完整 expert EP |
+| Router / shared | Router 复制，shared intermediate TP；贡献统一汇合 |
+| Embedding / head | Embedding 复制，head 按词表 TP |
+| PLE / Vision | PLE 表分片；Vision 权重复制、独立编码单元分工 |
 
-MoE 使用归一化 top-k softmax 路由，shared 不参加 top-k：
+EP 保留全局 expert IDs 和 route 系数，不在本地集合重新归一化。TP 的 GU 与 down 沿对应
+intermediate 同时切分，block-FP8 必要时保值 refine。共享专家只贡献一次完整数学结果。
 
-```text
-expert_e(x) = W_down_e * (SiLU(W_gate_e*x) * (W_up_e*x))
-routed(x)   = sum_selected_e(prob_e * expert_e(x))
-shared(x)   = sigmoid(W_shared_score*x) * shared_ffn(x)
-moe(x)      = routed(x) + shared(x)
-```
+Router/Indexer 的复制决策使用一致的输入与计算条件；模型需要共同的离散结果，不能用单个
+Op 的近似精度容限替代一致性要求。具体切片、expert 映射与通信由
+[ParallelPlan](../../src/models/qwen4_exp/parallel/plan.cpp)维护。
 
-Shared FFN 同样使用 SwiGLU。MoE 输出一个 2560 维 block，由 HC 回注 residual。
-投影、非线性、route coefficient 和逐 expert 归约的私有 staging 不增加公共 BF16
-舍入边界；语义入口及 activation policy 由 [MoE 合同](../../include/ninfer/ops/moe.h)维护。
+RTX 5090 还可通过[expert cache](expert-weight-cache.md)执行 Main experts 的 CPU/GPU 混合路径。
+Spark 使用 GPU 计算；Context 每 rank 持有本地 State/KV，普通 TP histories 构成完整共同恢复点。
 
-### 2.3 MTP 与 Vision
+## MTP、Vision 与 Graph
 
-MTP 的初始特征为：
+MTP 使用私有 HC/QSA/MoE 层，与 Main 共享 embedding，默认共享 Main head；optimized 时只改变
+其 draft head 绑定。Conditioning 为 Main 四流 residual，stem 保持这一特征关系。
+稳定前沿、首步采用和真实 conditioning 的 history repair 见[Speculative 执行](speculative-decoding.md)。
 
-```text
-e = W_fc_embedding * OffsetNorm_2560(token_embedding)
-v = OffsetNorm_10240(multistream_hidden).reshape(4,2560)
-h_init[s] = W_fc_hidden * v[s] + e
-```
+Vision 复用 Qwen tower 与 MRoPE 输入机制。编码 features 与 prefill 窗口按真实媒体 spans 交接，
+状态与前缀身份同时包含媒体和位置。资源机制见[Frontend](frontend.md)。
 
 Hidden norm 沿完整 10240 维归约，随后同一个 fc_hidden 独立作用于四条 streams。
 第一步使用 Main conditioning，后续 draft step 使用前一步 MTP 的 pre-final-mixer

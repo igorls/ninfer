@@ -1,14 +1,13 @@
 #pragma once
 
 #include "models/qwen4_exp/program/text_graph.h"
-#include "models/qwen4_exp/ple/input.h"
 #include "core/context_pool.h"
 
 namespace ninfer::models::qwen4_exp::detail {
 class RankProgramImpl;
 
-[[nodiscard]] std::uint32_t context_envelope(std::uint32_t visible, std::uint32_t capacity);
 [[nodiscard]] std::vector<std::uint32_t> decode_context_bounds(std::uint32_t capacity);
+[[nodiscard]] std::uint32_t decode_context_bound(std::uint32_t visible, std::uint32_t capacity);
 
 class GraphInputs {
 public:
@@ -17,6 +16,7 @@ public:
     ~GraphInputs();
     void prepare();
     void batch(execution::BatchView, std::uint32_t visible);
+    void stage();
 
 private:
     RankProgramImpl& owner_;
@@ -26,17 +26,15 @@ private:
     std::array<PinnedHostBuffer, 2> mappings_;
 };
 
-enum class MainGraph { Control, Ordinary, Verify };
-
 class Graphs {
 public:
     explicit Graphs(RankProgramImpl&);
-    void prepare(GraphInputs&);
-    [[nodiscard]] TextGraph& main(std::uint32_t batch, MainGraph, std::uint32_t visible);
+    void prepare(GraphInputs&, GraphPreparation&);
+    [[nodiscard]] TextGraph& main(std::uint32_t batch, bool verify, std::uint32_t visible,
+                                  bool head);
     void draft(std::uint32_t batch, std::span<const execution::BatchView>, ple::Ticket,
                std::span<const std::uint32_t> extents);
     void sample(std::uint32_t batch);
-    void verify_head(std::uint32_t batch);
     void accept(std::uint32_t batch);
 
     [[nodiscard]] std::size_t workspace_peak() const { return workspace_peak_; }
@@ -47,20 +45,26 @@ private:
     struct DraftStep {
         std::vector<DecodeGraphDefinition> definitions;
         std::vector<std::size_t> workspace_bytes;
-        DecodeGraphExecutable executable;
-        std::size_t installed = 0;
+        std::array<DecodeGraphDefinition, 2> handoffs;
+    };
+
+    struct DraftChain {
+        GraphSegment graph;
+        std::vector<DecodeGraphChild> steps, handoffs;
+        std::vector<std::size_t> installed;
+        std::uint32_t slot = 0;
     };
 
     struct Batch {
-        TextGraph control, ordinary, verify;
-        GraphSegment sample, accept, head;
+        TextGraph main, verify;
+        GraphSegment sample, accept;
         std::vector<DraftStep> drafts;
-        std::size_t sample_workspace = 0, accept_workspace = 0, head_workspace = 0;
+        DraftChain chain;
+        std::size_t sample_workspace = 0, accept_workspace = 0;
     };
 
-    void prepare_main(Batch&, std::uint32_t batch, MainGraph);
-    [[nodiscard]] TextGraph& main(Batch&, MainGraph);
-    void prepare_drafts(Batch&, std::uint32_t batch);
+    void prepare_main(Batch&, std::uint32_t batch, bool verify, GraphPreparation&);
+    void prepare_drafts(Batch&, std::uint32_t batch, GraphInputs&, GraphPreparation&);
     RankProgramImpl& owner_;
     std::vector<std::uint32_t> bounds_;
     std::vector<Batch> batches_;
@@ -71,21 +75,22 @@ class MtpCommitGraphs {
 public:
     explicit MtpCommitGraphs(RankProgramImpl& owner) : owner_(owner) {}
 
-    void prepare(GraphInputs&);
-    void replay(std::uint32_t batch, bool rebuild_history);
+    void prepare(GraphInputs&, GraphPreparation&);
+    void replay(std::uint32_t batch, bool rebuild_history, bool count_tokens);
 
     [[nodiscard]] std::size_t workspace_peak() const { return workspace_peak_; }
 
     void reset_workspace_peak() { workspace_peak_ = 0; }
 
 private:
-    struct Variant {
+    struct Batch {
         GraphSegment graph;
+        DecodeGraphSection repair, counts;
         std::size_t workspace_bytes = 0;
     };
 
     RankProgramImpl& owner_;
-    std::vector<std::array<Variant, 2>> batches_;
+    std::vector<Batch> batches_;
     std::size_t workspace_peak_ = 0;
 };
 

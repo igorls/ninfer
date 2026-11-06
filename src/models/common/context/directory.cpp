@@ -109,30 +109,118 @@ void finalize_mappings(ContextActions& actions) {
 }
 } // namespace
 
+namespace {
+std::uint32_t logical_states(const StateDemand& demand) {
+    return demand.logical_count.value_or(demand.memory == ContextMemory::Device ? demand.count : 0);
+}
+
+struct MetadataDemand {
+    std::uint64_t states = 0;
+    std::vector<std::uint64_t> pages;
+    std::vector<std::vector<HistoryMetadataDemand>> histories;
+};
+
+MetadataDemand metadata_demand(const ContextDemand& demand, std::size_t pools) {
+    MetadataDemand result{0, std::vector<std::uint64_t>(pools),
+                          std::vector<std::vector<HistoryMetadataDemand>>(pools)};
+    for (const auto& item : demand.items) {
+        if (const auto* state = std::get_if<StateDemand>(&item)) {
+            result.states += logical_states(*state);
+        } else {
+            const auto& history = std::get<HistoryDemand>(item);
+            result.pages.at(history.pool_id) += history.logical_pages;
+            if (history.metadata) result.histories.at(history.pool_id).push_back(*history.metadata);
+        }
+    }
+    return result;
+}
+
+std::uint32_t page_parts(const HistoryDemand& demand, const PageDirectory& pages) {
+    std::size_t count = 0;
+    for (const auto& part : pages.layout().parts)
+        count += std::any_of(demand.records.begin(), demand.records.end(), [&](const auto& record) {
+            return record.memory == ContextMemory::Device && record.count &&
+                   (record.ranks.empty() || std::find(record.ranks.begin(), record.ranks.end(),
+                                                      part.rank) != record.ranks.end());
+        });
+    if (demand.logical_pages && !count)
+        throw std::invalid_argument("logical KV demand has no Device parts");
+    return static_cast<std::uint32_t>(count);
+}
+
+ContextDemandId append_demand(ContextDemand& demand,
+                              std::variant<StateDemand, HistoryDemand> item) {
+    if (demand.items.size() >= std::numeric_limits<std::uint32_t>::max())
+        throw std::length_error("too many context demands");
+    const ContextDemandId id{static_cast<std::uint32_t>(demand.items.size())};
+    demand.items.push_back(std::move(item));
+    return id;
+}
+} // namespace
+
 bool ContextDemand::empty() const noexcept {
-    return new_states == 0 && logical_states.value_or(0) == 0 &&
-           std::all_of(histories.begin(), histories.end(), [](const auto& item) {
-               return item.count == 0 && item.logical_pages.value_or(0) == 0 && !item.metadata;
-           });
+    return std::all_of(items.begin(), items.end(), [](const auto& item) {
+        if (const auto* state = std::get_if<StateDemand>(&item))
+            return state->count == 0 && logical_states(*state) == 0;
+        const auto& history = std::get<HistoryDemand>(item);
+        return history.logical_pages == 0 && !history.metadata &&
+               std::all_of(history.records.begin(), history.records.end(),
+                           [](const auto& record) { return record.count == 0; });
+    });
 }
 
-void ContextDemand::add_history(std::uint32_t pool, const HistoryBindingDemand& value) {
-    for (const auto& record : value.records)
-        histories.push_back({pool, record.count, record.ranks, 0});
-    if (value.records.empty()) histories.push_back({pool, 0, {}, 0});
-    auto& first = histories[histories.size() - std::max<std::size_t>(1, value.records.size())];
-    first.logical_pages = value.growth_pages + value.tail_copies;
-    first.metadata      = value.metadata;
+bool ContextDemand::uses_memory(ContextMemory memory) const noexcept {
+    return std::any_of(items.begin(), items.end(), [memory](const auto& item) {
+        if (const auto* state = std::get_if<StateDemand>(&item))
+            return state->count != 0 && state->memory == memory;
+        const auto& history = std::get<HistoryDemand>(item);
+        return std::any_of(
+            history.records.begin(), history.records.end(),
+            [memory](const auto& record) { return record.count != 0 && record.memory == memory; });
+    });
 }
 
-void ContextDemand::add_growth(const HistoryDirectory& directory, HistoryId history,
-                               std::uint32_t count) {
-    const auto request = directory.growth_demand(history, count);
-    histories.push_back({history.pool_id,
-                         request.count,
-                         request.ranks,
-                         {},
-                         directory.growth_metadata_demand(history, count)});
+ContextDemandId ContextDemand::add_state(StateDemand value) {
+    return append_demand(*this, std::move(value));
+}
+
+ContextDemandId ContextDemand::add_history(HistoryDemand value) {
+    return append_demand(*this, std::move(value));
+}
+
+ContextDemandId ContextDemand::add_history(std::uint32_t pool, const HistoryBindingDemand& value) {
+    return add_history({pool, value.records, value.logical_pages, value.metadata});
+}
+
+ContextDemandId ContextDemand::add_history(std::uint32_t pool, std::uint32_t count,
+                                           ContextMemory memory, std::vector<std::uint32_t> ranks,
+                                           std::optional<std::uint32_t> logical_pages) {
+    return add_history({pool,
+                        {{pool + 1, memory, count, std::move(ranks)}},
+                        logical_pages.value_or(memory == ContextMemory::Device ? count : 0),
+                        {}});
+}
+
+ContextDemandId ContextDemand::add_growth(const HistoryDirectory& directory, HistoryId history,
+                                          std::uint32_t count) {
+    return add_history({history.pool_id,
+                        {directory.growth_demand(history, count)},
+                        count,
+                        directory.growth_metadata_demand(history, count)});
+}
+
+HostDemandIds ContextDemand::add_host(const HostWriteRequirements& write) {
+    HostDemandIds result;
+    if (write.state_images)
+        result.state = add_state({.count   = write.state_images,
+                                  .variant = write.state_variant,
+                                  .memory  = ContextMemory::Host});
+    result.histories.resize(write.kv_pages.size());
+    for (std::size_t i = 0; i < write.kv_pages.size(); ++i)
+        if (write.kv_pages[i])
+            result.histories[i] =
+                add_history(static_cast<std::uint32_t>(i), write.kv_pages[i], ContextMemory::Host);
+    return result;
 }
 
 namespace {
@@ -262,23 +350,24 @@ void ContextReleaseSet::subtract(const ContextReleaseSet& other) {
     subtract_release(catalog, other.catalog);
 }
 
-RecordReservation ContextReservation::take_state() { return std::move(state_); }
-
-RecordReservation ContextReservation::take_history(std::uint32_t id) {
-    RecordReservation result;
-    for (auto& history : histories_)
-        if (history.pool_id == id) result.merge(std::move(history.records));
+RecordReservation ContextReservation::take(ContextDemandId id) {
+    if (!id.valid() || id.index >= items_.size())
+        throw std::invalid_argument("unknown context demand reservation");
+    auto& item = items_[id.index];
+    if (!item) throw std::logic_error("context demand reservation already consumed");
+    auto result = std::move(*item);
+    item.reset();
     return result;
 }
 
 bool ContextReservation::ready() const noexcept {
-    return state_.ready() && std::all_of(histories_.begin(), histories_.end(),
-                                         [](const auto& value) { return value.records.ready(); });
+    return std::all_of(items_.begin(), items_.end(),
+                       [](const auto& item) { return !item || item->ready(); });
 }
 
 bool ContextReservation::empty() const noexcept {
-    return state_.empty() && std::all_of(histories_.begin(), histories_.end(),
-                                         [](const auto& value) { return value.records.empty(); });
+    return std::all_of(items_.begin(), items_.end(),
+                       [](const auto& item) { return !item || item->empty(); });
 }
 
 bool HostWriteRequirements::empty() const noexcept {
@@ -287,19 +376,21 @@ bool HostWriteRequirements::empty() const noexcept {
 }
 
 KVPoolDirectory::KVPoolDirectory(const KVDirectorySpec& spec, RecordDomains& records,
-                                 MetadataBudget& metadata)
-    : pages_(records, metadata, spec.pool_id, spec.pool_id + 1, spec.logical_pages),
+                                 PageAllocationIndex& index, MetadataBudget& metadata)
+    : pages_(records, index, metadata, spec.pool_id, spec.pool_id + 1, spec.logical_pages),
       histories_(pages_, metadata, spec.table_rows, spec.histories, spec.page_capacity) {}
 
 ContextDirectory::ContextDirectory(ContextDirectorySpec spec)
     : spec_(std::move(spec)), core_metadata_budget_(pool_metadata_budget(spec_)),
       metadata_(directory_metadata_budget(spec_, core_metadata_budget_)),
-      records_(spec_.ranks, record_layouts(spec_)), states_(spec_.state, records_, metadata_) {
+      records_(spec_.ranks, record_layouts(spec_)), page_allocations_(records_, metadata_),
+      states_(spec_.state, records_, metadata_) {
     pools_.reserve(spec_.pools.size());
     for (const auto& history : spec_.pools) {
         if (history.pool_id != pools_.size())
             throw std::invalid_argument("context history IDs must be contiguous");
-        pools_.push_back(std::make_unique<KVPoolDirectory>(history, records_, metadata_));
+        pools_.push_back(
+            std::make_unique<KVPoolDirectory>(history, records_, page_allocations_, metadata_));
     }
 }
 
@@ -308,77 +399,104 @@ KVPoolDirectory& ContextDirectory::pool(std::uint32_t id) { return *pools_.at(id
 const KVPoolDirectory& ContextDirectory::pool(std::uint32_t id) const { return *pools_.at(id); }
 
 std::size_t ContextDirectory::metadata_bytes(const ContextDirectorySpec& spec) {
-    auto bytes = sizeof(ContextDirectory) + StateDirectory::metadata_bytes(spec.state);
+    auto bytes = sizeof(ContextDirectory) + pool_metadata_budget(spec) +
+                 StateDirectory::metadata_bytes(spec.state);
     for (const auto& history : spec.pools)
         bytes += sizeof(KVPoolDirectory) +
-                 PageDirectory::metadata_bytes(history.logical_pages, history.parts.size(),
-                                               history.table_rows) +
+                 PageDirectory::metadata_bytes(history.logical_pages, history.parts.size()) +
                  HistoryDirectory::metadata_bytes(history.histories, history.table_rows,
                                                   history.page_capacity, history.parts.size()) +
                  std::size_t(history.logical_pages) * HistoryDirectory::page_metadata_bytes();
+    for (const auto& rank : spec.ranks) {
+        std::vector<RecordSpec> local;
+        for (const auto& layout : record_layouts(spec))
+            for (const auto& part : layout.parts)
+                if (part.rank == rank.rank) local.push_back(part.record);
+        const auto geometry = describe_context_pool(local);
+        bytes += 2 * PageAllocationIndex::domain_bytes() +
+                 PageAllocationIndex::metadata_bytes(geometry.record_limit(rank.device_bytes)) +
+                 PageAllocationIndex::metadata_bytes(geometry.record_limit(rank.host_bytes));
+    }
     return bytes;
 }
 
-runtime::ContextMetadataPlan ContextDirectory::metadata_plan(const ContextDirectorySpec& spec) {
+runtime::ContextMetadataPlan ContextDirectory::metadata_plan(const ContextDirectorySpec& spec,
+                                                             std::uint32_t rank,
+                                                             std::uint32_t kv_parts) {
     runtime::ContextMetadataPlan result;
     auto minimum                   = spec;
     minimum.state.logical_capacity = 0;
     for (auto& history : minimum.pools) history.logical_pages = 0;
-    result.fixed_bytes = metadata_bytes(minimum);
+    for (auto& owner : minimum.ranks) owner.device_bytes = owner.host_bytes = 0;
+    const bool control_owner = rank == spec.ranks.front().rank;
+    if (control_owner) result.fixed_bytes = metadata_bytes(minimum) - pool_metadata_budget(minimum);
     std::vector<RecordSpec> layouts;
     std::vector<std::size_t> costs;
+    const auto share = [](std::size_t bytes, std::size_t copies) {
+        return (bytes + copies - 1) / copies;
+    };
     for (const auto& state : spec.state.layouts)
         for (const auto& part : state.parts) {
+            if (part.rank != rank) continue;
             layouts.push_back({part.image_bytes, part.alignment});
-            costs.push_back(StateDirectory::object_metadata_bytes(state.parts.size()));
+            costs.push_back(share(StateDirectory::object_metadata_bytes(state.parts.size()),
+                                  state.parts.size()));
         }
     for (const auto& history : spec.pools)
         for (const auto& part : history.parts) {
+            if (part.rank != rank) continue;
+            const auto copies = kv_parts ? kv_parts : history.parts.size();
             layouts.push_back(part.record);
-            costs.push_back(
-                PageDirectory::metadata_bytes(1, history.parts.size(), history.table_rows) -
-                sizeof(PageDirectory) + HistoryDirectory::page_metadata_bytes());
+            costs.push_back(share(PageDirectory::metadata_bytes(1, copies) - sizeof(PageDirectory) +
+                                      HistoryDirectory::page_metadata_bytes(),
+                                  copies));
         }
     const auto geometry = describe_context_pool(layouts);
     result.bytes_per_record.resize(geometry.classes.size());
     for (std::size_t i = 0; i < costs.size(); ++i)
         result.bytes_per_record[geometry.spec_classes[i].index] =
             std::max(result.bytes_per_record[geometry.spec_classes[i].index], costs[i]);
-    for (const auto& rank : spec.ranks) {
-        std::vector<RecordSpec> local;
-        for (const auto& layout : record_layouts(spec))
-            for (const auto& part : layout.parts)
-                if (part.rank == rank.rank) local.push_back(part.record);
-        const auto host_geometry = describe_context_pool(local);
-        result.fixed_bytes += host_geometry.metadata_bytes(rank.host_bytes);
-        std::size_t metadata_per_block = 0;
-        for (std::size_t i = 0; i < host_geometry.classes.size(); ++i) {
-            const auto& record = host_geometry.classes[i];
-            const auto global =
-                std::find_if(geometry.classes.begin(), geometry.classes.end(),
-                             [&](const auto& item) { return item.spec == record.spec; });
-            if (global == geometry.classes.end())
-                throw std::logic_error("context metadata class is missing");
-            metadata_per_block =
-                std::max(metadata_per_block, record.records_per_block *
-                                                 result.bytes_per_record[static_cast<std::size_t>(
-                                                     global - geometry.classes.begin())]);
-        }
-        if (host_geometry.block_bytes)
-            result.fixed_bytes +=
-                (rank.host_bytes / host_geometry.block_bytes) * metadata_per_block;
-    }
+    // Allocation IDs keep their extent when a block changes class. Their direct index therefore
+    // follows physical descriptor capacity, independently of the current logical object mix.
+    result.bytes_per_block =
+        geometry.record_limit(geometry.block_bytes) * PageAllocationIndex::record_bytes();
+    const auto local = std::find_if(spec.ranks.begin(), spec.ranks.end(),
+                                    [rank](const auto& owner) { return owner.rank == rank; });
+    if (local == spec.ranks.end()) throw std::invalid_argument("context metadata rank is absent");
+    std::size_t maximum = 0;
+    for (std::size_t i = 0; i < geometry.classes.size(); ++i)
+        maximum =
+            std::max(maximum, geometry.classes[i].records_per_block * result.bytes_per_record[i]);
+    result.fixed_bytes +=
+        geometry.metadata_bytes(local->host_bytes) +
+        (local->host_bytes / geometry.block_bytes) * (result.bytes_per_block + maximum);
+    // Segment pointer arrays and one partially materialized slab per logical directory.
+    // Record payloads themselves are charged above per actual physical capacity.
+    result.fixed_bytes +=
+        spec.pools.size() *
+        (PageDirectory::metadata_bytes(255, kv_parts ? kv_parts : spec.ranks.size()) -
+         sizeof(PageDirectory));
+    result.bytes_per_block +=
+        (geometry.record_limit(geometry.block_bytes) + 255) / 256 * sizeof(void*);
     return result;
 }
 
 std::vector<RecordDemand> ContextDirectory::record_demand(const ContextDemand& demand) const {
     std::vector<RecordDemand> result;
-    result.reserve(demand.histories.size() + 1);
-    result.push_back({state_record_layout(demand.state_variant), demand.memory, demand.new_states,
-                      demand.state_ranks});
-    for (const auto& history : demand.histories) {
-        (void)pool(history.pool_id);
-        result.push_back({history.pool_id + 1, demand.memory, history.count, history.ranks});
+    result.reserve(demand.items.size());
+    for (const auto& item : demand.items) {
+        if (const auto* state = std::get_if<StateDemand>(&item)) {
+            result.push_back(
+                {state_record_layout(state->variant), state->memory, state->count, state->ranks});
+        } else {
+            const auto& history = std::get<HistoryDemand>(item);
+            (void)pool(history.pool_id);
+            for (const auto& record : history.records) {
+                if (record.layout != history.pool_id + 1)
+                    throw std::invalid_argument("history demand has a foreign record layout");
+                result.push_back(record);
+            }
+        }
     }
     return result;
 }
@@ -408,33 +526,38 @@ ContextAssessment ContextDirectory::assess(const ContextDemand& demand,
             for (const auto& part : layout.parts)
                 if (part.rank == rank.rank) specs.push_back(part.record);
         const auto geometry = describe_context_pool(specs);
-        std::vector<RecordRequest> local;
-        const auto& allocator = records_.pool({rank.rank, demand.memory});
-        for (const auto& request : requests) {
-            if (!request.ranks.empty() && std::find(request.ranks.begin(), request.ranks.end(),
-                                                    rank.rank) == request.ranks.end())
-                continue;
-            const auto& layout = records_.layout(request.layout);
-            const auto part =
-                std::find_if(layout.parts.begin(), layout.parts.end(),
-                             [&](const auto& value) { return value.rank == rank.rank; });
-            if (part == layout.parts.end()) continue;
-            const auto index = std::find(specs.begin(), specs.end(), part->record) - specs.begin();
-            local.push_back({geometry.spec_classes[index], request.count});
-        }
-        if (geometry.required_bytes(local) > allocator.capacity_bytes()) {
-            result.status = ContextAvailability::Impossible;
-            return result;
+        for (const auto memory : {ContextMemory::Device, ContextMemory::Host}) {
+            std::vector<RecordRequest> local;
+            for (const auto& request : requests) {
+                if (request.memory != memory || !request.count) continue;
+                if (!request.ranks.empty() && std::find(request.ranks.begin(), request.ranks.end(),
+                                                        rank.rank) == request.ranks.end())
+                    continue;
+                const auto& layout = records_.layout(request.layout);
+                const auto part =
+                    std::find_if(layout.parts.begin(), layout.parts.end(),
+                                 [&](const auto& value) { return value.rank == rank.rank; });
+                if (part == layout.parts.end()) continue;
+                const auto index =
+                    std::find(specs.begin(), specs.end(), part->record) - specs.begin();
+                local.push_back({geometry.spec_classes[index], request.count});
+            }
+            if (geometry.required_bytes(local) >
+                records_.pool({rank.rank, memory}).capacity_bytes()) {
+                result.status = ContextAvailability::Impossible;
+                return result;
+            }
         }
     }
+
     const auto& released_states = released.states;
     std::vector<std::vector<PageId>> released_pages(pools_.size());
     std::vector<std::vector<HistoryId>> released_histories(pools_.size());
     for (const auto page : released.pages) released_pages.at(page.pool_id).push_back(page);
     for (const auto history : released.histories)
         released_histories.at(history.pool_id).push_back(history);
-    const auto logical_states = demand.logical_states.value_or(
-        demand.memory == ContextMemory::Device ? demand.new_states : 0);
+    const auto metadata       = metadata_demand(demand, pools_.size());
+    const auto logical_states = metadata.states;
     const auto state_count =
         logical_states > released_states.size() ? logical_states - released_states.size() : 0;
     if (logical_states > states_.capacity()) {
@@ -446,11 +569,9 @@ ContextAssessment ContextDirectory::assess(const ContextDemand& demand,
         result.status            = ContextAvailability::NeedsReclaim;
         return result;
     }
-    result.metadata_required_bytes = states_.metadata_requirement(state_count);
-    std::vector<std::uint32_t> page_counts(pools_.size());
-    for (const auto& request : demand.histories)
-        page_counts.at(request.pool_id) += request.logical_pages.value_or(
-            demand.memory == ContextMemory::Device ? request.count : 0);
+    result.metadata_required_bytes = states_.metadata_requirement(state_count) +
+                                     page_allocations_.metadata_requirement(requests);
+    const auto& page_counts = metadata.pages;
     for (std::size_t i = 0; i < page_counts.size(); ++i) {
         const auto& pages = pools_[i]->pages();
         if (page_counts[i] > pages.capacity()) {
@@ -465,12 +586,14 @@ ContextAssessment ContextDirectory::assess(const ContextDemand& demand,
             result.status            = ContextAvailability::NeedsReclaim;
             return result;
         }
-        result.metadata_required_bytes += pages.metadata_requirement(count);
-        std::vector<HistoryMetadataDemand> controls;
-        for (const auto& request : demand.histories)
-            if (request.pool_id == i && request.metadata) controls.push_back(*request.metadata);
-        const auto bytes =
-            pools_[i]->histories().metadata_requirement(controls, released_histories[i]);
+        std::uint32_t parts = 0;
+        for (const auto& item : demand.items)
+            if (const auto* history = std::get_if<HistoryDemand>(&item);
+                history && history->pool_id == i && history->logical_pages)
+                parts = std::max(parts, page_parts(*history, pages));
+        result.metadata_required_bytes += pages.metadata_requirement(count, parts);
+        const auto bytes = pools_[i]->histories().metadata_requirement(metadata.histories[i],
+                                                                       released_histories[i]);
         if (!bytes) {
             result.metadata_shortage = true;
             result.status            = ContextAvailability::NeedsReclaim;
@@ -491,9 +614,7 @@ ContextAssessment ContextDirectory::assess(const ContextDemand& demand,
         for (std::size_t i = 0; i < pools_.size(); ++i) {
             if (!page_counts[i])
                 reclaimable += pools_[i]->pages().reclaimable_metadata(released_pages[i]);
-            if (std::none_of(
-                    demand.histories.begin(), demand.histories.end(),
-                    [i](const auto& request) { return request.pool_id == i && request.metadata; }))
+            if (metadata.histories[i].empty())
                 reclaimable += pools_[i]->histories().reclaimable_metadata(released_histories[i]);
         }
         if (result.metadata_required_bytes > metadata_.available() + catalog_bytes + reclaimable) {
@@ -527,54 +648,54 @@ ContextReserveResult ContextDirectory::reserve(const ContextDemand& demand) {
     ContextReserveResult result{assess(demand), {}};
     if (!result.assessment.feasible()) return result;
     if (result.assessment.reclaim_metadata) {
-        const auto states = demand.logical_states.value_or(
-            demand.memory == ContextMemory::Device ? demand.new_states : 0);
-        if (!states) (void)states_.reclaim_metadata();
+        const auto metadata = metadata_demand(demand, pools_.size());
+        if (!metadata.states) (void)states_.reclaim_metadata();
         for (std::size_t i = 0; i < pools_.size(); ++i) {
-            std::uint32_t pages = 0;
-            bool control        = false;
-            for (const auto& request : demand.histories) {
-                if (request.pool_id != i) continue;
-                pages += request.logical_pages.value_or(
-                    demand.memory == ContextMemory::Device ? request.count : 0);
-                control |= request.metadata.has_value();
-            }
-            if (!pages) pools_[i]->pages().reclaim_metadata();
-            if (!control) pools_[i]->histories().reclaim_metadata();
+            if (!metadata.pages[i]) pools_[i]->pages().reclaim_metadata();
+            if (metadata.histories[i].empty()) pools_[i]->histories().reclaim_metadata();
         }
         result.assessment = assess(demand);
         if (!result.assessment.feasible()) return result;
     }
     std::vector<MetadataReservation> descriptors;
     std::vector<MetadataReservation> controls;
-    descriptors.reserve(demand.histories.size() + 1);
-    controls.reserve(demand.histories.size());
-    const auto state_count = demand.logical_states.value_or(
-        demand.memory == ContextMemory::Device ? demand.new_states : 0);
-    descriptors.push_back(states_.reserve_descriptors(state_count));
-    for (const auto& history : demand.histories) {
-        const auto count = history.logical_pages.value_or(
-            demand.memory == ContextMemory::Device ? history.count : 0);
-        descriptors.push_back(pool(history.pool_id).pages().reserve_descriptors(count));
-        controls.push_back(
-            history.metadata ? pool(history.pool_id).histories().reserve_control(*history.metadata)
-                             : MetadataReservation{});
+    descriptors.reserve(demand.items.size());
+    controls.reserve(demand.items.size());
+    page_allocations_.prepare(record_demand(demand));
+    for (const auto& item : demand.items) {
+        if (const auto* state = std::get_if<StateDemand>(&item)) {
+            descriptors.push_back(states_.reserve_descriptors(logical_states(*state)));
+            controls.emplace_back();
+        } else {
+            const auto& history = std::get<HistoryDemand>(item);
+            auto& owner         = pool(history.pool_id);
+            descriptors.push_back(owner.pages().reserve_descriptors(
+                history.logical_pages, page_parts(history, owner.pages())));
+            controls.push_back(history.metadata
+                                   ? owner.histories().reserve_control(*history.metadata)
+                                   : MetadataReservation{});
+        }
     }
     auto reserved = records_.reserve(record_demand(demand));
     if (!reserved.reservations) {
+        descriptors.clear();
+        controls.clear();
         result.assessment = assess(demand);
         return result;
     }
-    for (std::size_t i = 0; i < descriptors.size(); ++i)
-        reserved.reservations->at(i).attach_metadata(std::move(descriptors[i]));
-    for (std::size_t i = 0; i < controls.size(); ++i)
-        if (controls[i].remaining())
-            reserved.reservations->at(i + 1).attach_metadata(std::move(controls[i]));
     ContextReservation reservation;
-    reservation.state_ = std::move(reserved.reservations->front());
-    for (std::size_t i = 0; i < demand.histories.size(); ++i)
-        reservation.histories_.push_back(
-            {demand.histories[i].pool_id, std::move(reserved.reservations->at(i + 1))});
+    reservation.items_.reserve(demand.items.size());
+    std::size_t record_index = 0;
+    for (std::size_t i = 0; i < demand.items.size(); ++i) {
+        const auto* history = std::get_if<HistoryDemand>(&demand.items[i]);
+        const auto count    = history ? history->records.size() : 1;
+        RecordReservation records;
+        for (std::size_t j = 0; j < count; ++j)
+            records.merge(std::move(reserved.reservations->at(record_index++)));
+        records.attach_metadata(std::move(descriptors[i]));
+        if (controls[i].remaining()) records.attach_metadata(std::move(controls[i]));
+        reservation.items_.emplace_back(std::move(records));
+    }
     result.reservation.emplace(std::move(reservation));
     return result;
 }
@@ -601,6 +722,34 @@ std::size_t ContextDirectory::useful_release_bytes(const ContextReleaseSet& rele
     return useful;
 }
 
+std::vector<std::uint64_t>
+ContextDirectory::release_limits(const ContextAssessment& assessment) const {
+    std::vector<std::uint64_t> result;
+    for (const auto& domain : assessment.placement.domains)
+        if (domain.placement.status != PoolAvailability::Ready)
+            result.push_back(domain.placement.reclaim_bytes);
+    return result;
+}
+
+runtime::ContextReleaseMeasure
+ContextDirectory::release_measure(const ContextReleaseSet& release,
+                                  const ContextAssessment& assessment) const {
+    runtime::ContextReleaseMeasure result;
+    const auto records = normalized_releases(release.records);
+    for (const auto& domain : assessment.placement.domains) {
+        if (domain.placement.status == PoolAvailability::Ready) continue;
+        std::uint64_t bytes = 0;
+        for (const auto& record : records)
+            if (record.domain == domain.domain)
+                bytes += records_.pool(record.domain).resolve(record.allocation).bytes;
+        result.bytes.push_back(bytes);
+    }
+    if (assessment.metadata_shortage)
+        result.metadata_objects = release.states.size() + release.pages.size() +
+                                  release.histories.size() + release.catalog.size();
+    return result;
+}
+
 ContextReleaseSet ContextDirectory::state_release(StateId image) const {
     return {.records = states_.allocations(image), .states = {image}};
 }
@@ -617,12 +766,7 @@ ContextReleaseSet ContextDirectory::page_release(PageId page) const {
 
 ContextDemand ContextDirectory::host_demand(const HostWriteRequirements& write) const {
     ContextDemand demand;
-    demand.memory        = ContextMemory::Host;
-    demand.new_states    = write.state_images;
-    demand.state_variant = write.state_variant;
-    for (std::size_t i = 0; i < write.kv_pages.size(); ++i)
-        if (write.kv_pages[i])
-            demand.histories.push_back({static_cast<std::uint32_t>(i), write.kv_pages[i], {}});
+    demand.add_host(write);
     return demand;
 }
 
@@ -641,13 +785,11 @@ ContextAssessment ContextDirectory::plan_host(const HostWriteRequirements& write
 
 std::uint32_t ContextDirectory::available_host_pages(std::uint32_t history,
                                                      std::uint32_t limit) const {
-    ContextDemand demand;
-    demand.memory = ContextMemory::Host;
-    demand.histories.push_back({history, 0, {}});
     std::uint32_t low = 0, high = limit;
     while (low < high) {
-        const auto middle              = low + (std::uint64_t(high) - low + 1) / 2;
-        demand.histories.front().count = static_cast<std::uint32_t>(middle);
+        const auto middle = low + (std::uint64_t(high) - low + 1) / 2;
+        ContextDemand demand;
+        demand.add_history(history, static_cast<std::uint32_t>(middle), ContextMemory::Host);
         if (assess(demand).feasible())
             low = middle;
         else
@@ -680,6 +822,38 @@ ContextUsage ContextDirectory::usage() const {
             value.tail_bytes               = usage.tail_bytes;
             value.peak_occupied_bytes      = usage.peak_occupied_bytes;
             result.pools.push_back(value);
+            const auto add = [&](ninfer::ContextResourceUsage& into, std::uint32_t layout) {
+                const auto& records = records_.usage({rank.rank, memory}, layout);
+                into.live_records += records.live_records;
+                into.live_bytes += records.live_records * records.stride_bytes;
+                const auto cached = records.cached_records * records.stride_bytes;
+                const auto in_use =
+                    (records.live_records - records.cached_records) * records.stride_bytes;
+                into.cached_bytes += cached;
+                into.in_use_bytes += in_use;
+                result.pools.back().cached_bytes += cached;
+                result.pools.back().in_use_bytes += in_use;
+                into.pending_retirement_records += records.pending_retirement_records;
+                into.pending_retirement_bytes +=
+                    records.pending_retirement_records * records.stride_bytes;
+            };
+            ninfer::ContextResourceUsage state{.rank = rank.rank, .domain = value.domain};
+            for (const auto& layout : spec_.state.layouts)
+                if (std::any_of(layout.parts.begin(), layout.parts.end(),
+                                [&](const auto& part) { return part.rank == rank.rank; }))
+                    add(state, state_record_layout(layout.variant));
+            result.resources.push_back(state);
+            for (const auto& history : spec_.pools) {
+                if (std::none_of(history.parts.begin(), history.parts.end(),
+                                 [&](const auto& part) { return part.rank == rank.rank; }))
+                    continue;
+                ninfer::ContextResourceUsage kv{.rank   = rank.rank,
+                                                .domain = value.domain,
+                                                .history_pool =
+                                                    static_cast<std::uint16_t>(history.pool_id)};
+                add(kv, history.pool_id + 1);
+                result.resources.push_back(kv);
+            }
         }
     result.metadata      = {spec_.metadata_budget_bytes,
                             metadata_.allocated() + records_.metadata_bytes(), metadata_.reserved()};
@@ -694,17 +868,18 @@ ContextUsage ContextDirectory::usage() const {
 std::optional<StateId> reserve_capture_destination(ContextDirectory& directory,
                                                    std::optional<RecordReservation>& backing,
                                                    std::uint32_t variant) {
-    ContextDemand demand;
-    demand.new_states    = 1;
-    demand.state_variant = variant;
-    auto reserved        = directory.reserve(demand);
+    ContextDemand device_demand;
+    const auto device_id = device_demand.add_state({.count = 1, .variant = variant});
+    auto reserved        = directory.reserve(device_demand);
     if (reserved.reservation && reserved.reservation->ready())
-        return directory.states().reserve_destination(reserved.reservation->take_state(), variant);
-    demand.memory         = ContextMemory::Host;
-    demand.logical_states = 1;
-    reserved              = directory.reserve(demand);
+        return directory.states().reserve_destination(reserved.reservation->take(device_id),
+                                                      variant);
+    ContextDemand host_demand;
+    const auto host_id = host_demand.add_state(
+        {.count = 1, .variant = variant, .logical_count = 1, .memory = ContextMemory::Host});
+    reserved = directory.reserve(host_demand);
     if (!reserved.reservation || !reserved.reservation->ready()) return {};
-    auto host_records = reserved.reservation->take_state();
+    auto host_records = reserved.reservation->take(host_id);
     auto destination  = directory.states().reserve_logical_destination(host_records, variant);
     if (!destination) return {};
     backing.emplace(std::move(host_records));
@@ -747,6 +922,9 @@ ContextTransaction::ContextTransaction(ContextTransaction&& other) noexcept
       maintenance_domains_(std::move(other.maintenance_domains_)),
       maintenance_reservation_(std::move(other.maintenance_reservation_)),
       actions_(std::move(other.actions_)), state_(std::move(other.state_)),
+      conversion_source_(std::move(other.conversion_source_)),
+      peer_copies_(std::move(other.peer_copies_)),
+      local_conversion_sources_(std::move(other.local_conversion_sources_)),
       state_copies_(std::move(other.state_copies_)), bindings_(std::move(other.bindings_)),
       backups_(std::move(other.backups_)), state_readers_(std::move(other.state_readers_)),
       page_readers_(std::move(other.page_readers_)), retired_rows_(std::move(other.retired_rows_)),
@@ -780,6 +958,98 @@ void ContextTransaction::own_state(StateId image) {
     require_reserved();
     if (state_) throw std::logic_error("context transaction already owns a State destination");
     state_.emplace(directory_->states(), image);
+}
+
+void ContextTransaction::convert_state(StateId source, std::uint32_t target_variant,
+                                       RecordReservation reservation,
+                                       std::span<const RecordRangeCopy> fields) {
+    require_reserved();
+    if (state_) throw std::logic_error("context transaction already owns a State destination");
+    if (fields.empty()) throw std::invalid_argument("State conversion has no field mapping");
+    auto& states           = directory_->states();
+    auto reader            = states.read(source);
+    const auto destination = states.reserve_destination(std::move(reservation), target_variant);
+    if (!destination) throw std::logic_error("State conversion lost its destination reservation");
+    own_state(*destination);
+    conversion_source_.emplace(std::move(reader));
+    for (const auto& field : fields)
+        copy_range(states.device_binding(source, field.source_rank),
+                   states.device_binding(*destination, field.destination_rank), field, {});
+}
+
+void ContextTransaction::copy_range(ContextRecordBinding source, ContextRecordBinding destination,
+                                    const RecordRangeCopy& field,
+                                    runtime::ContextTransferResource resource) {
+    require_reserved();
+    if (!field.bytes || source.domain.rank != field.source_rank ||
+        destination.domain.rank != field.destination_rank ||
+        source.domain.memory != ContextMemory::Device ||
+        destination.domain.memory != ContextMemory::Device || field.source_offset > source.bytes ||
+        field.bytes > source.bytes - field.source_offset ||
+        field.destination_offset > destination.bytes ||
+        field.bytes > destination.bytes - field.destination_offset)
+        throw std::invalid_argument("Context conversion range is outside its Device records");
+    const ContextRange from{source.domain.memory,
+                            source.offset + static_cast<std::int64_t>(field.source_offset),
+                            field.bytes};
+    const ContextRange to{destination.domain.memory,
+                          destination.offset + static_cast<std::int64_t>(field.destination_offset),
+                          field.bytes};
+    if (source.domain == destination.domain) {
+        auto previous =
+            std::find_if(local_conversion_sources_.begin(), local_conversion_sources_.end(),
+                         [&](const auto& item) {
+                             return item.domain == source.domain && item.resource == resource;
+                         });
+        const bool first = previous == local_conversion_sources_.end() ||
+                           previous->last_source != source.allocation;
+        if (previous == local_conversion_sources_.end())
+            local_conversion_sources_.push_back({source.domain, resource, source.allocation});
+        else
+            previous->last_source = source.allocation;
+        mutable_actions(source.domain.rank)
+            .operations.emplace_back(RecordCopy{from, to, resource,
+                                                first && resource.is_state() ? 1U : 0U,
+                                                first && !resource.is_state() ? 1U : 0U});
+        return;
+    }
+    auto found = std::find_if(peer_copies_.begin(), peer_copies_.end(), [&](const auto& copy) {
+        return copy.source_rank == field.source_rank &&
+               copy.destination_rank == field.destination_rank && copy.resource == resource;
+    });
+    if (found == peer_copies_.end()) {
+        peer_copies_.push_back({field.source_rank, field.destination_rank, resource, {}, {}, {}});
+        found = peer_copies_.end() - 1;
+    }
+    found->source.push_back(from);
+    found->destination.push_back(to);
+    if (found->last_source != source.allocation) {
+        found->last_source = source.allocation;
+        ++found->source_records;
+    }
+}
+
+void ContextTransaction::prepare_peer_actions() {
+    std::sort(peer_copies_.begin(), peer_copies_.end(), [](const auto& a, const auto& b) {
+        return std::tuple(a.source_rank, a.destination_rank, a.resource.index()) <
+               std::tuple(b.source_rank, b.destination_rank, b.resource.index());
+    });
+    // Put all globally ordered peer edges before rank-local work. The coordinated action
+    // batcher can then split long payloads without moving matching endpoints to different frames.
+    for (auto copy = peer_copies_.rbegin(); copy != peer_copies_.rend(); ++copy) {
+        const auto count = copy->source_records;
+        auto& source     = mutable_actions(copy->source_rank).operations;
+        source.insert(source.begin(),
+                      PeerCopy{copy->destination_rank, true, std::move(copy->source),
+                               copy->resource, copy->resource.is_state() ? count : 0,
+                               copy->resource.is_state() ? 0 : count});
+        auto& destination = mutable_actions(copy->destination_rank).operations;
+        destination.insert(destination.begin(),
+                           PeerCopy{copy->source_rank, false, std::move(copy->destination),
+                                    copy->resource, copy->resource.is_state() ? count : 0,
+                                    copy->resource.is_state() ? 0 : count});
+    }
+    peer_copies_.clear();
 }
 
 StateDirectory::Destination& ContextTransaction::state_destination() {
@@ -938,6 +1208,7 @@ void ContextTransaction::prepare_actions() {
                                                 history_resource(backup.pool), 0, 1});
     for (auto& pending : bindings_) {
         auto& binding = pending.value;
+        binding.prepare_conversion(*this);
         for (const auto& restore : binding.restores())
             mutable_actions(restore.rank())
                 .operations.emplace_back(RecordCopy{range(restore.source()),
@@ -952,6 +1223,7 @@ void ContextTransaction::prepare_actions() {
         binding.prepare_mapping(*this);
     }
     for (auto& rank : actions_) finalize_mappings(rank.actions);
+    prepare_peer_actions();
     stage_ = Stage::Prepared;
 }
 
@@ -985,6 +1257,10 @@ void ContextTransaction::publish() {
         for (const auto domain : maintenance_domains_)
             directory_->records_.pool(domain).complete_maintenance();
         maintenance_begun_ = false;
+    }
+    if (conversion_source_) {
+        directory_->states().complete_conversion(*conversion_source_, state_destination().image());
+        conversion_source_.reset();
     }
     state_readers_.clear();
     page_readers_.clear();
@@ -1047,6 +1323,9 @@ void ContextTransaction::release_reservations() {
     }
     release_address_borrow();
     actions_.clear();
+    peer_copies_.clear();
+    conversion_source_.reset();
+    local_conversion_sources_.clear();
     state_readers_.clear();
     page_readers_.clear();
     state_copies_.clear();
@@ -1126,12 +1405,12 @@ ContextTransaction ContextDirectory::prepare_maintenance(ContextReservation rese
     transaction.release_address_borrow();
     transaction.maintenance_ = true;
     transaction.maintenance_reservation_.emplace(std::move(reservation));
-    for (const auto& rank : spec_.ranks) {
-        const auto domain = ContextDomainId{rank.rank, assessment.demand.memory};
+    for (const auto& part : assessment.placement.domains) {
+        const auto domain = part.domain;
         auto& pool        = records_.pool(domain);
         if (!pool.has_maintenance()) continue;
         transaction.maintenance_domains_.push_back(domain);
-        auto& actions = transaction.mutable_actions(rank.rank);
+        auto& actions = transaction.mutable_actions(domain.rank);
         for (const auto& move : pool.maintenance_moves()) {
             RecordCopy copy{
                 {domain.memory, static_cast<std::int64_t>(move.source_offset), move.bytes},

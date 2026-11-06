@@ -9,8 +9,14 @@ namespace ninfer::models::qwen4_exp::detail {
 SessionImpl::SessionImpl(std::shared_ptr<const ModelDefinition> model, SessionPlan prepared)
     : definition(std::move(model)), plan(std::move(prepared)), shape(plan.shape),
       directory(plan.context),
-      checkpoints(plan.context.state.logical_capacity * 8ULL, directory.metadata_budget()) {
+      checkpoints(Checkpoints::capacity_for_metadata(directory.metadata_budget().limit()),
+                  directory.metadata_budget(), &recovery_index) {
     if (!definition) throw std::invalid_argument("invalid Qwen4Exp session definition");
+    if (shape.purpose == EnginePurpose::Generation) {
+        count_storage.acquire(
+            TokenCountBuilder::capacity_bytes(definition->resources().text.public_token_count));
+        count_builder.prepare(definition->resources().text.public_token_count);
+    }
     releases.reserve(shape.max_concurrency);
     for (std::uint16_t i = 0; i < pool_count(); ++i)
         pools.push_back({{i}, i == 0 ? "main" : "mtp"});
@@ -82,6 +88,8 @@ Suspended::~Suspended() {
 }
 
 void SessionImpl::release_residency(runtime::ResidencyId id) {
+    const auto owner = vision_window.owner();
+    if (owner && owner->residency == id) vision_window.revoke(*owner);
     if (executor->failed() || !id.generation) return;
     if (std::find(releases.begin(), releases.end(), id) == releases.end()) releases.push_back(id);
 }
@@ -98,6 +106,7 @@ void SessionImpl::submit_releases() {
 }
 
 void SessionImpl::clear(Sequence& s) noexcept {
+    vision_window.revoke(member(s));
     try {
         release_residency(member(s).residency);
         s.capture.reset();
@@ -155,9 +164,10 @@ std::uint32_t SessionImpl::window_end(const Sequence& s, std::uint32_t begin,
         }
     if (s.capture && s.next_capture < s.captures.size())
         end = std::min(end, s.captures[s.next_capture].frontier);
-    if (s.request->vision && begin < s.request->summary.prompt_tokens)
-        end = s.request->vision->plan.window_end(begin,
-                                                 std::min(end, s.request->summary.prompt_tokens));
+    if (s.request->vision && begin < s.request->summary.prompt_tokens && begin < end)
+        end = vision_window.limit(member(s), s.request->vision->units, begin,
+                                  std::min(end, s.request->summary.prompt_tokens),
+                                  plan.vision_max_features);
     return end;
 }
 
@@ -230,6 +240,12 @@ WorkRow SessionImpl::work_row(const Sequence& s, std::uint32_t tokens) const {
         for (std::uint32_t j = 0; j < tokens; ++j)
             row.rope_positions[axis * tokens + j] = position(start + j, axis);
     }
+    bool linear = true;
+    for (std::uint32_t axis = 0; axis < 3; ++axis)
+        for (std::uint32_t j = 0; j < tokens; ++j)
+            linear &= row.rope_positions[axis * tokens + j] ==
+                      static_cast<std::int32_t>(start + j) + m.rope_delta;
+    if (linear) row.rope_positions.clear();
     return row;
 }
 
@@ -273,6 +289,22 @@ void SessionImpl::adopt_commit(Sequence& s, const ContinuationMetadata& metadata
 }
 
 PhysicalUsageSnapshot SessionImpl::usage() const noexcept { return directory.usage(); }
+
+std::optional<qwen::VisionWork> SessionImpl::prepare_visual(const Sequence& s, std::uint32_t begin,
+                                                            std::uint32_t end) {
+    if (!s.request->vision || begin >= end) return {};
+    const auto ranks   = static_cast<std::uint32_t>(plan.context.ranks.size());
+    const auto* active = vision_window.current();
+    if (active && active->owner.sequence == member(s).sequence &&
+        active->owner.residency == member(s).residency)
+        return qwen::prepare_vision_work(vision_window.reserve(active->owner, {}),
+                                         s.request->vision, ranks);
+    auto planned =
+        vision::plan_window(s.request->vision->units, begin, end, plan.vision_max_features, ranks);
+    if (!planned) return {};
+    return qwen::prepare_vision_work(vision_window.reserve(member(s), std::move(planned)),
+                                     s.request->vision, ranks);
+}
 
 } // namespace ninfer::models::qwen4_exp::detail
 
@@ -435,8 +467,6 @@ std::optional<SessionEvent> Session::poll() {
 
 void Session::fail_all_cleanup() noexcept { impl_->cleanup(); }
 
-void Session::reset_measurement_peaks() { impl_->executor->reset_measurement_peaks(); }
-
 ResumeState::ResumeState(std::unique_ptr<detail::Suspended> state) : state_(std::move(state)) {}
 
 ResumeState::~ResumeState()                                 = default;
@@ -476,4 +506,15 @@ std::optional<ExpertRouteGeometry> Session::expert_route_geometry() const noexce
 std::vector<execution::RouteTraceRecord> Session::take_route_trace() noexcept {
     return std::exchange(impl_->route_records, {});
 }
+std::optional<SequenceHandle> Session::prefill_continuation() const {
+    const auto owner = impl_->vision_window.owner();
+    if (owner && impl_->valid(owner->sequence)) return owner->sequence;
+    return {};
+}
+
+void Session::yield_prefill(SequenceHandle sequence) {
+    const auto owner = impl_->vision_window.owner();
+    if (owner && owner->sequence == sequence) impl_->vision_window.revoke(*owner);
+}
+
 } // namespace ninfer::models::qwen4_exp

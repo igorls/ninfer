@@ -2,6 +2,7 @@
 #include "ninfer/ops/gated_delta_net.h"
 #include "cuda_fixture.h"
 #include "core/buffer.h"
+#include "core/decode_graph.h"
 
 #include "gdn_ref.h"
 #include "ops/op_tester.h"
@@ -739,14 +740,16 @@ int graph_case(Case c, int batch, bool pooled) {
             input.state.assign(initial.begin() + source[row] * state_size,
                                initial.begin() + (source[row] + 1) * state_size);
             const auto reference = gdn_ref::evaluate(input, scale, c.normalize_qk);
+            const auto profile = pooled ? PrecisionProfile::Recurrent
+                                        : prefill_profile(c.tokens, c.normalize_qk);
             failures += verify_heads(label + " output row=" + std::to_string(row),
                                      std::span(got_output).subspan(row * value_size, value_size),
-                                     reference.out, c.value_heads, c.tokens, false);
+                                     reference.out, c.value_heads, c.tokens, profile, false);
             failures += verify_heads(label + " state row=" + std::to_string(row),
                                      doubles(std::vector<float>(
                                          got_state.begin() + destination[row] * state_size,
                                          got_state.begin() + (destination[row] + 1) * state_size)),
-                                     reference.final_state, c.value_heads, 1, true);
+                                     reference.final_state, c.value_heads, 1, profile, true);
         }
         for (int slot = 0; slot < slots; ++slot) {
             if (std::find(destination.begin(), destination.end(), slot) != destination.end())

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -39,14 +40,7 @@ std::string quote(std::string_view value) {
 
 wire::Message bootstrap_message(const WorkerBootstrap& b, bool bind_launcher) {
     wire::Encoder out;
-    out.u32(b.identity.rank);
-    out.u32(b.identity.node);
-    out.u32(b.identity.local_rank);
-    out.i32(b.identity.device);
-    for (const auto c : {b.identity.tp, b.identity.ep, b.identity.dp, b.identity.pp}) {
-        out.u32(c.rank);
-        out.u32(c.size);
-    }
+    wire::encode(out, b.identity);
     out.u8(b.control.kind == Endpoint::Kind::Tcp ? 0 : 1);
     out.string(b.control.host);
     out.u16(b.control.port);
@@ -113,16 +107,8 @@ WorkerBootstrap read_worker_bootstrap() {
     read_stdin(data, deadline);
     wire::Decoder in(data);
     WorkerBootstrap out;
-    out.epoch    = h.epoch;
-    auto& r      = out.identity;
-    r.rank       = in.u32();
-    r.node       = in.u32();
-    r.local_rank = in.u32();
-    r.device     = in.i32();
-    for (auto* c : {&r.tp, &r.ep, &r.dp, &r.pp}) {
-        c->rank = in.u32();
-        c->size = in.u32();
-    }
+    out.epoch       = h.epoch;
+    out.identity    = wire::decode_rank_identity(in);
     const auto kind = in.u8();
     if (kind > 1) throw std::invalid_argument("invalid worker control endpoint");
     out.control.kind       = kind ? Endpoint::Kind::Unix : Endpoint::Kind::Tcp;
@@ -148,7 +134,7 @@ WorkerBootstrap read_worker_bootstrap() {
     }
     for (const auto& [key, value] : out.environment)
         if (::setenv(key.c_str(), value.c_str(), 1)) check(errno, "set worker environment");
-    const auto short_name = "ninfer-rank" + std::to_string(r.rank);
+    const auto short_name = "ninfer-rank" + std::to_string(out.identity.rank);
     if (::prctl(PR_SET_NAME, short_name.c_str(), 0, 0, 0)) check(errno, "worker thread name");
     return out;
 }
@@ -167,7 +153,7 @@ struct WorkerProcess::Impl {
     pid_t pid   = -1;
     RankId rank = 0;
     Socket output;
-    std::string partial;
+    std::string partial, tail;
     std::optional<int> status;
 };
 
@@ -239,9 +225,17 @@ WorkerProcess::WorkerProcess(const DeploymentNode& node, WorkerBootstrap bootstr
     child_output.close();
     // Local workers are terminated directly by this process group owner. Do not bind them to
     // the spawning thread: an Engine may outlive the thread that constructed it.
-    send_message(parent_input, bootstrap_message(bootstrap, !local),
-                 std::chrono::steady_clock::now() +
-                     std::chrono::milliseconds(bootstrap.connect_timeout_ms));
+    try {
+        send_message(parent_input, bootstrap_message(bootstrap, !local),
+                     std::chrono::steady_clock::now() +
+                         std::chrono::milliseconds(bootstrap.connect_timeout_ms));
+    } catch (const std::exception& e) {
+        try {
+            read_logs({});
+        } catch (...) {}
+        throw std::runtime_error(std::string(e.what()) +
+                                 (impl_->tail.empty() ? "" : "\n" + impl_->tail));
+    }
 }
 
 WorkerProcess::~WorkerProcess()                                   = default;
@@ -249,6 +243,8 @@ WorkerProcess::WorkerProcess(WorkerProcess&&) noexcept            = default;
 WorkerProcess& WorkerProcess::operator=(WorkerProcess&&) noexcept = default;
 
 RankId WorkerProcess::rank() const noexcept { return impl_->rank; }
+
+std::string_view WorkerProcess::log_tail() const noexcept { return impl_->tail; }
 
 void WorkerProcess::terminate() noexcept { impl_->terminate(); }
 
@@ -270,9 +266,16 @@ void WorkerProcess::read_logs(const LogSink& sink) {
         } catch (...) {}
     };
     std::array<char, 8192> buffer;
-    for (;;) {
-        const auto n = ::read(impl_->output.fd(), buffer.data(), buffer.size());
+    std::size_t remaining = 64 * 1024;
+    while (remaining) {
+        const auto n =
+            ::read(impl_->output.fd(), buffer.data(), std::min(buffer.size(), remaining));
         if (n > 0) {
+            remaining -= static_cast<std::size_t>(n);
+            impl_->tail.append(buffer.data(), static_cast<std::size_t>(n));
+            constexpr std::size_t kTailBytes = 32 * 1024;
+            if (impl_->tail.size() > kTailBytes)
+                impl_->tail.erase(0, impl_->tail.size() - kTailBytes);
             impl_->partial.append(buffer.data(), static_cast<std::size_t>(n));
             std::size_t begin = 0;
             for (;;) {

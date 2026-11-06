@@ -12,6 +12,11 @@ void EngineCore<Instance>::reserve_active_capture(const std::shared_ptr<Request>
         instance_.session->execution_pending(*request->sequence)) {
         return;
     }
+    if (scheduler_.progress_owner()) {
+        instance_.session->skip_capture(*request->sequence);
+        request->capture_pending = false;
+        return;
+    }
     bool started = instance_.session->start_capture(*request->sequence);
     if (!started) {
         instance_.session->skip_capture(*request->sequence);
@@ -29,9 +34,15 @@ bool EngineCore<Instance>::prepare_semantic_capture(const std::shared_ptr<Reques
         (void)resources_.recycle_input(*instance_.session, request->continuation_owner);
     }
     while (const auto capture = instance_.session->prepare_capture(*request->sequence)) {
+        if (scheduler_.progress_owner()) {
+            instance_.session->skip_capture(*request->sequence);
+            decision.reset();
+            continue;
+        }
         if (instance_.session->capture_is_shared(*request->sequence) &&
-            resources_.retain_shared_checkpoint(*instance_.session, *request->base_plan,
-                                                capture->frontier, capture->origin)) {
+            resources_.retain_shared_checkpoint(
+                *instance_.session, *request->base_plan, capture->frontier,
+                instance_.session->placement(*request->sequence), capture->evidence)) {
             instance_.session->skip_capture(*request->sequence, CaptureSkip::Retained);
             decision.reset();
             continue;
@@ -43,7 +54,7 @@ bool EngineCore<Instance>::prepare_semantic_capture(const std::shared_ptr<Reques
         if (instance_.session->has_context_operation()) { return false; }
         const auto admission = resources_.capture_admission(
             *instance_.session, request->continuation_owner, *request->base_plan, capture->frontier,
-            instance_.session->capture_is_input(*request->sequence), capture->origin);
+            instance_.session->capture_is_input(*request->sequence));
         if (instance_.session->capture_is_discovered_prefix(*request->sequence) &&
             !resources_.sighted_by_another(*request->base_plan, capture->frontier, request->id)) {
             instance_.session->skip_capture(*request->sequence);
@@ -69,7 +80,7 @@ bool EngineCore<Instance>::prepare_semantic_capture(const std::shared_ptr<Reques
                         throw std::logic_error("capture consumed only part of its victim quote");
                     resources_.adopt_release(*instance_.session, retry->retired_points,
                                              decision->reclaim, loss);
-                    scheduler_.capacity_released();
+                    request_admission_check();
                 }
                 if (retry && retry->reserved) {
                     decision.reset();
@@ -118,12 +129,6 @@ template <class Instance>
 }
 
 template <class Instance>
-[[nodiscard]] bool EngineCore<Instance>::has_older_resident(std::uint64_t ticket) const noexcept {
-    return std::any_of(slots_.begin(), slots_.end(),
-                       [ticket](const auto& request) { return request && request->id < ticket; });
-}
-
-template <class Instance>
 void EngineCore<Instance>::resolve_context_progress(
     typename ModelContract::ContextProgress&& progress, HostPhaseMeasurement& boundary) {
     if (!progress.complete) {
@@ -132,7 +137,6 @@ void EngineCore<Instance>::resolve_context_progress(
     const auto owner = materializing_ ? materializing_->request : context_owner_;
     record_context_work(progress, owner);
     if (progress.kind == decltype(progress.kind)::Maintenance) {
-        scheduler_.capacity_released();
         request_admission_check();
         return;
     }
@@ -143,9 +147,8 @@ void EngineCore<Instance>::resolve_context_progress(
         const auto control  = std::move(*materializing_);
         const auto& request = control.request;
         if (!progress.published) {
-            complete_detached_cancelled(request);
             materializing_.reset();
-            scheduler_.capacity_released();
+            complete_cancelled(request);
             request_admission_check();
             return;
         }
@@ -158,9 +161,9 @@ void EngineCore<Instance>::resolve_context_progress(
                 }
             }
         }
-        request->continuation_owner =
-            resources_.adopt(*instance_.session, control.source, *request->base_plan,
-                             request->publication_order, carried, progress.retired_checkpoints);
+        request->continuation_owner = resources_.adopt(
+            *instance_.session, control.source, *request->base_plan, request->publication_order,
+            control.resumed, carried, progress.retired_checkpoints);
         resources_.release_source(*instance_.session, request->id);
         request->lane      = control.destination;
         request->sequence  = progress.sequence;
@@ -171,6 +174,9 @@ void EngineCore<Instance>::resolve_context_progress(
         if (!request->sequence) {
             throw std::logic_error("binding completed without a native sequence");
         }
+        request->placement = instance_.session->placement(*request->sequence);
+        request->placement_tokens =
+            std::max(request->placement_tokens, instance_.session->load_tokens(*request->sequence));
         request->model_state = progress.replaying ? EngineRequestState::Replay
                                : control.resumed  ? request->resume_phase
                                                   : EngineRequestState::Prefill;
@@ -208,29 +214,22 @@ void EngineCore<Instance>::resolve_context_progress(
             const auto lane = request->lane->value;
             if (!progress.published) {
                 finish_engine_phase(boundary, EngineHostPhase::Boundary);
-                slots_[lane].reset();
-                request->lane.reset();
-                request->residency.reset();
-                request->sequence.reset();
                 context_owner_.reset();
-                complete_detached_cancelled(request);
-                scheduler_.capacity_released();
-                request_admission_check();
+                complete_cancelled(request);
                 boundary = begin_host_phase();
                 return;
             }
-            request->suspended      = std::move(progress.paused);
-            request->model_state    = EngineRequestState::Paused;
-            request->recovery_route = request->suspended->has_snapshot()
-                                          ? GenerationRecoveryRoute::Snapshot
-                                          : GenerationRecoveryRoute::Replay;
+            request->placement.reset();
+            request->placement_tokens = 0;
+            request->suspended        = std::move(progress.paused);
+            request->model_state      = EngineRequestState::Paused;
+            request->recovery_route   = request->suspended->has_snapshot()
+                                            ? GenerationRecoveryRoute::Snapshot
+                                            : GenerationRecoveryRoute::Replay;
             observe_scheduling(request, GenerationSchedulingTransition::Paused);
             paused_.push_back(request);
             std::sort(paused_.begin(), paused_.end(),
                       [](const auto& a, const auto& b) { return a->id < b->id; });
-            // Yielding a borrower may unblock an older suspended request. The newly
-            // paused request itself waits for a later event, avoiding immediate churn.
-            if (paused_.front() != request) { scheduler_.capacity_released(); }
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             slots_[lane].reset();
             request->lane.reset();
@@ -252,7 +251,6 @@ void EngineCore<Instance>::resolve_context_progress(
         }
         context_owner_.reset();
     }
-    if (progress.kind == decltype(progress.kind)::Demote) { scheduler_.capacity_released(); }
     request_admission_check();
     return;
 }
@@ -260,8 +258,7 @@ void EngineCore<Instance>::resolve_context_progress(
 template <class Instance>
 ReclaimProgress EngineCore<Instance>::reclaim(const ContextAssessment& assessment, bool allow_pause,
                                               std::span<const Checkpoint> excluded,
-                                              typename ResourceManagement::ReclaimCursor* cursor,
-                                              std::optional<std::uint64_t> priority_ticket) {
+                                              typename ResourceManagement::ReclaimCursor* cursor) {
     if (assessment.ready()) return ReclaimProgress::Retry;
     if (assessment.waiting()) return ReclaimProgress::Deferred;
     if (assessment.impossible()) return ReclaimProgress::Blocked;
@@ -274,80 +271,139 @@ ReclaimProgress EngineCore<Instance>::reclaim(const ContextAssessment& assessmen
                : resources_.reclaim(*instance_.session, assessment, excluded);
     if (progress != ReclaimProgress::Blocked) {
         if (progress == ReclaimProgress::Changed) {
-            scheduler_.capacity_released();
             request_admission_check();
         }
         return progress;
     }
     if (cursor && cursor->rights.purpose != ReclaimPurpose::Execution)
         return ReclaimProgress::Blocked;
+    std::vector<Checkpoint> paused_sources;
     for (auto it = paused_.rbegin(); it != paused_.rend(); ++it) {
-        auto& request = **it;
+        const auto& request = **it;
         if (!request.suspended || !request.suspended->has_snapshot()) { continue; }
         const auto handle = *request.suspended->snapshot_handle();
-        if (std::find(excluded.begin(), excluded.end(), handle) != excluded.end()) { continue; }
-        if (instance_.session->revoke_snapshot(*request.suspended)) {
-            request.recovery_route = GenerationRecoveryRoute::Replay;
-            observe_scheduling(*it, GenerationSchedulingTransition::SnapshotRevoked);
-            if (admission_decision_ && admission_decision_->request.get() == &request) {
-                admission_decision_.reset();
+        if (std::find(excluded.begin(), excluded.end(), handle) == excluded.end()) {
+            paused_sources.push_back(handle);
+        }
+    }
+    const auto releases =
+        instance_.session->plan_releases(paused_sources, excluded, assessment.demand);
+    for (const auto& release : releases.releases) {
+        if (instance_.session->useful_release_bytes(release.released, assessment) == 0 &&
+            !instance_.session->releases_metadata(release.released, assessment)) {
+            continue;
+        }
+        bool changed = false;
+        for (const auto handle : release.sources) {
+            const auto owner =
+                std::find_if(paused_.begin(), paused_.end(), [&](const auto& request) {
+                    return request->suspended && request->suspended->snapshot_handle() == handle;
+                });
+            if (owner == paused_.end() ||
+                !instance_.session->revoke_snapshot(*(*owner)->suspended)) {
+                continue;
             }
+            (*owner)->recovery_route = GenerationRecoveryRoute::Replay;
+            observe_scheduling(*owner, GenerationSchedulingTransition::SnapshotRevoked);
+            changed = true;
+        }
+        if (changed) {
             request_admission_check();
             return ReclaimProgress::Changed;
         }
     }
-    if (allow_pause && pause_reclaim_victim(priority_ticket))
+    if (allow_pause && pause_reclaim_victim(assessment))
         return instance_.session->has_context_operation() ? ReclaimProgress::Transferring
                                                           : ReclaimProgress::Changed;
     return ReclaimProgress::Blocked;
 }
 
 template <class Instance>
-bool EngineCore<Instance>::pause_reclaim_victim(std::optional<std::uint64_t> priority_ticket) {
-    const auto victim = scheduler_.youngest_victim(slots_, max_concurrency_, priority_ticket);
-    if (!victim) { return false; }
-    return pause_resident(*victim);
+bool EngineCore<Instance>::pause_reclaim_victim(const ContextAssessment& pressure) {
+    std::vector<std::uint32_t> skipped;
+    while (const auto victim = scheduler_.preemption_victim(slots_, max_concurrency_, skipped)) {
+        if (pause_resident(*victim, PauseGoal::ReleaseCapacity, &pressure)) { return true; }
+        skipped.push_back(*victim);
+    }
+    return false;
 }
 
 template <class Instance>
-bool EngineCore<Instance>::pause_resident(std::uint32_t lane) {
+bool EngineCore<Instance>::pause_resident(std::uint32_t lane, PauseGoal goal,
+                                          const ContextAssessment* pressure) {
     if (instance_.session->has_context_operation()) { return false; }
     auto request = slots_[lane];
     if (!request || !request->sequence || instance_.session->execution_pending(*request->sequence))
         return false;
-    bool save_snapshot = false;
-    if (const auto write = instance_.session->pause_host_requirements(*request->sequence)) {
-        if (!instance_.session->can_place_host(*write)) {
-            (void)instance_.session->release_redundant_host({}, request->sequence);
+    std::optional<PauseAction> selected;
+    auto options = instance_.session->pause_options(*request->sequence);
+    for (const auto& option : options) {
+        if (goal == PauseGoal::RelocateOnly && option.action.kind != PauseKind::Relocate) {
+            continue;
         }
-        std::vector<Checkpoint> later;
-        for (auto it = paused_.rbegin(); it != paused_.rend(); ++it) {
-            if ((*it)->id > request->id && (*it)->suspended && (*it)->suspended->has_snapshot()) {
-                later.push_back(*(*it)->suspended->snapshot_handle());
-            }
+        if (pressure &&
+            !(goal == PauseGoal::RelocateOnly && option.action.kind == PauseKind::Relocate) &&
+            !instance_.session->pause_contributes(*request->sequence, option, *pressure)) {
+            continue;
         }
-        if (const auto victims =
-                resources_.host_victims(*instance_.session, *write, std::nullopt, later)) {
-            if (!instance_.session->prepare_pause(*request->sequence, true, *victims)) return false;
-            for (const auto handle : *victims) {
-                if (resources_.erase(*instance_.session, handle)) { continue; }
-                const auto owner =
-                    std::find_if(paused_.begin(), paused_.end(), [&](const auto& other) {
-                        return other->suspended && other->suspended->snapshot_handle() == handle;
-                    });
-                if (owner == paused_.end() ||
-                    !instance_.session->revoke_snapshot(*(*owner)->suspended)) {
-                    throw std::logic_error("pause Host victim changed after preflight");
+        if (option.action.kind == PauseKind::Relocate) {
+            const auto target = instance_.session->assess(option.demand);
+            if (!target.ready()) {
+                auto cursor =
+                    resources_.begin_reclaim(*instance_.session, std::nullopt,
+                                             ReclaimRights{ReclaimPurpose::Execution, request->id});
+                const auto progress =
+                    resources_.reclaim(*instance_.session, target, option.sources, cursor);
+                if (progress == ReclaimProgress::Transferring) { return true; }
+                if (progress == ReclaimProgress::Changed) {
+                    request_admission_check();
+                    return true;
                 }
-                (*owner)->recovery_route = GenerationRecoveryRoute::Replay;
-                observe_scheduling(*owner, GenerationSchedulingTransition::SnapshotRevoked);
+                if (progress != ReclaimProgress::Retry ||
+                    !instance_.session->assess(option.demand).ready()) {
+                    continue;
+                }
             }
-            save_snapshot = true;
         }
+        std::vector<Checkpoint> victims;
+        if (option.host_write) {
+            if (!instance_.session->can_place_host(*option.host_write)) {
+                (void)instance_.session->release_redundant_host({}, request->sequence);
+            }
+            std::vector<Checkpoint> later;
+            for (auto it = paused_.rbegin(); it != paused_.rend(); ++it) {
+                if ((*it)->id > request->id && (*it)->suspended &&
+                    (*it)->suspended->has_snapshot()) {
+                    later.push_back(*(*it)->suspended->snapshot_handle());
+                }
+            }
+            auto candidate = resources_.host_victims(*instance_.session, *option.host_write,
+                                                     std::nullopt, later);
+            if (!candidate) { continue; }
+            victims = std::move(*candidate);
+        }
+        if (!instance_.session->prepare_pause(*request->sequence, option.action, victims)) {
+            continue;
+        }
+        for (const auto handle : victims) {
+            if (resources_.erase(*instance_.session, handle)) { continue; }
+            const auto owner = std::find_if(paused_.begin(), paused_.end(), [&](const auto& other) {
+                return other->suspended && other->suspended->snapshot_handle() == handle;
+            });
+            if (owner == paused_.end() ||
+                !instance_.session->revoke_snapshot(*(*owner)->suspended)) {
+                throw std::logic_error("pause victim changed after preflight");
+            }
+            (*owner)->recovery_route = GenerationRecoveryRoute::Replay;
+            observe_scheduling(*owner, GenerationSchedulingTransition::SnapshotRevoked);
+        }
+        selected = option.action;
+        break;
     }
+    if (!selected) { return false; }
     ExecutionCallScope call(*this);
     const auto pause_started = Clock::now();
-    if (!instance_.session->start_pause(*request->sequence, save_snapshot)) { return false; }
+    if (!instance_.session->start_pause(*request->sequence, *selected)) { return false; }
     call.finish();
     if (!request->is_replaying()) { request->resume_phase = request->model_state; }
     request->model_state = EngineRequestState::Pausing;
@@ -358,7 +414,6 @@ bool EngineCore<Instance>::pause_resident(std::uint32_t lane) {
     observe_scheduling(request, GenerationSchedulingTransition::PauseStarted, pause_started);
     context_owner_ = request;
     capture_decisions_[lane].reset();
-    scheduler_.preempted();
     return true;
 }
 
@@ -384,29 +439,118 @@ void EngineCore<Instance>::retain_admission_source(
 }
 
 template <class Instance>
+void EngineCore<Instance>::order_binding_sources(
+    const std::shared_ptr<Request>& request, LaneId lane,
+    std::vector<typename ResourceManagement::SourceChoice>& sources) {
+    const auto placements = instance_.session->placements(*request->base_plan);
+    if (placements.size() <= 1) { return; }
+    std::vector<PlacementLoad> loads;
+    std::vector<PlacementCandidate> targets;
+    for (const auto placement : placements) {
+        loads.push_back({placement});
+        targets.push_back({placement});
+    }
+    const auto account = [&](const std::shared_ptr<Request>& active) {
+        if (!active || !active->placement) { return; }
+        auto found = std::find_if(loads.begin(), loads.end(), [&](const auto& load) {
+            return load.placement == *active->placement;
+        });
+        if (found == loads.end()) {
+            loads.push_back({*active->placement});
+            found = std::prev(loads.end());
+        }
+        if (active->placement_tokens > UINT64_MAX - found->tokens) {
+            throw std::overflow_error("placement token load overflow");
+        }
+        found->tokens += active->placement_tokens;
+        ++found->requests;
+    };
+    for (const auto& active : slots_) { account(active); }
+    if (materializing_) { account(materializing_->request); }
+    const auto* resume = request->suspended ? &*request->suspended : nullptr;
+    const auto kind    = request->resume_phase == EngineRequestState::Prefill ? UnitKind::Prefill
+                         : request->resume_phase == EngineRequestState::ControlReady
+                             ? UnitKind::Control
+                             : UnitKind::Decode;
+    const auto tokens =
+        kind == UnitKind::Prefill ? 0U
+        : kind == UnitKind::Control
+            ? static_cast<std::uint32_t>(request->output.pending_control_tokens().size())
+            : 1U;
+    std::vector<typename ResourceManagement::SourceChoice> waiting;
+    std::erase_if(sources, [&](const auto& choice) {
+        auto assessment = instance_.session->assess_binding(*request->base_plan, lane,
+                                                            choice.source, resume, kind, tokens);
+        if (!assessment.source_valid) { return true; }
+        if (!assessment.capacity_possible) {
+            auto transferable = choice;
+            const ReclaimRights rights{
+                resume ? ReclaimPurpose::Execution : ReclaimPurpose::FreshAdmission, request->id};
+            if (resources_.prepare_source(*instance_.session, *request->base_plan, transferable,
+                                          request->id, rights, resume)) {
+                assessment = instance_.session->assess_binding(
+                    *request->base_plan, lane, transferable.source, resume, kind, tokens);
+            }
+        }
+        if (!assessment.source_valid || !assessment.capacity_possible) { return true; }
+        if (assessment.assessment.waiting()) {
+            waiting.push_back(choice);
+            return true;
+        }
+        auto target = std::find_if(targets.begin(), targets.end(), [&](const auto& target) {
+            return target.placement == choice.source.placement;
+        });
+        if (target == targets.end()) {
+            throw std::logic_error("binding candidate placement is absent from the model plan");
+        }
+        target->feasible = true;
+        if (choice.source.local_device) {
+            target->local_prefix_tokens =
+                std::max<std::uint64_t>(target->local_prefix_tokens, choice.source.reused_tokens);
+        }
+        return false;
+    });
+    const auto weight  = std::max<std::uint64_t>(request->base_plan->summary().prompt_tokens,
+                                                resume ? resume->frontier() : 0);
+    const auto ordered = order_placements(loads, targets, weight, next_placement_tie_);
+    std::vector<typename ResourceManagement::SourceChoice> result;
+    result.reserve(sources.size() + waiting.size());
+    for (const auto index : ordered) {
+        for (auto& source : sources) {
+            if (source.source.placement == targets[index].placement) {
+                result.push_back(std::move(source));
+            }
+        }
+    }
+    result.insert(result.end(), std::make_move_iterator(waiting.begin()),
+                  std::make_move_iterator(waiting.end()));
+    sources = std::move(result);
+}
+
+template <class Instance>
 bool EngineCore<Instance>::try_admit_one(bool restoring) {
     if (!restoring && quiescence_pending_.load(std::memory_order_acquire)) return false;
     if (instance_.session->has_context_operation()) { return false; }
     const auto lane = free_lane();
+    const auto owner     = scheduler_.progress_owner();
+    const auto suspended = restoring ? std::find_if(paused_.begin(), paused_.end(),
+                                                    [&](const auto& r) { return r->id == owner; })
+                                     : paused_.end();
+    if (restoring && suspended == paused_.end()) return false;
     if (!lane && restoring) {
-        if (!paused_.empty() && !has_older_resident(paused_.front()->id)) {
-            if (const auto victim =
-                    scheduler_.youngest_victim(slots_, max_concurrency_, paused_.front()->id)) {
-                return pause_resident(*victim);
-            }
-        }
+        if (const auto victim = scheduler_.preemption_victim(slots_, max_concurrency_))
+            return pause_resident(*victim);
         return false;
     }
-    if (admission_decision_ &&
-        (admission_decision_->restoring != restoring ||
-         (restoring && (paused_.empty() || paused_.front() != admission_decision_->request)))) {
+    if (admission_decision_ && (admission_decision_->restoring != restoring ||
+                                (restoring && *suspended != admission_decision_->request))) {
         admission_decision_.reset();
     }
     std::vector<std::shared_ptr<Request>> candidates;
     if (admission_decision_) {
         candidates.push_back(admission_decision_->request);
     } else if (restoring) {
-        if (!paused_.empty()) { candidates.push_back(paused_.front()); }
+        candidates.push_back(*suspended);
     } else {
         std::lock_guard lock(queue_mutex_);
         candidates = scheduler_.fresh_candidates(pending_, max_concurrency_);
@@ -420,7 +564,21 @@ bool EngineCore<Instance>::try_admit_one(bool restoring) {
                 if (request->admission_generation == admission_generation_) { continue; }
                 request->admission_generation = admission_generation_;
             }
-            ensure_base_plan(request);
+            try {
+                ensure_base_plan(request);
+            } catch (const RequestError&) {
+                // Planning has not bound a sequence or submitted device work. A native
+                // request rejection therefore ends only this pending request.
+                if (restoring) throw;
+                const auto error = std::current_exception();
+                {
+                    std::lock_guard lock(queue_mutex_);
+                    std::erase(pending_, request);
+                }
+                complete_error(request, error);
+                request_admission_check();
+                return true;
+            }
             const auto retained = resources_.retained_source(request->id);
             const auto revoked  = resources_.source_revocations(request->id);
             if (!restoring && revoked > request->admission.revoked_checkpoints) {
@@ -429,24 +587,15 @@ bool EngineCore<Instance>::try_admit_one(bool restoring) {
                     request->admission.fallback_reason = AdmissionFallbackReason::SourceRevoked;
                 }
             }
-            std::vector<typename ResourceManagement::SourceChoice> sources;
-            if (restoring && request->suspended->has_snapshot()) {
-                auto& choice                 = sources.emplace_back();
-                choice.resume_owner          = request->continuation_owner
-                                                   ? std::optional(request->continuation_owner)
-                                                   : std::nullopt;
-                choice.source.private_points = resources_.points(request->continuation_owner);
-                choice.source.take_private =
-                    resources_.can_transfer_private(request->continuation_owner, request->id);
-            } else {
-                sources =
-                    resources_.candidates(*instance_.session, *request->base_plan,
-                                          restoring ? request->suspended->frontier() : UINT32_MAX,
-                                          restoring && request->continuation_owner
-                                              ? std::optional(request->continuation_owner)
-                                              : std::nullopt,
-                                          request->id, request->publication_order);
-            }
+            auto sources =
+                resources_.candidates(*instance_.session, *request->base_plan,
+                                      restoring ? request->suspended->frontier() : UINT32_MAX,
+                                      restoring && request->continuation_owner
+                                          ? std::optional(request->continuation_owner)
+                                          : std::nullopt,
+                                      request->id, request->publication_order,
+                                      restoring ? &*request->suspended : nullptr);
+            if (lane) { order_binding_sources(request, LaneId{*lane}, sources); }
             if (!restoring && !sources.empty()) {
                 const auto preferred = sources.front().source.reused_tokens;
                 if (!request->admission_observed) {
@@ -463,11 +612,12 @@ bool EngineCore<Instance>::try_admit_one(bool restoring) {
         auto& decision = *admission_decision_;
         ContextAssessment assessment;
         bool deferred = false;
+        std::optional<typename ResourceManagement::SourceChoice> waiting_choice;
         while (decision.current < decision.sources.size()) {
-            auto& choice            = decision.sources[decision.current];
-            const bool own_snapshot = restoring && request->suspended->has_snapshot();
-            if (!own_snapshot && !resources_.prepare_source(*instance_.session, *request->base_plan,
-                                                            choice, request->id)) {
+            auto& choice = decision.sources[decision.current];
+            if (!resources_.prepare_source(*instance_.session, *request->base_plan, choice,
+                                           request->id, std::nullopt,
+                                           restoring ? &*request->suspended : nullptr)) {
                 if (!restoring) {
                     request->admission.fallback_reason =
                         resources_.source_revocations(request->id) &&
@@ -516,28 +666,28 @@ bool EngineCore<Instance>::try_admit_one(bool restoring) {
             }
             if (!reservation) {
                 assessment = reservation.assessment;
-                if (!own_snapshot) { retain_admission_source(request, choice, restoring); }
-                const auto protected_source =
-                    own_snapshot ? request->suspended->snapshot_handle() : choice.source.checkpoint;
-                const auto excluded  = protected_source
-                                           ? std::span<const Checkpoint>(&*protected_source, 1)
-                                           : std::span<const Checkpoint>{};
-                const auto reclaimed = reclaim(
-                    assessment, restoring && !has_older_resident(request->id), excluded,
-                    &decision.reclaim, restoring ? std::optional(request->id) : std::nullopt);
+                retain_admission_source(request, choice, restoring);
+                const auto protected_source = choice.source.checkpoint;
+                const auto excluded         = protected_source
+                                                  ? std::span<const Checkpoint>(&*protected_source, 1)
+                                                  : std::span<const Checkpoint>{};
+                const auto reclaimed = reclaim(assessment, restoring, excluded, &decision.reclaim);
                 if (reclaimed == ReclaimProgress::Transferring) return true;
                 if (reclaimed == ReclaimProgress::Deferred) {
+                    if (!waiting_choice) { waiting_choice = choice; }
                     deferred = true;
-                    break;
+                    ++decision.current;
+                    continue;
                 }
                 if (reclaimed == ReclaimProgress::Changed || reclaimed == ReclaimProgress::Retry)
                     continue;
                 // Another waiting reference may be the only obstacle to a Move.
                 // Grant its revocation only when the resulting complete bind succeeds.
-                if (!own_snapshot) {
+                {
                     auto transferable = choice;
                     if (resources_.prepare_source(*instance_.session, *request->base_plan,
-                                                  transferable, request->id, rights) &&
+                                                  transferable, request->id, rights,
+                                                  restoring ? &*request->suspended : nullptr) &&
                         (transferable.source.consume_source != choice.source.consume_source ||
                          transferable.source.retired_points != choice.source.retired_points)) {
                         const auto transfer_started = Clock::now();
@@ -557,8 +707,10 @@ bool EngineCore<Instance>::try_admit_one(bool restoring) {
                     // smaller initial allocation is not a reason to discard this source.
                     if (reservation.capacity_possible &&
                         (!resident_empty() || (!restoring && !paused_.empty()))) {
+                        if (!waiting_choice) { waiting_choice = choice; }
                         deferred = true;
-                        break;
+                        ++decision.current;
+                        continue;
                     }
                     if (!restoring) {
                         request->admission.fallback_reason =
@@ -570,6 +722,11 @@ bool EngineCore<Instance>::try_admit_one(bool restoring) {
                     continue;
                 }
             }
+            request->placement = choice.source.placement;
+            request->placement_tokens =
+                std::max<std::uint64_t>(request->base_plan->summary().prompt_tokens,
+                                        restoring ? request->suspended->frontier() : 0);
+            next_placement_tie_.value = choice.source.placement.value + 1;
             resources_.binding_started(request->id, reservation.retired_points,
                                        reservation.consumed_source);
             const auto& source = choice.source;
@@ -602,10 +759,15 @@ bool EngineCore<Instance>::try_admit_one(bool restoring) {
             }
             return true;
         }
+        if (waiting_choice &&
+            resources_.prepare_source(*instance_.session, *request->base_plan, *waiting_choice,
+                                      request->id, std::nullopt,
+                                      restoring ? &*request->suspended : nullptr)) {
+            retain_admission_source(request, *waiting_choice, restoring);
+        }
         admission_decision_.reset();
         if (deferred) {
             if (restoring) {
-                scheduler_.restoration_blocked();
                 return false;
             }
             continue;
@@ -616,7 +778,6 @@ bool EngineCore<Instance>::try_admit_one(bool restoring) {
                                    "context reclamation");
         }
         if (restoring) {
-            scheduler_.restoration_blocked();
             return false;
         }
     }
@@ -660,7 +821,6 @@ void EngineCore<Instance>::update_recovery(const std::shared_ptr<Request>& reque
         if (!released) {
             observe_scheduling(request, GenerationSchedulingTransition::RecoveryComplete);
         }
-        scheduler_.capacity_released();
         request_admission_check();
     }
 }
@@ -683,52 +843,73 @@ EngineCore<Instance>::execution_unit(const Request& request) const {
 }
 
 template <class Instance>
+std::optional<std::uint32_t> EngineCore<Instance>::next_prefill(
+    const std::array<std::shared_ptr<Request>, kMaximumConcurrency>& candidates) const {
+    const auto preferred = instance_.session->prefill_continuation();
+    if (preferred)
+        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+            const auto& request = candidates[lane];
+            if (request && request->sequence == preferred && !request->capture_pending &&
+                (request->is_prefilling() || request->is_replaying()))
+                return lane;
+        }
+    return scheduler_.next_prefill(candidates, max_concurrency_);
+}
+
+template <class Instance>
 void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
     reserved_units_.fill(std::nullopt);
-    std::optional<std::uint32_t> recovering;
-    std::optional<std::uint32_t> oldest;
+    const auto owner = scheduler_.progress_owner();
+    std::optional<std::uint32_t> priority;
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         const auto& request = slots_[lane];
-        if (!request || !request->sequence || request->is_model_finished()) { continue; }
-        if (!oldest || request->id < slots_[*oldest]->id) { oldest = lane; }
-        if (request->recovery_pending) {
-            if (recovering) { throw std::logic_error("multiple protected recoveries"); }
-            recovering = lane;
-        }
+        if (request && request->sequence && request->id == owner) priority = lane;
     }
-    const auto prefill =
-        recovering && (slots_[*recovering]->is_prefilling() || slots_[*recovering]->is_replaying())
-            ? recovering
-            : scheduler_.next_prefill(slots_, max_concurrency_);
+    // Capacity released for a suspended owner cannot be borrowed by resident growth.
+    if (owner && !priority) return;
+    const auto priority_prefill =
+        priority && (slots_[*priority]->is_prefilling() || slots_[*priority]->is_replaying())
+            ? priority
+            : std::nullopt;
+    if (priority_prefill) {
+        const auto continuation = instance_.session->prefill_continuation();
+        if (continuation && slots_[*priority]->sequence != continuation)
+            instance_.session->yield_prefill(*continuation);
+    }
+    const auto prefill = priority_prefill ? priority_prefill : next_prefill(slots_);
     std::vector<std::uint32_t> candidates;
     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
         const auto& request = slots_[lane];
-        if (!request || request->capture_pending || !request->sequence ||
-            request->cancelled.load(std::memory_order_acquire) ||
-            (instance_.session->context_blocks(*request->sequence) ||
-             instance_.session->execution_pending(*request->sequence))) {
-            continue;
-        }
+        if (!request) continue;
         if (prefill == lane || (scope == ReservationScope::Round &&
-                                (request->is_control_ready() || request->is_decode_ready()))) {
+                                (request->is_control_ready() || request->is_decode_ready())))
             candidates.push_back(lane);
-        }
     }
     std::sort(candidates.begin(), candidates.end(), [&](auto a, auto b) {
-        if (a == b) { return false; }
-        if (recovering == a || recovering == b) { return recovering == a; }
+        if (a == b) return false;
+        if (priority == a || priority == b) return priority == a;
         return slots_[a]->id < slots_[b]->id;
     });
-    std::optional<std::uint32_t> blocked;
+    if (prefill) {
+        auto remaining = slots_;
+        remaining[*prefill].reset();
+        while (const auto fallback = scheduler_.next_prefill(remaining, max_concurrency_)) {
+            candidates.push_back(*fallback);
+            remaining[*fallback].reset();
+        }
+    }
+    std::optional<std::uint32_t> granted_prefill;
     for (const auto lane : candidates) {
         const auto request = slots_[lane];
-        // Reclaiming for an earlier row may already have paused this candidate.
+        if (granted_prefill && request && (request->is_prefilling() || request->is_replaying()))
+            continue;
         if (!request || !request->sequence || request->capture_pending ||
             request->cancelled.load(std::memory_order_acquire) ||
-            (instance_.session->context_blocks(*request->sequence) ||
-             instance_.session->execution_pending(*request->sequence)) ||
+            instance_.session->context_blocks(*request->sequence) ||
+            instance_.session->execution_pending(*request->sequence) ||
             !(request->is_control_ready() || request->is_decode_ready() ||
               request->is_prefilling() || request->is_replaying())) {
+            if (priority == lane) return;
             continue;
         }
         const auto unit = execution_unit(*request);
@@ -737,36 +918,37 @@ void EngineCore<Instance>::reserve_resident_units(ReservationScope scope) {
             const auto result = instance_.session->reserve_units({&unit, 1});
             if (result) {
                 reserved_units_[lane] = UnitPermit{unit, *request->residency};
+                if (request->is_prefilling() || request->is_replaying()) granted_prefill = lane;
                 break;
             }
-            if (instance_.session->has_context_operation()) { break; }
-            if (!cursor) { cursor.emplace(resources_.begin_reclaim(*instance_.session)); }
+            if (result.status == UnitReservationStatus::ExecutionUnavailable ||
+                instance_.session->has_context_operation()) {
+                if (priority == lane) return;
+                break;
+            }
+            // Only the turn owner may change capacity ownership under pressure.
+            if (scheduler_.progress_owner() && scheduler_.progress_owner() != request->id) {
+                scheduler_.require_progress(request->id);
+                break;
+            }
+            if (!cursor) cursor.emplace(resources_.begin_reclaim(*instance_.session));
             const auto reclaimed = reclaim(result.assessment, false, {}, &*cursor);
             if (reclaimed == ReclaimProgress::Transferring ||
                 reclaimed == ReclaimProgress::Deferred)
-                break;
+                return;
             if (reclaimed == ReclaimProgress::Changed || reclaimed == ReclaimProgress::Retry)
                 continue;
-            if (recovering == lane) {
+            if (request->recovery_pending)
                 throw std::logic_error("protected recovery exceeded its Native reservation");
-            }
-            if (!recovering && oldest == lane) {
-                // Only the oldest required unit can displace younger residents. Other
-                // failed rows wait or yield their own lane; they cannot block ready rows.
-                // This demand has already exhausted cache and paused-snapshot reclamation.
-                if (pause_reclaim_victim(request->id)) { break; }
-                throw std::logic_error("oldest resident cannot obtain its legal unit");
-            }
-            if (oldest != lane && (!blocked || request->id > slots_[*blocked]->id)) {
-                blocked = lane;
-            }
-            break;
+            scheduler_.require_progress(request->id);
+            if (pause_resident(lane, PauseGoal::RelocateOnly, &result.assessment) ||
+                pause_reclaim_victim(result.assessment))
+                return;
+            throw std::logic_error("progress owner cannot obtain its legal unit");
         }
     }
-    if (blocked && !instance_.session->has_context_operation()) { (void)pause_resident(*blocked); }
-    if (prefill && reserved_units_[*prefill] && !prepare_semantic_capture(slots_[*prefill])) {
-        reserved_units_[*prefill].reset();
-    }
+    if (granted_prefill && !prepare_semantic_capture(slots_[*granted_prefill]))
+        reserved_units_[*granted_prefill].reset();
 }
 
 template <class Instance>
@@ -808,20 +990,27 @@ void EngineCore<Instance>::begin_cycle(HostPhaseMeasurement& boundary) {
         }
         request->suspended.reset();
         it = paused_.erase(it);
-        complete_detached_cancelled(request);
-        scheduler_.capacity_released();
+        complete_cancelled(request);
     }
     const bool recovering = std::any_of(slots_.begin(), slots_.end(),
                                         [](const auto& r) { return r && r->recovery_pending; }) ||
                             (materializing_ && materializing_->resumed);
-    if (paused_.empty() && !context_owner_ && !recovering) scheduler_.paused_queue_empty();
-    if (!recovering && ((admission_decision_ && admission_decision_->restoring) ||
-                        scheduler_.should_restore(!paused_.empty(), resident_empty()))) {
+    if (!instance_.session->has_context_operation() &&
+        scheduler_.advance_service(!paused_.empty(), recovering)) {
+        // An unused permit belongs to the previous turn. Retained recovery capacity is
+        // released only by Native after actual progress, never by this handoff.
+        for (const auto& request : slots_)
+            if (request && request->sequence)
+                instance_.session->release_units({&*request->sequence, 1});
+        admission_decision_.reset();
+        request_admission_check();
+    }
+    if (!recovering && scheduler_.progress_owner()) {
         (void)try_admit_one(true);
         if (instance_.session->has_context_operation()) (void)poll_execution(boundary);
     }
     reserve_resident_units();
-    if (!admission_decision_ || !admission_decision_->restoring) {
+    if (!scheduler_.progress_owner() && paused_.empty() && !context_owner_ && !recovering) {
         if (!admission_decision_ && consume_admission_check()) {
             ++admission_generation_;
             scheduler_.begin_admission_scan();
@@ -891,7 +1080,7 @@ template <class Instance>
             for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
                 if (!unit_runnable(lane)) eligible[lane].reset();
             }
-            if (const auto lane = scheduler_.next_prefill(eligible, max_concurrency_)) {
+            if (const auto lane = next_prefill(eligible)) {
                 set_host_work_class(HostWorkClass::Prefill);
                 if (!start_prefill(*lane)) return submitted;
                 submitted = true;
@@ -911,25 +1100,65 @@ template <class Instance>
 }
 
 template <class Instance>
+bool EngineCore<Instance>::process_measurement() {
+    if (!resident_empty() || !paused_.empty() || materializing_ || context_owner_ ||
+        admission_decision_ || execution_outstanding())
+        return false;
+    MeasurementCommand command;
+    {
+        std::lock_guard lock(queue_mutex_);
+        if (!measurement_ || !pending_.empty() || preparing_requests_) return false;
+        command = measurement_->command;
+    }
+    EngineSnapshot result;
+    std::exception_ptr error;
+    try {
+        instance_.executor->measure(command);
+        publish_runtime_stats();
+        result = snapshot();
+    } catch (...) {
+        error = std::current_exception();
+        if (!instance_.executor->failed()) {
+            try {
+                instance_.executor->measure({MeasurementAction::Cancel});
+            } catch (...) {
+                instance_.executor->fail("failed to close measurement after a boundary error");
+            }
+        }
+        if (instance_.executor->failed()) std::rethrow_exception(error);
+    }
+    std::unique_ptr<MeasurementRequest> completed;
+    {
+        std::lock_guard lock(queue_mutex_);
+        completed = std::move(measurement_);
+    }
+    if (error)
+        completed->completion.set_exception(error);
+    else
+        completed->completion.set_value(std::move(result));
+    queue_cv_.notify_all();
+    return true;
+}
+
+template <class Instance>
 void EngineCore<Instance>::worker_loop() noexcept {
     std::uint64_t scheduled_revision = 0;
     for (;;) {
         {
             std::unique_lock lock(queue_mutex_);
             if (!stopping_ && pending_.empty() && resident_empty() && paused_.empty() &&
-                !execution_outstanding() && !quiescence_pending_.load(std::memory_order_acquire)) {
-                queue_cv_.wait(lock, [&] { return stopping_ || !pending_.empty() ||
+                !execution_outstanding() && !measurement_ &&
+                !quiescence_pending_.load(std::memory_order_acquire)) {
+                queue_cv_.wait(lock, [&] { return stopping_ || !pending_.empty() || measurement_ ||
                     quiescence_pending_.load(std::memory_order_acquire); });
             }
             if (stopping_) {
                 lock.unlock();
-                std::scoped_lock execution_lock(execution_mutex_);
-                fail_all_locked(std::make_exception_ptr(RequestError(
+                fail_all(std::make_exception_ptr(RequestError(
                     RequestErrorKind::Unavailable, "inference engine is shutting down")));
                 return;
             }
         }
-        std::unique_lock execution_lock(execution_mutex_);
         bool progressed  = false;
         bool outstanding = false;
         try {
@@ -946,6 +1175,7 @@ void EngineCore<Instance>::worker_loop() noexcept {
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             if (run_quiescence_work_if_ready()) continue;
             const auto revision = schedule_revision_.load(std::memory_order_acquire);
+            if (revision != published_revision_) publish_runtime_stats();
             const bool schedule = progressed || revision != scheduled_revision ||
                                   !execution_outstanding() || Clock::now() >= pending_deadline_;
             if (cycle_step_ == CycleStep::Boundary && !compute_pending() && schedule) {
@@ -955,29 +1185,34 @@ void EngineCore<Instance>::worker_loop() noexcept {
                 begin_cycle(boundary);
                 finish_engine_phase(boundary, EngineHostPhase::Boundary);
             }
-            progressed |= advance_cycle();
+            if (advance_cycle()) {
+                progressed = true;
+                publish_runtime_stats();
+            }
             {
                 ExecutionCallScope call(*this, CoordinatorCall::Flush);
                 instance_.executor->flush();
                 call.finish();
             }
             outstanding = execution_outstanding();
+            if (!outstanding) progressed |= process_measurement();
         } catch (...) {
             const auto error = std::current_exception();
-            fail_all_locked(error);
+            log_worker_failure(error);
+            fail_all(error);
             report_fatal_error(error);
             return;
         }
         if (outstanding) {
             const auto exposed = active_exposure_set();
             const auto started = Clock::now();
-            execution_lock.unlock();
-            std::this_thread::yield();
-            execution_lock.lock();
+            if (progressed)
+                std::this_thread::yield();
+            else
+                instance_.executor->wait_for_progress();
             record_coordinator_call(CoordinatorCall::Yield, elapsed_ns(started, Clock::now()),
                                     exposed);
         }
-        execution_lock.unlock();
         if (!outstanding && !progressed) {
             std::unique_lock lock(queue_mutex_);
             queue_cv_.wait_for(lock, std::chrono::milliseconds(1));

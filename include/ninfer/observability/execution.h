@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -13,12 +14,26 @@ enum class ExecutionKind : std::uint8_t { Prefill, Decode, Replay, Control, Scor
 // Main-model traversal. Mixed denotes segmented graphs with Host execution handoffs.
 enum class ExecutionPath : std::uint8_t { Eager, Graph, Mixed };
 
+enum class ExecutionStage : std::uint8_t { Submitted, Decision, ResultReady, Retiring, Discarding };
+
 struct ExecutionWork {
     ExecutionKind kind                = ExecutionKind::Context;
     std::uint32_t rows                = 0;
     std::uint64_t input_tokens        = 0;
     std::uint64_t scheduled_positions = 0;
 };
+
+struct ExecutionProgress {
+    std::uint64_t id = 0, started_ns = 0;
+    ExecutionWork work;
+    ExecutionStage stage = ExecutionStage::Submitted;
+};
+
+enum class GpuInterval : std::uint8_t { Result, Commit, Prefill, Vision, Draft, Target, Count };
+inline constexpr std::size_t kGpuIntervalCount = static_cast<std::size_t>(GpuInterval::Count);
+inline constexpr std::array<const char*, kGpuIntervalCount> kGpuIntervalNames{
+    "result_stream", "commit_stream", "prefill_stream",
+    "vision_stream", "draft_stream",  "target_stream"};
 
 struct ExecutionLatency {
     std::optional<std::uint64_t> result_ns;
@@ -32,6 +47,8 @@ struct GpuExecutionObservation {
     std::optional<std::uint64_t> commit_stream_ns;
     std::optional<std::uint64_t> prefill_stream_ns;
     std::optional<std::uint64_t> vision_stream_ns;
+    std::optional<std::uint64_t> draft_stream_ns;
+    std::optional<std::uint64_t> target_stream_ns;
 
     void add_prefill(std::uint64_t ns) noexcept {
         prefill_stream_ns = prefill_stream_ns.value_or(0) + ns;
@@ -41,6 +58,11 @@ struct GpuExecutionObservation {
         vision_stream_ns = vision_stream_ns.value_or(0) + ns;
     }
 };
+
+inline constexpr std::array kGpuIntervalFields{
+    &GpuExecutionObservation::result_stream_ns,  &GpuExecutionObservation::commit_stream_ns,
+    &GpuExecutionObservation::prefill_stream_ns, &GpuExecutionObservation::vision_stream_ns,
+    &GpuExecutionObservation::draft_stream_ns,   &GpuExecutionObservation::target_stream_ns};
 
 struct ExecutionSample {
     ExecutionWork work;
@@ -58,6 +80,28 @@ struct DurationCounter {
     }
 };
 
+using GpuIntervalCounters = std::array<DurationCounter, kGpuIntervalCount>;
+
+// Disjoint cumulative bins, including a final overflow bin. Observers subtract snapshots
+// to obtain a window distribution; recording has constant storage and does not retain samples.
+inline constexpr std::array<std::uint64_t, 31> kExecutionLatencyBoundsNs{
+    10'000,        20'000,        50'000,        100'000,       200'000,        500'000,
+    1'000'000,     2'000'000,     3'000'000,     5'000'000,     8'000'000,      12'000'000,
+    16'000'000,    24'000'000,    32'000'000,    48'000'000,    64'000'000,     96'000'000,
+    128'000'000,   192'000'000,   256'000'000,   384'000'000,   512'000'000,    768'000'000,
+    1'000'000'000, 2'000'000'000, 4'000'000'000, 8'000'000'000, 16'000'000'000, 32'000'000'000,
+    64'000'000'000};
+
+struct ExecutionLatencyDistribution {
+    std::array<std::uint64_t, kExecutionLatencyBoundsNs.size() + 1> bins{};
+
+    void observe(std::uint64_t ns) noexcept {
+        ++bins[std::lower_bound(kExecutionLatencyBoundsNs.begin(), kExecutionLatencyBoundsNs.end(),
+                                ns) -
+               kExecutionLatencyBoundsNs.begin()];
+    }
+};
+
 struct ExecutionExposure {
     DurationCounter result, resolution, retirement, total;
 
@@ -72,6 +116,16 @@ struct ExecutionExposure {
 struct ExecutionCounters {
     std::uint64_t units = 0, rows = 0, input_tokens = 0, scheduled_positions = 0;
     ExecutionExposure exposure;
+    ExecutionLatencyDistribution latency;
+
+    void observe(const ExecutionSample& sample) noexcept {
+        ++units;
+        rows += sample.work.rows;
+        input_tokens += sample.work.input_tokens;
+        scheduled_positions += sample.work.scheduled_positions;
+        exposure.observe(sample.latency);
+        latency.observe(sample.latency.total_ns);
+    }
 };
 
 using ExecutionStatistics =
@@ -97,9 +151,33 @@ struct CommunicationWork {
     }
 };
 
+// NCCL's tracked GPU allocations; Host buffers and driver storage are not included.
+struct CommunicationMemory {
+    std::uint64_t tracked_device_bytes = 0, persistent_device_bytes = 0;
+    std::uint64_t suspendable_device_bytes = 0;
+};
+
 struct CommunicationStatistics {
     std::uint32_t group = 0, size = 1;
     CommunicationWork eager, graph;
+    std::optional<CommunicationMemory> startup_memory;
+};
+
+// Target attention only: draft work and replicated FFN/KDA work are not included.
+struct AttentionWorkCounters {
+    std::uint64_t forwards = 0, rows = 0, valid_positions = 0, scheduled_positions = 0;
+
+    void add(const AttentionWorkCounters& value) noexcept {
+        forwards += value.forwards;
+        rows += value.rows;
+        valid_positions += value.valid_positions;
+        scheduled_positions += value.scheduled_positions;
+    }
+};
+
+struct AttentionWorkObservation {
+    ExecutionKind kind = ExecutionKind::Decode;
+    AttentionWorkCounters work;
 };
 
 // Fixed-size completion facts. Host counters are cumulative on the rank's execution thread;
@@ -111,6 +189,7 @@ struct RankExecutionObservation {
     CommunicationWork communication_eager, communication_graph;
     std::uint64_t workspace_peak_bytes = 0, measurement_peak_bytes = 0;
     std::uint64_t expert_upload_bytes = 0, ple_upload_bytes = 0;
+    std::optional<AttentionWorkObservation> attention;
 };
 
 enum class SpeculativeBackend : std::uint8_t {
@@ -178,6 +257,7 @@ struct GenerationSchedulingStats {
 struct GenerationTransferTiming {
     std::uint64_t bytes = 0;
     // Cumulative copy time across participating ranks, not an operation's wall latency.
+    // Peer payload and operation counts include only the sending endpoint.
     double seconds                                          = 0.0;
     std::uint64_t images                                    = 0;
     std::uint64_t page_groups                               = 0;
@@ -186,10 +266,13 @@ struct GenerationTransferTiming {
                            const GenerationTransferTiming&) = default;
 };
 
-// Directions are D2H, H2D, D2D and H2H. KV entries identify logical history kinds.
+// Directions are D2H, H2D, local D2D, H2H and peer D2D.
+using ContextTransferSeries = std::array<GenerationTransferTiming, 5>;
+
+// KV entries identify logical history kinds.
 struct ContextTransferStats {
-    std::array<GenerationTransferTiming, 4> state{};
-    std::vector<std::array<GenerationTransferTiming, 4>> kv;
+    ContextTransferSeries state{};
+    std::vector<ContextTransferSeries> kv;
     friend bool operator==(const ContextTransferStats&, const ContextTransferStats&) = default;
 };
 
@@ -226,12 +309,13 @@ struct SpeculativeStats {
     std::uint64_t accepted_tokens        = 0;
     std::uint64_t committed_draft_tokens = 0;
     std::uint64_t fallback_steps         = 0;
+    std::vector<std::uint64_t> attempted_per_position;
     std::vector<std::uint64_t> accepted_per_position;
 };
 
 struct ThinkingBudgetStats {
     std::optional<std::uint32_t> configured_budget;
-    // Model-origin tokens accepted while capped thinking remained open.
+    // Model-origin tokens accepted while thinking remained open, with or without a budget.
     std::uint32_t model_thinking_tokens = 0;
     // Complete tokenizer-derived target-control suffix committed by Engine.
     std::uint32_t injected_tokens = 0;

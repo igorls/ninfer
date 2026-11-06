@@ -37,6 +37,10 @@ ninfer_add_test(ninfer_recovery_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/context/test_recovery.cpp"
   LIBRARIES ninfer_model_control)
 
+ninfer_add_test(ninfer_context_conversion_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/context/test_conversion.cpp"
+  LIBRARIES ninfer_model_control)
+
 ninfer_add_test(ninfer_tool_call_parser_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/qwen/test_tool_call_parser.cpp"
   LIBRARIES ninfer_model_control ninfer::json)
@@ -44,3 +48,11 @@ ninfer_add_test(ninfer_tool_call_parser_test
 set_tests_properties(ninfer_context_store_test ninfer_kv_history_test ninfer_kv_cache_test
   ninfer_qwen_visual_scatter_test
   PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu")
+
+ninfer_add_test(ninfer_vision_window_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_vision_window.cpp"
+  LIBRARIES ninfer_model_control)
+
+ninfer_add_test(ninfer_token_input_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_token_input.cpp"
+  LIBRARIES ninfer_model_control)

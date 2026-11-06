@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 TEXT_RESOURCES = (
     "tokenizer.json",
@@ -12,7 +12,6 @@ TEXT_RESOURCES = (
     "chat_template.jinja",
     "generation_config.json",
 )
-VISION_RESOURCES = ("preprocessor_config.json", "video_preprocessor_config.json")
 
 
 def token_domain(
@@ -66,14 +65,11 @@ def load_resources(
     model_dir: Path,
     *,
     vocab_size: int,
-    vision_config: Mapping[str, int] | None = None,
+    roles: Mapping[str, Sequence[str]],
     overrides: Mapping[str, str | Path | bytes] | None = None,
 ) -> tuple[dict[str, dict[str, str]], dict[str, bytes], int, tuple[int, ...]]:
     """Resources of the selected components; an override is a file path or the resource bytes."""
     overrides = {} if overrides is None else dict(overrides)
-    roles = {"text": TEXT_RESOURCES}
-    if vision_config is not None:
-        roles["vision"] = VISION_RESOURCES
     allowed = {role for names in roles.values() for role in names}
     if overrides.keys() - allowed:
         raise ValueError(
@@ -96,19 +92,6 @@ def load_resources(
                 if not isinstance(value, dict):
                     raise ValueError(f"{path}: resource must contain a JSON object")
                 parsed[role] = value
-                if component == "vision":
-                    for field, config_field in (
-                        ("patch_size", "patch_size"),
-                        ("temporal_patch_size", "temporal_patch_size"),
-                        ("merge_size", "spatial_merge_size"),
-                    ):
-                        if (
-                            type(value.get(field)) is not int
-                            or value[field] != vision_config[config_field]
-                        ):
-                            raise ValueError(
-                                f"{path}: {field} differs from Vision config"
-                            )
             object_id = f"resource/{component}/{role}"
             references[component][role] = object_id
             payloads[object_id] = data

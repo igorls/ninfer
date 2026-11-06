@@ -1,15 +1,11 @@
 # Benchmarks
 
-`ninfer_bench` measures the complete public `ninfer::Engine` route against a `.ninfer` artifact.
-The `bench/ops/` `ninfer_<op>_bench` executables measure central public Op contracts while leaving
-implementation selection behind those contracts. Model benchmarks measure native model
-composition. Correctness lives in the affected test suites; development rules are in
-[`../docs/maintainer/op-development.md`](../docs/maintainer/op-development.md).
+选择与问题相符的层级：`ninfer_bench` 测公共 Engine 的执行与资源，Op benchmark 测完整数学入口，
+[Serve runners](../tools/bench/README.md)测固定语料和 HTTP 并发，
+[TTFT](../tools/bench/ttft/README.md)测请求到达、缓存和流式延迟。
+数值正确性由 tests 验证，调优方法见 [Op 开发](../docs/maintainer/op-development.md#调优与测量)。
 
-The [Serve TTFT campaign](../tools/bench/ttft/README.md) measures public-HTTP latency, streaming gaps,
-prefix reuse and preemption. Its frozen request corpus is documented under
-[`fixtures/ttft/`](fixtures/ttft/README.md). That client does not call the benchmark executables or
-Engine directly.
+## 构建与入口
 
 ## Benchmark inputs
 
@@ -75,10 +71,9 @@ may expose entries that its target does not implement; those requests report the
 
 ## Hardware references
 
-[`common/roofline.h`](common/roofline.h) owns the compile-target reference table. Benchmarks report
-the actual GPU separately; they do not choose a reference from its name or estimate nominal
-bandwidth from runtime memory-clock attributes. Logical GB/s and TFLOP/s describe useful work,
-not measured DRAM traffic or executed Tensor Core instructions.
+[roofline.h](common/roofline.h)维护编译目标的硬件参照，新增来源或校准只在该处及必要依据中记录。
+有效 GB/s、useful TFLOP/s 使用逻辑工作量，不等于 DRAM counters 或真实执行指令数。
+Tensor Core 参照必须匹配实际生产路线的输入与 accumulator；SIMT 或未知路径不填 TC 利用率。
 
 | Reference | RTX 5090 |
 |---|---:|

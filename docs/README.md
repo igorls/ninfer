@@ -8,6 +8,7 @@ run the CLI or HTTP server.
 | Document | Purpose |
 |---|---|
 | [Startup configuration](startup-configuration.md) | shared CLI/serve TOML schema, defaults, overrides, resource controls and startup display |
+| [Deployment configurations](../examples/configs/) | RTX 5090, single Spark and dual-Spark TOML examples |
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, TypeSafe System One, state, streaming, token counting, authentication, and tool calls |
 | [Demos](index.html) | Arena Duel, Tetris, chess, Kitchen Rush, Beacon Runner, the cube speed run, the decision analyzer, and the dual-purpose readout |
@@ -37,38 +38,10 @@ v2 files need the [upgrade workflows](weight-conversion.md#upgrade-an-existing-v
 The experimental [Qwen3.8-27B `nvfp4full` recipe](weight-conversion.md#qwen38-27b-nvfp4full)
 is not qualified for production.
 
-## Repository-local guides
+## Internal architecture
 
-- [Benchmarks](../bench/README.md)
-- [Tests](../tests/README.md)
-- [Tools](../tools/README.md)
-- [Capability evaluation](../eval/README.md)
-
-## Designs
-
-- [Unified Context storage pool](designs/unified-context-pool.md) — shared KV/State capacity,
-  startup guarantees, execution reservations, cache reclamation and recovery, Op views, and
-  deployment feasibility on RTX 5090 and single/dual Spark; selected design pending implementation.
-- [Distributed execution](distributed-execution-design.md) — selected architecture for centralized
-  scheduling, local/distributed executors, rank ownership, parallel plans and communication;
-  local execution and distributed execution foundations are implemented; multi-rank model
-  integration is pending.
-- [Qwen4Exp parallel strategy](qwen4_exp-parallel-design.md) — selected initial dual-Spark
-  TP2/EP2 strategy, state shards, computation/graph composition and implementation dependencies.
-- [Qwen4Exp dual-Spark roadmap](qwen4_exp-distributed-roadmap.md) — D2–D6 implementation sequence,
-  shared infrastructure, sharded loading, inference integration and stage completion checklist.
-- [GLM5Next design and implementation](designs/glm5next/README.md) — selected dual-Spark
-  placement, KDA ReplaySSM, Kpool Sparse MLA, mHC and the existing Op checklist; separates
-  decisions, implementation status and retirement of designs after code takes ownership.
-
-## Maintainer references
-
-The active references under [`maintainer/`](maintainer/) record current architecture, model,
-artifact, and maintenance contracts. These files are not additional user workflows or installed
-API documentation.
-
-[Engine architecture](maintainer/engine-architecture.md) is the single top-level reference. The
-other references own narrower contracts:
+内部文档记录跨模块设计、重要数值取舍和开发方法。具体类型、接口、支持几何与 codec
+以所属代码为准，不在文档维护重复声明。
 
 | Document | Responsibility |
 |---|---|
@@ -90,16 +63,24 @@ other references own narrower contracts:
 | [Paged KV context store](maintainer/paged-kv-cache.md) | typed pools, pages, replicas, address spaces, reservations and consumer views |
 | [ReplaySSM GDN](maintainer/replayssm-gdn.md) | raw transition records and faithful commitment of the verified state prefix |
 | [Op development](maintainer/op-development.md) | semantic boundaries, source ownership, numerical qualification and performance evidence |
-| [Operational logging](maintainer/logging.md) | log ownership, presentation, severity and data policy |
+| [Operational logging](maintainer/observability.md) | log ownership, presentation, severity and data policy |
 | [Linear benchmarks](../bench/README.md) | pure Linear measurement, metrics and suites |
 | [Linear tuning and reports](maintainer/linear-tuning.md) | tuning ranges, priority points, dispatch tradeoffs and final performance report format |
 | [Upstream ports](maintainer/upstream-ports.md) | the fork's reviewed upstream point, carried features, divergences, dropped and deferred work, qualification and deployment |
 
-Model cards contain official artifact facts and source provenance. The
-[conversion guide](weight-conversion.md) is the entry point for making an artifact. Exact config
-fields, parameter expansion and native supported domains are maintained by the code linked from
-these references.
+## Development tools
 
-Qwen3.8-Flash-Next is the Qwen4Exp instance; Qwen3.8-27B uses the Qwen3.5 architecture.
-The model references own mathematical and stored-representation facts, and the execution reference
-owns integrated support and its limits. Concrete Op contracts live in `include/ninfer/ops/`.
+- [Tests](../tests/README.md)：测试组织、筛选与真实模型检查。
+- [Benchmarks](../bench/README.md)：Engine/Op 微测、roofline 与外部 profiling。
+- [Tools](../tools/README.md)：转换检查、Serve runners 与带宽工具入口。
+- [Capability evaluation](../eval/README.md)：API 评测、并发与结果恢复。
+
+## Open work
+
+[未完成事项](issue-checklist.md)保留待处理问题与 MLA 性能工作。
+Qwen4-27B 的[架构与量化](designs/qwen4-27b-rtx5090.md)及
+[Op 需求](designs/qwen4-27b-op-checklist.md)属于独立适配计划。
+
+Qwen3.8-Flash-Next 使用 Qwen4Exp；Qwen3.8-27B 使用 Qwen3.5。
+
+Shared infrastructure references: [Frontend](maintainer/frontend.md), [Context storage](maintainer/context-management.md), [weights and loading](maintainer/weights-and-loading.md), [speculative execution](maintainer/speculative-decoding.md). Fork representation and platform contracts remain in the detailed references above.

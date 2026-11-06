@@ -3,8 +3,10 @@
 #include "text/unicode.h"
 
 #include <xgrammar/xgrammar.h>
+#include "fsm_builder.h"
 #include "grammar_functor.h"
 #include "grammar_impl.h"
+#include "json_string_grammar.h"
 #include "regex_converter.h"
 
 #include <algorithm>
@@ -12,6 +14,7 @@
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <vector>
 
 namespace ninfer::text {
 namespace {
@@ -95,40 +98,38 @@ xgrammar::Grammar choice_grammar(const std::vector<std::string>& choices) {
         builder.Get(builder.AddRuleWithHint("root", builder.AddChoices(alternatives))));
 }
 
-std::string quoted(unsigned char c) {
-    constexpr char hex[] = "0123456789abcdef";
-    std::string result   = "\"\\x00\"";
-    result[3]            = hex[c >> 4];
-    result[4]            = hex[c & 15];
-    return result;
-}
-
-// A small DFA consumes through the first complete delimiter, including delimiters split across
-// tokens. Concatenation keeps the user's rule names in their own namespace.
+// Consume through the first complete delimiter, including tokens that cross it. The matcher must
+// be deterministic: a delimiter can end with its own prefix, and a body allowed to stop at any
+// partial match would let a second delimiter start inside the first.
 xgrammar::Grammar reasoning_prefix(std::string_view delimiter) {
-    std::string alphabet(delimiter);
-    std::sort(alphabet.begin(), alphabet.end());
-    alphabet.erase(std::unique(alphabet.begin(), alphabet.end()), alphabet.end());
-    std::string source = "root ::= s0\n";
-    for (std::size_t state = 0; state < delimiter.size(); ++state) {
-        source += "s" + std::to_string(state) + " ::= ";
-        for (unsigned char c : alphabet) {
-            std::string next(delimiter.substr(0, state));
-            next += static_cast<char>(c);
-            std::size_t matched = std::min(next.size(), delimiter.size());
-            while (matched && !next.ends_with(delimiter.substr(0, matched))) { --matched; }
-            source += quoted(c);
-            if (matched != delimiter.size()) { source += " s" + std::to_string(matched); }
-            source += " | ";
-        }
-        source += "[^";
-        for (unsigned char c : alphabet) {
-            const auto escaped = quoted(c);
-            source += escaped.substr(1, escaped.size() - 2);
-        }
-        source += "] s0\n";
+    if (delimiter.empty()) throw std::logic_error("invalid reasoning delimiter");
+    const auto byte_at = [&](int index) { return static_cast<unsigned char>(delimiter[index]); };
+    const int size     = static_cast<int>(delimiter.size());
+    std::vector<int> failure(delimiter.size());
+    for (int index = 1, matched = 0; index < size; ++index) {
+        while (matched && byte_at(index) != byte_at(matched)) matched = failure[matched - 1];
+        if (byte_at(index) == byte_at(matched)) ++matched;
+        failure[index] = matched;
     }
-    return xgrammar::Grammar::FromEBNF(source);
+    xgrammar::FSM fsm(size + 1);
+    for (int state = 0; state < size; ++state) {
+        const auto next = [&](int byte) {
+            int matched = state;
+            while (matched && byte != byte_at(matched)) matched = failure[matched - 1];
+            return byte == byte_at(matched) ? matched + 1 : 0;
+        };
+        for (int low = 0; low < 256;) {
+            const int target = next(low);
+            int high         = low;
+            while (high < 255 && next(high + 1) == target) ++high;
+            fsm.AddEdge(state, target, low, high);
+            low = high + 1;
+        }
+    }
+    xgrammar::GrammarBuilder builder;
+    const auto value = xgrammar::AddScalarStringFSM(
+        builder, xgrammar::FSMWithStartEnd(fsm, 0, {size}), "reasoning", false);
+    return xgrammar::GrammarNormalizer::Apply(builder.Get(builder.AddRuleWithHint("root", value)));
 }
 
 void validate(const xgrammar::Grammar& grammar, const std::vector<std::string>& vocab,
@@ -145,7 +146,8 @@ void validate(const xgrammar::Grammar& grammar, const std::vector<std::string>& 
     for (int i = 0; i < grammar->NumGrammarExprs(); ++i) {
         const auto expression = grammar->GetGrammarExpr(i);
         if (expression.type == Type::kTagDispatch || expression.type == Type::kTokenTagDispatch ||
-            expression.type == Type::kRegex || expression.type == Type::kSubstring) {
+            expression.type == Type::kRegex || expression.type == Type::kByteFSM ||
+            expression.type == Type::kSubstring) {
             throw std::invalid_argument("grammar uses an extension outside the GBNF contract");
         }
         if (expression.type == Type::kToken || expression.type == Type::kExcludeToken) {

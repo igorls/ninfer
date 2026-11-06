@@ -1,4 +1,4 @@
-#include "models/common/qwen/vision/prefill.h"
+#include "models/common/vision/window.h"
 #include "core/layout.h"
 #include "models/qwen3_5/state/decoder_state.h"
 #include "models/common/qwen/vision/control.h"
@@ -85,19 +85,20 @@ void test_decoder_layout() {
                int8.mtp_kv->pages.payload_bytes() == 2ULL * (256 + 4 * 2) * 64 * 2,
            "INT8 Text/MTP record payload includes group scales");
 
-    q35::DecoderStateSpec fp8_spec = decoder_spec(ninfer::KvCacheStorage::Fp8E4M3Row256, true);
+    q35::DecoderStateSpec fp8_spec =
+        decoder_spec(ninfer::KvCacheStorage::Fp8E4m3fnGroup128Ue8m0, true);
     ninfer::LayoutBuilder fp8_builder;
     const q35::DecoderStateLayout fp8 = q35::plan_decoder_state(fp8_builder, fp8_spec);
     (void)fp8_builder.finish(256);
     expect(fp8.text_kv.pages.planes.size() == 8 &&
                fp8.text_kv.pages.planes[0].geometry.dtype == ninfer::DType::FP8_E4M3FN &&
-               fp8.text_kv.pages.planes[2].geometry.dtype == ninfer::DType::FP16 &&
-               fp8.text_kv.pages.planes[2].geometry.leading_extent == 1,
-           "FP8 Text KV has row-scaled code and scale planes per layer");
+               fp8.text_kv.pages.planes[2].geometry.dtype == ninfer::DType::U8 &&
+               fp8.text_kv.pages.planes[2].geometry.leading_extent == 2,
+           "FP8 Text KV has G128 code and UE8M0 scale planes per layer");
     expect(fp8.mtp_kv && fp8.mtp_kv->pages.planes.size() == 4 &&
                fp8.mtp_kv->pages.planes[0].geometry.dtype == ninfer::DType::FP8_E4M3FN &&
-               fp8.mtp_kv->pages.planes[2].geometry.leading_extent == 1,
-           "FP8 MTP KV has row-scaled code and scale planes");
+               fp8.mtp_kv->pages.planes[2].geometry.leading_extent == 2,
+           "FP8 MTP KV has G128 code and UE8M0 scale planes");
     expect(fp8.text_kv.pages.payload_bytes() == 2ULL * (256 + 2) * 2 * 64 * 2 &&
                fp8.mtp_kv->pages.payload_bytes() == 2ULL * (256 + 2) * 64 * 2,
            "FP8 Text/MTP record payload includes row scales");
@@ -129,8 +130,8 @@ void test_decoder_layout() {
                k8v4.text_kv.pages.planes[0].geometry.leading_extent == 256 &&
                k8v4.text_kv.pages.planes[1].geometry.dtype == ninfer::DType::U8 &&
                k8v4.text_kv.pages.planes[1].geometry.leading_extent == 128 &&
-               k8v4.text_kv.pages.planes[2].geometry.dtype == ninfer::DType::FP16 &&
-               k8v4.text_kv.pages.planes[2].geometry.leading_extent == 1 &&
+               k8v4.text_kv.pages.planes[2].geometry.dtype == ninfer::DType::U8 &&
+               k8v4.text_kv.pages.planes[2].geometry.leading_extent == 2 &&
                k8v4.text_kv.pages.planes[3].geometry.dtype == ninfer::DType::U8 &&
                k8v4.text_kv.pages.planes[3].geometry.leading_extent == 16,
            "K8V4 Text KV preserves independent key/value code and scale geometry");
@@ -144,89 +145,89 @@ void test_decoder_layout() {
 }
 
 void test_visual_embedding_windows() {
-    const std::vector<std::int32_t> scatter{2, 4, 7};
-    const auto first = ninfer::models::qwen::visual_embedding_slice(scatter, 8, 0, 4);
-    expect(first.source_begin == 0 && first.destination_columns == std::vector<std::int32_t>({2}),
-           "first input window selects only its visual columns");
-    const auto final = ninfer::models::qwen::visual_embedding_slice(scatter, 8, 4, 4);
-    expect(final.source_begin == 1 &&
-               final.destination_columns == std::vector<std::int32_t>({0, 3}),
-           "last input window retains visual columns at both boundaries");
-    const auto shifted = ninfer::models::qwen::visual_embedding_slice(scatter, 8, 1, 3);
-    expect(shifted.source_begin == 0 &&
-               shifted.destination_columns == std::vector<std::int32_t>({1}),
-           "root MTP history uses token positions after its skipped first input");
-    expect(ninfer::models::qwen::visual_embedding_slice(scatter, 8, 8, 1).empty(),
-           "generated input beyond the prompt has no visual embedding");
+    ninfer::models::vision::WindowPlan plan;
+    plan.outputs     = {{0, 0, {2, 4, 7}}};
+    const auto first = ninfer::models::vision::embedding_slices(plan, 0, 4);
+    expect(first.size() == 1 && first[0].source_begin == 0 &&
+               first[0].destination_columns == std::vector<std::int32_t>{2},
+           "first window selects only its visual columns");
+    const auto final = ninfer::models::vision::embedding_slices(plan, 4, 4);
+    expect(final.size() == 1 && final[0].source_begin == 1 &&
+               final[0].destination_columns == std::vector<std::int32_t>({0, 3}),
+           "last window retains both visual boundaries");
+    const auto shifted = ninfer::models::vision::embedding_slices(plan, 1, 3);
+    expect(shifted.size() == 1 && shifted[0].source_begin == 0 &&
+               shifted[0].destination_columns == std::vector<std::int32_t>{1},
+           "MTP shifted history selects matching visual positions");
+    expect(ninfer::models::vision::embedding_slices(plan, 8, 1).empty(),
+           "generated tokens have no visual embedding");
 }
 
 void test_vision_control() {
     ninfer::models::qwen::PreparedPromptData prompt;
     prompt.token_ids.resize(7);
-    prompt.token_types = {0, static_cast<std::uint8_t>(ninfer::models::qwen::Modality::Image),
-                          0, static_cast<std::uint8_t>(ninfer::models::qwen::Modality::Video),
-                          0, static_cast<std::uint8_t>(ninfer::models::qwen::Modality::Video),
+    prompt.token_types = {0, static_cast<std::uint8_t>(ninfer::models::frontend::Modality::Image),
+                          0, static_cast<std::uint8_t>(ninfer::models::frontend::Modality::Video),
+                          0, static_cast<std::uint8_t>(ninfer::models::frontend::Modality::Video),
                           0};
     prompt.prepare.media_items   = 2;
     prompt.prepare.raw_patches   = 12;
     prompt.prepare.vision_tokens = 3;
     prompt.vision_items          = {
-        ninfer::models::qwen::VisionItem{.modality    = ninfer::models::qwen::Modality::Image,
-                                                  .grid        = {.temporal = 1, .height = 2, .width = 2},
-                                                  .patch_begin = 0,
-                                                  .patch_count = 4,
-                                                  .token_spans = {{.begin = 1, .count = 1}}},
-        ninfer::models::qwen::VisionItem{
-                     .modality    = ninfer::models::qwen::Modality::Video,
-                     .grid        = {.temporal = 2, .height = 2, .width = 2},
-                     .patch_begin = 4,
-                     .patch_count = 8,
-                     .token_spans = {{.begin = 3, .count = 1}, {.begin = 5, .count = 1}}},
+        {.modality    = ninfer::models::frontend::Modality::Image,
+                  .grid        = {.temporal = 1, .height = 2, .width = 2},
+                  .patch_begin = 0,
+                  .patch_count = 4,
+                  .token_spans = {{.begin = 1, .count = 1}}},
+        {.modality    = ninfer::models::frontend::Modality::Video,
+                  .grid        = {.temporal = 2, .height = 2, .width = 2},
+                  .patch_begin = 4,
+                  .patch_count = 8,
+                  .token_spans = {{.begin = 3, .count = 1}, {.begin = 5, .count = 1}}},
     };
 
-    const ninfer::models::qwen::VisionControlPlan plan = ninfer::models::qwen::plan_vision_control(
-        prompt, {.spatial_merge_size = 2, .position_grid_side = 48});
-    const ninfer::models::qwen::VisionControl control =
-        ninfer::models::qwen::build_vision_control(prompt, plan, 0);
-    expect(control.items.size() == 2, "Vision per-item control count");
-    expect(control.items[0].patch_begin == 0 && control.items[0].patch_count == 4 &&
-               control.items[0].merged_count == 1 && control.items[0].segment_length == 4 &&
-               control.items[0].segment_count == 1 &&
-               control.items[0].scatter_indices == std::vector<std::int32_t>({1}) &&
-               control.items[0].position_ids.size() == 8 &&
-               control.items[0].position_table_indices.size() == 16 &&
-               control.items[0].position_table_weights.size() == 16,
-           "image item control offsets");
-    expect(control.items[1].patch_begin == 4 && control.items[1].patch_count == 8 &&
-               control.items[1].merged_count == 2 && control.items[1].segment_length == 4 &&
-               control.items[1].segment_count == 2 &&
-               control.items[1].scatter_indices == std::vector<std::int32_t>({3, 5}) &&
-               control.items[1].position_ids.size() == 16 &&
-               control.items[1].position_table_indices.size() == 32 &&
-               control.items[1].position_table_weights.size() == 32,
-           "video item control offsets");
-
-    const ninfer::models::qwen::VisionControl suffix =
-        ninfer::models::qwen::build_vision_control(prompt, plan, 1);
-    expect(suffix.prepared_item_begin == 1 && suffix.items.size() == 1 &&
-               suffix.items[0].patch_begin == control.items[1].patch_begin &&
-               suffix.items[0].scatter_indices == control.items[1].scatter_indices &&
-               suffix.items[0].position_ids == control.items[1].position_ids,
-           "Vision suffix control contents");
+    const ninfer::models::qwen::VisionConfig config{.patch_size          = 1,
+                                                    .temporal_patch_size = 1,
+                                                    .spatial_merge_size  = 2,
+                                                    .position_grid_side  = 48};
+    for (const auto& item : prompt.vision_items) {
+        auto payload = std::make_shared<ninfer::models::frontend::PreparedMediaPayload>();
+        payload->features_per_patch = config.patch_width();
+        payload->patch_elements     = item.patch_count * config.patch_width();
+        payload->patches            = std::make_unique<std::uint16_t[]>(payload->patch_elements);
+        prompt.media_payloads.push_back(std::move(payload));
+    }
+    const auto input = ninfer::models::qwen::prepare_vision_input(prompt, config, 2);
+    const auto plan  = ninfer::models::vision::plan_window(input->units, 2, 7, 2, 1);
+    const auto batch = ninfer::models::qwen::encoder_batch(*input, *plan, 0);
+    expect(input->units.size() == 3 && plan->units.size() == 2 && batch.features == 2,
+           "video temporal grids form independently encodable units");
+    expect(batch.cu_seqlens == std::vector<std::int32_t>({0, 4, 8}) &&
+               batch.positions ==
+                   std::vector<std::int32_t>({0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1}),
+           "selected grids retain spatial rotary coordinates");
+    expect(batch.position_indices[0] == 0 && batch.position_indices[4] == 47 &&
+               batch.position_indices[8] == 2256 && batch.position_indices[12] == 2303 &&
+               batch.position_weights[0] == 1 && batch.position_weights[4] == 1,
+           "position interpolation maps grid corners to the learned table corners");
+    expect(batch.patches[0].data() == prompt.media_payloads[1]->span().data() &&
+               batch.patches[1].data() == prompt.media_payloads[1]->span().data() + 12,
+           "window borrows only its temporal patch ranges");
 }
 
 ninfer::models::qwen::PreparedPromptData identity_prompt(std::uint8_t digest_byte = 1) {
     ninfer::models::qwen::PreparedPromptData prompt;
     prompt.token_ids   = {10, 248056, 248056, 11};
-    prompt.token_types = {0, static_cast<std::uint8_t>(ninfer::models::qwen::Modality::Image),
-                          static_cast<std::uint8_t>(ninfer::models::qwen::Modality::Image), 0};
+    prompt.token_types = {0, static_cast<std::uint8_t>(ninfer::models::frontend::Modality::Image),
+                          static_cast<std::uint8_t>(ninfer::models::frontend::Modality::Image), 0};
     prompt.positions   = {0, 1, 1, 3, 0, 1, 1, 3, 0, 1, 2, 3};
     prompt.rope_delta  = 0;
-    ninfer::models::qwen::VisionItem item{.modality    = ninfer::models::qwen::Modality::Image,
-                                          .grid        = {.temporal = 1, .height = 2, .width = 4},
-                                          .patch_begin = 0,
-                                          .patch_count = 8,
-                                          .token_spans = {{.begin = 1, .count = 2}}};
+    auto item =
+        ninfer::models::frontend::VisionItem{.modality = ninfer::models::frontend::Modality::Image,
+                                             .grid     = {.temporal = 1, .height = 2, .width = 4},
+                                             .patch_begin = 0,
+                                             .patch_count = 8,
+                                             .token_spans = {{.begin = 1, .count = 2}}};
     item.content_digest.fill(digest_byte);
     prompt.vision_items.push_back(std::move(item));
     return prompt;

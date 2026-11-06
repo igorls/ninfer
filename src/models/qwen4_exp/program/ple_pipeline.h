@@ -21,6 +21,10 @@ public:
     try_begin(runtime::ExecutionTicket, std::uint32_t tokens, std::span<const ple::InputRow>);
     void append_device(ple::Ticket, const Tensor& ids, std::span<const std::uint32_t> extents,
                        std::uint32_t step);
+    // Capture only the CUDA handoff. Host bookkeeping follows the submitted chain replay.
+    void capture_append(std::uint32_t slot, const Tensor& ids, std::uint32_t step,
+                        CudaExecutionView);
+    void append_submitted(ple::Ticket, std::span<const std::uint32_t> extents, std::uint32_t step);
     void seal(ple::Ticket, std::span<const std::uint32_t> valid_columns);
     [[nodiscard]] bool input_ready(ple::Ticket);
     // IDs are available once appends have retired, before embedding preparation completes.
@@ -41,7 +45,6 @@ public:
     // are harmless. Ordinary execution advances through progress() and readiness queries.
     void drain();
 private:
-    void append_submitted(ple::Ticket, std::span<const std::uint32_t> extents, std::uint32_t step);
     struct Window {
         ple::Ticket ticket;
         std::optional<runtime::ExecutionTicket> owner;

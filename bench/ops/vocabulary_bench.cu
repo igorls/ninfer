@@ -3,6 +3,7 @@
 #include "common/roofline.h"
 
 #include <numeric>
+#include <optional>
 
 using namespace ninfer;
 using namespace ninfer::bench;
@@ -13,6 +14,7 @@ struct Options {
     std::string op = "candidates";
     std::vector<int> tokens{1};
     int batch = 1, rows = 124160, domain = 248077, ranks = 2, rank = 0;
+    std::optional<int> candidates;
     bool stochastic = false, penalties = false, mask = false, accept_all = false;
 };
 
@@ -24,6 +26,7 @@ Options parse(int argc, char** argv) {
             std::cout << "Vocabulary partition benchmark\n"
                          "  --op candidates|sample|accept|counts --tokens T[,T...] --batch 1..8\n"
                          "  --rows V --domain D --ranks 1..16 --rank R\n"
+                         "  --candidates 1|20 (defaults to the sampling requirement)\n"
                          "  --stochastic --penalties --mask --accept-all\n";
             measurement::help();
             std::exit(0);
@@ -59,12 +62,16 @@ Options parse(int argc, char** argv) {
             o.ranks = measurement::integer(value, 1, 16);
         else if (flag == "--rank")
             o.rank = measurement::integer(value, 0, 15);
+        else if (flag == "--candidates")
+            o.candidates = measurement::integer(value);
         else if (!measurement::parse(o.timing, flag, value))
             throw std::invalid_argument("unknown option");
     }
     if ((o.op != "candidates" && o.op != "sample" && o.op != "accept" && o.op != "counts") ||
-        o.rank >= o.ranks || std::int64_t(o.rows) * o.ranks < o.domain ||
-        (o.accept_all && o.op != "accept") || (o.op == "accept" && o.domain < 24) ||
+        (o.candidates && *o.candidates != 1 && *o.candidates != 20) ||
+        (o.stochastic && o.candidates == 1) || o.rank >= o.ranks ||
+        std::int64_t(o.rows) * o.ranks < o.domain || (o.accept_all && o.op != "accept") ||
+        (o.op == "accept" && o.domain < 24) ||
         (o.op == "counts" && (o.stochastic || o.penalties || o.mask)))
         throw std::invalid_argument("invalid Op or vocabulary partition");
     return o;
@@ -110,13 +117,13 @@ struct Fixture {
     const Options& options;
     int t, k;
     DeviceBuffer logits, configs, counts, masks, valid, drafts, keys, work, positions, output;
-    DeviceBuffer extents, lengths, anchors, licensed, licensed_counts, accepted;
+    DeviceBuffer extents, lengths, licensed, licensed_counts;
     Tensor input, key_view, valid_view, draft_view;
     MemoryArena workspace;
     std::size_t logical_bytes;
 
     Fixture(const Options& o, int tokens)
-        : options(o), t(tokens), k(o.stochastic ? 20 : 1),
+        : options(o), t(tokens), k(o.candidates.value_or(o.stochastic ? 20 : 1)),
           logits(make_bf16(std::size_t(o.rows) * t * o.batch, 177, -8, 8)),
           configs(make_buffer(o.batch * sizeof(ops::SamplingConfig))),
           counts(o.penalties
@@ -134,8 +141,7 @@ struct Fixture {
           output(make_buffer(o.batch * 4)),
           extents(measurement::make_i32(std::vector<int>(o.batch, t - 1))),
           lengths(measurement::make_i32(std::vector<int>(o.batch, 1024))),
-          anchors(make_buffer(o.batch * 4)), licensed(make_buffer(t * o.batch * 4)),
-          licensed_counts(make_buffer(o.batch * 4)), accepted(make_buffer(o.batch * 4)),
+          licensed(make_buffer(t * o.batch * 4)), licensed_counts(make_buffer(o.batch * 4)),
           input(logits.span(), DType::BF16, {o.rows, t, o.batch}),
           key_view(keys.span(), DType::I64, {k, t, o.batch, o.ranks}),
           valid_view(valid.span(), DType::I32, {o.batch}), workspace(work.span()) {
@@ -177,12 +183,10 @@ struct Fixture {
         if (o.penalties) logical_bytes += std::size_t(live) * o.batch * 4 + drafts.size();
         if (o.mask) logical_bytes += std::size_t((live + 31) / 32) * t * o.batch * 4;
         if (o.op != "candidates")
-            logical_bytes =
-                keys.size() + configs.size() +
-                (o.op == "sample"
-                     ? positions.size() + output.size()
-                     : drafts.size() + extents.size() + 2 * lengths.size() + anchors.size() +
-                           licensed.size() + licensed_counts.size() + accepted.size());
+            logical_bytes = keys.size() + configs.size() +
+                            (o.op == "sample" ? positions.size() + output.size()
+                                              : drafts.size() + extents.size() + lengths.size() +
+                                                    licensed.size() + licensed_counts.size());
     }
 
     void extract(int rank, CudaExecutionView cuda) {
@@ -205,10 +209,9 @@ struct Fixture {
                                               cuda);
         } else {
             Tensor e(extents.span(), DType::I32, {b}), l(lengths.span(), DType::I32, {b}),
-                a(anchors.span(), DType::I32, {b}), tokens(licensed.span(), DType::I32, {t, b}),
-                n(licensed_counts.span(), DType::I32, {b}), ac(accepted.span(), DType::I32, {b});
-            ops::accept_vocabulary_candidates(key_view, cfg, draft_view, e, l, a, tokens, n, ac,
-                                              cuda);
+                tokens(licensed.span(), DType::I32, {t, b}),
+                n(licensed_counts.span(), DType::I32, {b});
+            ops::accept_vocabulary_candidates(key_view, cfg, draft_view, e, l, tokens, n, cuda);
         }
     }
 

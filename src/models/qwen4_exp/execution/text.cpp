@@ -25,11 +25,13 @@ TextRun::TextRun(const Parameters& p, TextExecution execution, BatchView batch, 
         throw std::invalid_argument("invalid Qwen4Exp sequence/step window");
 }
 
-void TextRun::stem(std::optional<VisualEmbeddingView> visual) {
+void TextRun::stem(std::optional<models::vision::EmbeddingView> visual) {
     const auto& p = parameters_.text;
     ops::embedding(batch_.ids.view({batch_.tokens * batch_.batch}), p.embedding, roots_.input,
                    cuda_);
-    if (visual) ops::scatter(visual->features, visual->columns, roots_.input, cuda_);
+    if (visual)
+        for (const auto& slice : visual->slices)
+            ops::scatter(slice.features, slice.columns, roots_.input, cuda_);
     ops::hc_expand_norm(roots_.input, p.layers.front().attention_hc.norm,
                         parameters_.profile->config.text.norm_epsilon, roots_.residual,
                         roots_.normalized, cuda_);
@@ -102,6 +104,8 @@ void TextRun::finish_mixer(std::uint32_t i) {
     const auto& config = parameters_.profile->config.text;
     const auto& p      = parameters_.text.layers[i];
     auto& arena        = execution_.workspace;
+    if (i == 0 && execution_.first_collective_ready)
+        execution_.first_collective_ready->wait(cuda_.stream());
     if (execution_.parallel) execution_.parallel->sum(roots_.output, cuda_);
     ops::hc_combine_norm(roots_.residual, roots_.output, roots_.injection, p.moe_hc.norm,
                          config.norm_epsilon, roots_.residual, roots_.normalized, cuda_);
@@ -156,7 +160,7 @@ void TextRun::consume_ple(const Tensor& embedding) {
         roots_.residual, roots_.normalized, execution_.workspace, cuda_);
 }
 
-void TextRun::finish(TextOutputs output) {
+void TextRun::finish(TextOutputs output, Tensor logits) {
     const auto& p = parameters_.text;
     if (output.conditioning.data)
         copy_bytes_async({output.conditioning.data, output.conditioning.bytes(), cuda_.device()},
@@ -164,6 +168,10 @@ void TextRun::finish(TextOutputs output) {
     auto sample = output.sample.view(
         {dimension(parameters_.profile->config.text.hidden), batch_.tokens * batch_.batch});
     ops::hc_mix(roots_.normalized, p.final_hc.mix, execution_.workspace, sample, cuda_);
+    if (logits.data) {
+        logits = logits.view({logits.ne[0], batch_.tokens * batch_.batch});
+        project_head(sample, p.head, logits, execution_.workspace, cuda_);
+    }
 }
 
 void project_head(const Tensor& sample, const LinearParameters& head, Tensor& logits,

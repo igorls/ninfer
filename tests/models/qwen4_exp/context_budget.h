@@ -3,6 +3,7 @@
 #include "artifact/reader.h"
 #include "core/device.h"
 #include "models/qwen4_exp/definition.h"
+#include "models/qwen4_exp/load.h"
 #include "models/qwen4_exp/execution/profile.h"
 #include "models/qwen4_exp/program/planning.h"
 
@@ -15,7 +16,9 @@ inline runtime::ContextCapacityPlan context_capacity_plan(const EngineOptions& o
     const auto definition = models::qwen4_exp::read_definition(reader, models::load_options(options));
     const auto profile = models::qwen4_exp::execution::describe_model(*definition);
     DeviceContext device(options.device);
-    return models::qwen4_exp::describe_execution_capacity(profile, options, device);
+    const auto load = models::qwen4_exp::resolve_load(reader, definition, device.device());
+    return models::qwen4_exp::describe_execution_capacity(
+        profile, load.ple_table_owner()->geometry(), options, device);
 }
 
 // Retention competes with complete public execution working sets in the same physical pool.

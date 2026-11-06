@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ninfer/kv_cache_format.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -13,26 +15,15 @@ enum class ContextCapacityMode : std::uint8_t {
     Automatic,
 };
 
-enum class KvCacheStorage : std::uint8_t {
-    BFloat16,
-    Int8Group64,
-    Fp8E4M3Row256,
-    Nvfp4Group16,
-    Fp8KeyNvfp4Value,
-};
-
-// Logical Vision regions within existing backing; these are subsets of owned allocations.
-// Handoff offsets refer to persistent or workspace backing as indicated.
-struct VisionWorkspaceMemorySummary {
-    bool handoff_in_persistent            = false;
-    std::uint32_t aggregate_prompt_tokens = 0;
-    std::uint32_t max_item_tokens         = 0;
-    std::size_t general_capacity_bytes    = 0;
-    std::size_t encode_required_bytes     = 0;
-    std::size_t handoff_offset_bytes      = 0;
-    std::size_t handoff_capacity_bytes    = 0;
-    std::size_t handoff_active_bytes      = 0;
-    std::size_t handoff_peak_bytes        = 0;
+// Vision fields describe subsets of the instance's owned allocations.
+struct VisionMemorySummary {
+    std::size_t budget_bytes            = 0;
+    std::uint32_t max_window_features   = 0;
+    std::size_t encoder_workspace_bytes = 0;
+    std::size_t output_capacity_bytes   = 0;
+    std::size_t input_staging_bytes     = 0;
+    std::size_t output_active_bytes     = 0;
+    std::size_t output_peak_bytes       = 0;
 };
 
 struct MoeMemorySummary {
@@ -58,10 +49,13 @@ struct MoeMemorySummary {
 
 struct GraphMemorySummary {
     std::size_t rebuild_estimate_bytes = 0;
-    // Signed free-memory deltas; calibration holds its backing while releasing graphs.
+    // Signed physical-capacity deltas. Rebuild estimates come from an actual second capture.
+    std::int64_t warmup_increment_bytes      = 0;
     std::int64_t preparation_increment_bytes = 0;
+    std::size_t preparation_peak_bytes       = 0;
     std::int64_t calibration_increment_bytes = 0;
-    std::int64_t calibration_retained_bytes  = 0;
+    std::size_t calibration_peak_bytes       = 0;
+    std::int64_t rebuild_increment_bytes     = 0;
 };
 
 // Owned allocations. Registered ranges, tensor views and layout subregions are not allocations.
@@ -107,7 +101,7 @@ struct PleReadStats {
 struct RankMemoryUsage {
     MemoryAllocations allocations;
     WorkspaceUsage workspace;
-    std::optional<VisionWorkspaceMemorySummary> vision;
+    std::optional<VisionMemorySummary> vision;
     std::optional<MoeMemorySummary> experts;
     std::optional<PleReadStats> ple;
 };
@@ -128,9 +122,11 @@ struct RankMemoryBudget {
     std::uint64_t context_control_budget_bytes      = 0;
     std::uint64_t available_after_weights_bytes     = 0;
     std::uint64_t available_after_startup_bytes     = 0;
-    std::uint64_t headroom_bytes                    = 0;
-    std::uint64_t planned_slack_bytes               = 0;
-    std::int64_t retained_bytes                     = 0;
+    // Planning headroom may be consumed during startup; Host reservation must remain available.
+    std::uint64_t headroom_bytes         = 0;
+    std::uint64_t host_reservation_bytes = 0;
+    std::uint64_t planned_slack_bytes    = 0;
+    std::int64_t retained_bytes          = 0;
     std::optional<GraphMemorySummary> graphs;
     std::uint64_t desktop_reserve_bytes = 0;
     std::uint32_t requested_concurrency = 0, effective_concurrency = 0;
@@ -149,11 +145,14 @@ struct ContextPoolCapacity {
 // These disjoint occupancies account for the complete backing. Relocation destinations are
 // reserved until publication; the old records remain live or pending retirement until then.
 struct ContextPoolUsage {
-    std::uint32_t rank                     = 0;
-    ContextMemoryDomain domain             = ContextMemoryDomain::Device;
-    std::uint64_t capacity_bytes           = 0;
-    std::uint64_t block_bytes              = 0;
-    std::uint64_t live_bytes               = 0;
+    std::uint32_t rank           = 0;
+    ContextMemoryDomain domain   = ContextMemoryDomain::Device;
+    std::uint64_t capacity_bytes = 0;
+    std::uint64_t block_bytes    = 0;
+    std::uint64_t live_bytes     = 0;
+    // Disjoint purposes of live storage. Request references take precedence over cache owners.
+    std::uint64_t in_use_bytes             = 0;
+    std::uint64_t cached_bytes             = 0;
     std::uint64_t reserved_bytes           = 0;
     std::uint64_t pending_retirement_bytes = 0;
     // Relocation is a subset of reserved bytes; future reservations promise positions
@@ -173,6 +172,27 @@ struct ContextMetadataUsage {
     std::uint64_t allocated_bytes                                                    = 0;
     std::uint64_t reserved_bytes                                                     = 0;
     friend bool operator==(const ContextMetadataUsage&, const ContextMetadataUsage&) = default;
+};
+
+// Materialized physical records, counted once per replica independently of logical references.
+// Pool reservations, padding and free capacity remain in ContextPoolUsage.
+struct ContextResourceUsage {
+    std::uint32_t rank         = 0;
+    ContextMemoryDomain domain = ContextMemoryDomain::Device;
+    std::optional<std::uint16_t> history_pool;
+    std::uint64_t live_records = 0, live_bytes = 0;
+    std::uint64_t in_use_bytes = 0, cached_bytes = 0;
+    std::uint64_t pending_retirement_records = 0, pending_retirement_bytes = 0;
+};
+
+struct PrefixCacheCounters {
+    std::uint64_t retained = 0, published = 0, released = 0, reclaimed = 0;
+    std::uint64_t adopted = 0, reused_tokens = 0;
+};
+
+// Advertised checkpoint identities, independently of their physical replica/reference count.
+struct PrefixCacheStatistics {
+    PrefixCacheCounters input_replay, long_anchor, shared_prefix, continuation;
 };
 
 struct MediaCacheSummary {

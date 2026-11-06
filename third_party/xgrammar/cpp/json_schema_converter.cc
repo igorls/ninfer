@@ -179,6 +179,14 @@ bool HasProductiveRoot(const Grammar& grammar) {
       const auto expr = grammar->GetGrammarExpr(i);
       bool productive = true;
       switch (expr.type) {
+        case Type::kByteFSM: {
+          const auto fsm = grammar->GetByteFSM(expr);
+          std::unordered_set<int> reachable;
+          fsm.GetReachableStates(&reachable);
+          productive = std::any_of(fsm.GetEnds().begin(), fsm.GetEnds().end(),
+                                   [&](int end) { return reachable.count(end) != 0; });
+          break;
+        }
         case Type::kRuleRef:
           productive = rules[expr[0]];
           break;
@@ -2310,7 +2318,7 @@ int32_t JSONSchemaConverter::ExcludingString(
     XGRAMMAR_CHECK(filtered.IsOk());
     fsm = std::move(filtered).Unwrap();
   }
-  return AddScalarStringFSM(builder_, fsm, rule_name, close_json_string, !excluded_keys.empty());
+  return AddScalarStringFSM(builder_, fsm, rule_name, close_json_string);
 }
 
 int32_t JSONSchemaConverter::GenerateInteger(
@@ -3495,6 +3503,14 @@ std::optional<std::string> JSONSchemaConverter::JSONFormatToRegexPattern(
 
 namespace {
 
+bool LiteralParameterFormat(JSONFormat format) {
+  return format == JSONFormat::kQwenXML || format == JSONFormat::kGlmXML;
+}
+
+std::string RawParameterEnd(JSONFormat format) {
+  return format == JSONFormat::kQwenXML ? "\n</parameter>" : "</arg_value>";
+}
+
 constexpr const char* kStringCacheKey = "{\"type\":\"string\"}";
 constexpr const char* kObjectCacheKey = "{\"type\":\"object\"}";
 
@@ -3644,7 +3660,7 @@ std::string XMLToolCallingConverter::XMLValue(const std::string& json_value) con
   if (error.empty() && value.is<std::string>()) {
     return value.get<std::string>();
   }
-  return json_format_ == JSONFormat::kQwenXML ? tool_json_literal(json_value) : json_value;
+  return LiteralParameterFormat(json_format_) ? tool_json_literal(json_value) : json_value;
 }
 
 int32_t XMLToolCallingConverter::XMLKeySuffix(const std::optional<std::string>& pinned_type) {
@@ -3680,9 +3696,9 @@ void XMLToolCallingConverter::AddBasicRules() {
   // The outer part, xml format, is at level 1.
   nested_object_level_ = 1;
   // The argument suffix is matched by the enclosing property rule, outside the raw body.
-  if (json_format_ == JSONFormat::kQwenXML) {
+  if (LiteralParameterFormat(json_format_)) {
     auto saved = excludes_;
-    excludes_.push_back("\n</parameter>");
+    excludes_.push_back(RawParameterEnd(json_format_));
     builder_.UpdateRuleBody(kXMLString, ExcludingString(R"([^\uD800-\uDFFF]*)", kXMLString, false));
     excludes_ = std::move(saved);
   } else {
@@ -3709,7 +3725,7 @@ void XMLToolCallingConverter::AddBasicRules() {
   // Add XML variable name rule
   builder_.UpdateRuleBody(
       kXMLVariableName,
-      json_format_ == JSONFormat::kQwenXML
+      LiteralParameterFormat(json_format_)
           ? ExcludingString(R"([^<>\r\n\uD800-\uDFFF]+)", kXMLVariableName, false)
       : !excludes_.empty()
           ? ExcludingString("[a-zA-Z_][a-zA-Z0-9_]*", kXMLVariableName, false)
@@ -3745,7 +3761,7 @@ int32_t XMLToolCallingConverter::GetKeyPatternExcluding(
 
 std::string XMLToolCallingConverter::NextSeparator(bool is_end) {
   if (nested_object_level_ <= 1) {
-    if (json_format_ == JSONFormat::kQwenXML && !any_whitespace_) return "\"\"";
+    if (LiteralParameterFormat(json_format_) && !any_whitespace_) return "\"\"";
     return GetWhitespacePattern();
   }
   return JSONSchemaConverter::NextSeparator(is_end);
@@ -3753,7 +3769,7 @@ std::string XMLToolCallingConverter::NextSeparator(bool is_end) {
 
 int32_t XMLToolCallingConverter::GenerateInteger(const IntegerSpec& spec,
                                                  const std::string& rule_name) {
-  if (json_format_ != JSONFormat::kQwenXML)
+  if (!LiteralParameterFormat(json_format_))
     return JSONSchemaConverter::GenerateInteger(spec, rule_name);
   // Protocol adapters materialize argument integers in their exact signed 64-bit domain.
   auto bounded = spec;
@@ -3764,7 +3780,7 @@ int32_t XMLToolCallingConverter::GenerateInteger(const IntegerSpec& spec,
 
 int32_t XMLToolCallingConverter::GenerateNumber(const NumberSpec& spec,
                                                 const std::string& rule_name) {
-  if (json_format_ == JSONFormat::kQwenXML && !spec.range.lower && !spec.range.upper) {
+  if (LiteralParameterFormat(json_format_) && !spec.range.lower && !spec.range.upper) {
     // Fixed notation for common values; normalized scientific notation covers the rest of
     // finite binary64. The upper exponent uses the largest round-trip decimal significand.
     // Arbitrary exponents such as 1e999 are valid JSON syntax but cannot be published as a
@@ -3804,13 +3820,13 @@ int32_t XMLToolCallingConverter::GenerateString(
     const StringSpec& spec, const std::string& rule_name
 ) {
   if (nested_object_level_ <= 1) {
-    if (json_format_ == JSONFormat::kQwenXML) {
+    if (LiteralParameterFormat(json_format_)) {
       if (!spec.extra_patterns.empty() ||
           (spec.pattern && (spec.min_length != 0 || spec.max_length != -1))) {
         auto patterns = spec.extra_patterns;
         if (spec.pattern) patterns.insert(patterns.begin(), *spec.pattern);
         auto excluded = excludes_;
-        excluded.push_back("\n</parameter>");
+        excluded.push_back(RawParameterEnd(json_format_));
         return AddSubGrammar(
             StringConstraints(patterns, spec.min_length, spec.max_length, excluded, false));
       }
@@ -3818,7 +3834,7 @@ int32_t XMLToolCallingConverter::GenerateString(
           : R"([^\uD800-\uDFFF])" + std::string("{") + std::to_string(spec.min_length) + "," +
               (spec.max_length < 0 ? "" : std::to_string(spec.max_length)) + "}";
       auto saved = excludes_;
-      excludes_.push_back("\n</parameter>");
+      excludes_.push_back(RawParameterEnd(json_format_));
       const auto result = ExcludingString(regex, rule_name, false);
       excludes_ = std::move(saved);
       return result;
@@ -3899,11 +3915,11 @@ int32_t XMLToolCallingConverter::GenerateConst(
     }
   }
   if (nested_object_level_ <= 1) {
-    if (json_format_ == JSONFormat::kQwenXML) {
+    if (LiteralParameterFormat(json_format_)) {
       picojson::value value;
       XGRAMMAR_CHECK(ParseJSON(value, spec.json_value).empty());
       if (value.is<std::string>() &&
-          value.get<std::string>().find("\n</parameter>") != std::string::npos)
+          value.get<std::string>().find(RawParameterEnd(json_format_)) != std::string::npos)
         return Unsatisfiable();
     }
     if (!IsAllowedJSONLiteral(spec.json_value, /*raw_string=*/true)) {
@@ -3911,7 +3927,7 @@ int32_t XMLToolCallingConverter::GenerateConst(
     }
     return ByteString(XMLValue(spec.json_value));
   }
-  if (json_format_ == JSONFormat::kQwenXML) return ByteString(tool_json_literal(spec.json_value));
+  if (LiteralParameterFormat(json_format_)) return ByteString(tool_json_literal(spec.json_value));
   return JSONSchemaConverter::GenerateConst(spec, rule_name);
 }
 
@@ -3939,12 +3955,12 @@ int32_t XMLToolCallingConverter::FormatPropertyKey(
     if (json_format_ == JSONFormat::kKimiK3XML) {
       pinned_type = GetRenderedJSONType(schema);
     }
-    if (!IsAllowedString(EscapeAttrValue(key))) {
+    if (!IsAllowedString(LiteralParameterFormat(json_format_) ? key : EscapeAttrValue(key))) {
       return Unsatisfiable();
     }
     return Sequence(
         {ByteString(xml_wrapper_.key_wrapper_prefix +
-                    (json_format_ == JSONFormat::kQwenXML ? key : EscapeAttrValue(key))),
+                    (LiteralParameterFormat(json_format_) ? key : EscapeAttrValue(key))),
          XMLKeySuffix(pinned_type)}
     );
   }
@@ -3959,7 +3975,7 @@ int32_t XMLToolCallingConverter::FormatProperty(
     const SchemaSpecPtr& schema
 ) {
   if (nested_object_level_ <= 1) {
-    if (json_format_ == JSONFormat::kQwenXML && !any_whitespace_) {
+    if (LiteralParameterFormat(json_format_) && !any_whitespace_) {
       return Sequence({FormatPropertyKey(key, schema), ByteString(xml_wrapper_.value_wrapper_prefix),
                        RuleRef(value_rule_id), ByteString(xml_wrapper_.parameter_suffix)});
     }
@@ -4000,7 +4016,7 @@ int32_t XMLToolCallingConverter::FormatOtherProperty(
     const SchemaSpecPtr& schema
 ) {
   if (nested_object_level_ <= 1) {
-    if (json_format_ == JSONFormat::kQwenXML && !any_whitespace_) {
+    if (LiteralParameterFormat(json_format_) && !any_whitespace_) {
       return Sequence({ByteString(xml_wrapper_.key_wrapper_prefix), key_pattern_expr,
                        XMLKeySuffix(std::nullopt), ByteString(xml_wrapper_.value_wrapper_prefix),
                        RuleRef(value_rule_id), ByteString(xml_wrapper_.parameter_suffix)});
@@ -4059,7 +4075,7 @@ std::optional<int32_t> XMLToolCallingConverter::GetCache(const std::string& key)
   if (key.empty()) {
     return std::nullopt;
   }
-  if ((json_format_ == JSONFormat::kQwenXML || json_format_ == JSONFormat::kDeepSeekXML ||
+  if ((LiteralParameterFormat(json_format_) || json_format_ == JSONFormat::kDeepSeekXML ||
        json_format_ == JSONFormat::kDeepSeekV41XML) &&
       nested_object_level_ == 0 && key == "{}") {
     // Unconstrained tool arguments are an XML parameter list, not one parameter's raw value.

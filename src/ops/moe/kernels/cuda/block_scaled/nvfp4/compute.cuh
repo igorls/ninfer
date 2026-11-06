@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/platform.h"
 #include "ops/moe/kernels/cuda/block_scaled/nvfp4/launch.h"
 #include "ops/moe/kernels/cuda/block_scaled/output.cuh"
 #include "ops/moe/kernels/cuda/block_scaled/shared_down.cuh"

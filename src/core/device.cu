@@ -285,6 +285,14 @@ void CudaEventTimer::start() { CUDA_CHECK(cudaEventRecord(start_, stream_)); }
 
 void CudaEventTimer::record_stop() { CUDA_CHECK(cudaEventRecord(stop_, stream_)); }
 
+void CudaEventTimer::start_external() {
+    CUDA_CHECK(cudaEventRecordWithFlags(start_, stream_, cudaEventRecordExternal));
+}
+
+void CudaEventTimer::record_stop_external() {
+    CUDA_CHECK(cudaEventRecordWithFlags(stop_, stream_, cudaEventRecordExternal));
+}
+
 float CudaEventTimer::elapsed_ms() const {
     float ms = 0.0f;
     CUDA_CHECK(cudaEventElapsedTime(&ms, start_, stop_));
@@ -345,6 +353,14 @@ void CudaCompletionEvent::record_external(cudaStream_t stream) {
     if (status != cudaSuccess) {
         throw std::runtime_error(cuda_error_message("cudaEventRecordWithFlags failed", status));
     }
+}
+
+void CudaCompletionEvent::wait_external(cudaStream_t stream) const {
+    if (event_ == nullptr || stream == nullptr)
+        throw std::logic_error("CUDA completion event is not waitable");
+    const auto status = cudaStreamWaitEvent(stream, event_, cudaEventWaitExternal);
+    if (status != cudaSuccess)
+        throw std::runtime_error(cuda_error_message("cudaStreamWaitEvent external failed", status));
 }
 
 bool CudaCompletionEvent::ready() const {

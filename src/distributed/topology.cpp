@@ -40,16 +40,18 @@ void ExecutionTopology::validate(const DeploymentOptions& deployment) const {
             });
         if (actual.local_rank != static_cast<std::uint32_t>(local))
             throw std::invalid_argument("topology has an invalid local rank");
-        for (const auto coordinate : {actual.tp, actual.ep, actual.dp, actual.pp})
+        for (const auto coordinate : {actual.tp, actual.ep, actual.dp, actual.pp, actual.adp})
             if (!coordinate.size || coordinate.rank >= coordinate.size)
                 throw std::invalid_argument("invalid parallel coordinate");
         const auto& p = deployment.parallel;
         if (actual.tp.size != p.tp || actual.ep.size != p.ep || actual.dp.size != p.dp ||
-            actual.pp.size != p.pp)
+            actual.pp.size != p.pp || actual.adp.size != p.adp)
             throw std::invalid_argument("topology differs from requested parallel sizes");
     }
     std::set<GroupId> ids;
     for (const auto& g : groups) {
+        if (g.usage != GroupUsage::General && g.usage != GroupUsage::PeerExchange)
+            throw std::invalid_argument("invalid communication group usage");
         if (g.members.empty() || !ids.insert(g.id).second)
             throw std::invalid_argument("empty or duplicate communication group");
         std::set<RankId> members;
@@ -68,7 +70,8 @@ void ExecutionTopology::validate(const DeploymentOptions& deployment) const {
 
 std::string process_name(const RankIdentity& r) {
     return "ninfer:worker:dp" + std::to_string(r.dp.rank) + ":tp" + std::to_string(r.tp.rank) +
-           ":ep" + std::to_string(r.ep.rank) + ":pp" + std::to_string(r.pp.rank);
+           ":ep" + std::to_string(r.ep.rank) + ":pp" + std::to_string(r.pp.rank) + ":adp" +
+           std::to_string(r.adp.rank);
 }
 
 std::string rank_description(const RankIdentity& r) {
@@ -78,7 +81,7 @@ std::string rank_description(const RankIdentity& r) {
     return "node=" + std::to_string(r.node) + " rank=" + std::to_string(r.rank) +
            " local=" + std::to_string(r.local_rank) + " cuda=" + std::to_string(r.device) +
            " | TP=" + coordinate(r.tp) + " EP=" + coordinate(r.ep) + " DP=" + coordinate(r.dp) +
-           " PP=" + coordinate(r.pp);
+           " PP=" + coordinate(r.pp) + " ADP=" + coordinate(r.adp);
 }
 
 } // namespace ninfer::distributed

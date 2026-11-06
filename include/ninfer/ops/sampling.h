@@ -39,12 +39,11 @@ struct SamplingConfig {
     float frequency_penalty    = 0.0f;
     float repetition_penalty   = 1.0f;
     unsigned long long seed    = 0;
-    std::int32_t* token_counts = nullptr; // device [token_domain] i32, or null
+    const std::int32_t* token_counts = nullptr; // device [token_domain] i32, or null
     SamplingMask mask;
     const std::int32_t* prompt_presence = nullptr; // immutable prompt-membership bitset
     const std::int32_t* history_overlay = nullptr; // read-only provisional prefix, or null
     std::int32_t history_overlay_size   = 0;
-    bool commit_token_counts            = true; // false: caller commits only the licensed output
 };
 
 // Caller-owned transient capacity for every parallel sampling-lane count in the inclusive
@@ -90,15 +89,12 @@ struct SamplingConfig {
  *
  * Row b uses counter-based RNG key
  * (configs[b].seed,logical_positions[b],purpose), without mutable RNG state or dependence on the
- * compact row index. In every mode the selected token atomically increments
- * configs[b].token_counts when it is non-null and commit_token_counts is true.
- * The overlay contributes to generated counts for all three penalties. Prompt membership affects
- * only repetition penalty. A repetition penalty must be finite and positive; 1 is neutral.
- * Read-only count arrays may alias across verification columns; a mutable array must belong to
- * exactly one row. Overlay and prompt bitsets are read-only and must remain live through execution.
- * `out` must not overlap logits, configs, logical_positions, or any
- * token-count array. The Op writes all of out, uses caller-owned transient storage reported by
- * sampling_workspace_capacity_bytes(), and has no other persistent-state side effect.
+ * compact row index. Counts, masks and all inputs remain read-only.
+ * The overlay contributes to all three penalties; prompt membership affects only repetition.
+ * A repetition penalty must be finite and positive; 1 is neutral. Overlays and prompt
+ * bitsets remain live through execution. The caller commits the final prefix with the
+ * count-update Op. `out` overlaps no input. The Op uses caller-owned workspace and has
+ * no persistent-state side effect.
  */
 void sample(const Tensor& logits, Tensor& out, std::int32_t token_domain,
             const SamplingConfig* configs, const Tensor& logical_positions, std::int32_t purpose,

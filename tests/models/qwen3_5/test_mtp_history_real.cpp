@@ -254,8 +254,8 @@ public:
         }
         work.inputs.push_back(input);
         if (purpose == q35::ForwardPurpose::Control) {
-            work.committed_tokens = {input.tokens};
-            work.sampling         = {{{}, false}};
+            work.control_last_tokens = {input.tokens.back()};
+            work.sampling            = {{{}, false}};
         }
         const auto hidden = native_.rank().resources.frame.spec.hidden;
         std::optional<runtime::ExecutionTicket> ticket;
@@ -410,7 +410,7 @@ public:
         auto& frame          = native.resources.frame;
         const int width      = operation.width;
         const int hidden     = frame.spec.hidden;
-        const auto main      = frame.input_view(width, kBatch);
+        const auto main      = frame.decode_view(width, kBatch);
         const auto target    = read<std::uint16_t>(main.hidden);
         const auto ids       = read<std::int32_t>(main.ids);
         const auto positions = read<std::int32_t>(main.cache_positions);
@@ -436,8 +436,7 @@ public:
         const auto rebuild = [&](std::array<std::uint32_t, 2> accepted, bool run_production) {
             if (!operation.speculative) return;
             HistoryInput expected;
-            expected.width =
-                static_cast<int>(*std::max_element(accepted.begin(), accepted.end()) - 1);
+            expected.width = kDrafts;
             expected.batch = kBatch;
             expected.lanes = {0, 1};
             expected.conditioning.resize(std::size_t(hidden) * expected.width * kBatch);
@@ -447,6 +446,7 @@ public:
             for (std::uint32_t lane = 0; lane < kBatch; ++lane) {
                 expected.counts.push_back(static_cast<int>(accepted[lane] - 1));
                 for (int i = 0; i < expected.width; ++i) {
+                    if (i >= expected.counts[lane]) continue;
                     const auto dst = lane * expected.width + i, src = lane * width + i;
                     std::copy_n(target.data() + std::size_t(src) * hidden, hidden,
                                 expected.conditioning.data() + std::size_t(dst) * hidden);
@@ -461,21 +461,17 @@ public:
                 operation.commit = q35::Commit{};
                 for (std::uint32_t lane = 0; lane < kBatch; ++lane) {
                     operation.commit->rows.push_back({accepted[lane], true, false});
-                    frame.host_commit->history_columns[lane] = expected.counts[lane];
+                    frame.host_commit->accepted_columns[lane] = accepted[lane];
                 }
-                CUDA_CHECK(cudaMemcpyAsync(frame.history_columns.data,
-                                           frame.host_commit->history_columns.data(),
+                CUDA_CHECK(cudaMemcpyAsync(frame.accepted_columns.data,
+                                           frame.host_commit->accepted_columns.data(),
                                            kBatch * sizeof(std::int32_t), cudaMemcpyHostToDevice,
                                            native_.device().stream()));
-                if (native.graphs)
-                    native.graphs->rebuild_mtp_history(kBatch, expected.width,
-                                                       native_.device().execution_view());
-                else
-                    native.rebuild_mtp_history(kBatch, expected.width);
+                native.rebuild_mtp_history(kBatch);
                 native_.device().synchronize();
-                if (expected.width) oracle_.compare_inputs(expected);
+                oracle_.compare_inputs(expected);
             }
-            if (expected.width) oracle_.history(expected);
+            oracle_.history(expected);
             for (std::uint32_t lane = 0; lane < kBatch; ++lane)
                 oracle_.compare(lane, rows_[lane].main_frontier + accepted[lane] - 1);
         };

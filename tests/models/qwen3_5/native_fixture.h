@@ -72,6 +72,7 @@ public:
     }
 
     void drain() { implementation.drain(); }
+    void wait_for_device() const { implementation.wait_for_device(); }
 
     [[nodiscard]] RankMemoryUsage observe_resources() const {
         return implementation.observe_resources();

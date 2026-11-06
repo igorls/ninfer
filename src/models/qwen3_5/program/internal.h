@@ -5,7 +5,7 @@
 #include "ninfer/ops/kv_cache_append.h"
 
 #include "models/common/context/transfer.h"
-#include "models/common/qwen/vision/prefill.h"
+#include "models/common/qwen/vision/vision.h"
 #include "models/qwen3_5/program/program.h"
 #include "models/qwen3_5/execution/parameters.h"
 #include "models/qwen3_5/program/resources.h"
@@ -29,8 +29,6 @@ struct Residency {
     runtime::SequenceId sequence;
     bool installed = false;
     bool penalties = false;
-    std::shared_ptr<const qwen::VisionExecutionInput> vision_input;
-    std::unique_ptr<qwen::VisionPrefillExecution> vision;
 };
 
 enum class ComputeStage : std::uint8_t {
@@ -56,7 +54,6 @@ struct ComputeOperation {
     std::uint32_t forward_offset = 0;
     std::uint32_t score_cursor   = 0;
     std::uint32_t score_count    = 0;
-    double vision_before         = 0.0;
     ComputeStage stage           = ComputeStage::Inputs;
     std::uint32_t decision_stage = 0;
     bool decision_requested      = false;
@@ -66,7 +63,6 @@ struct ComputeOperation {
     bool speculative             = false;
     bool row_finished            = false;
     bool graph_started           = false;
-    bool fused_decision          = false;
     bool projected               = false;
     std::array<std::uint32_t, kMaximumConcurrency> dead_positions{};
     std::optional<runtime::DecisionInput> decision;
@@ -76,6 +72,7 @@ struct ComputeOperation {
     std::vector<std::size_t> prompt_indices;
     bool feature_pending = false;
     GpuExecutionObservation gpu;
+    AttentionWorkCounters attention;
     std::optional<Tensor> input_embeddings;
     std::unique_ptr<execution::TextRun> text;
 
@@ -103,6 +100,7 @@ public:
     void discard(runtime::ExecutionTicket, runtime::CommandSequence);
     [[nodiscard]] std::optional<runtime::ExecutionEvent<ExecutionTypes>> poll();
     void drain();
+    void wait_for_device() const;
     [[nodiscard]] RankMemoryUsage observe_resources() const;
     [[nodiscard]] RankExecutionObservation retirement_observation() const noexcept;
     void reset_measurement_peaks() noexcept;
@@ -125,14 +123,17 @@ public:
     void run_dflash_draft(std::uint32_t batch, std::uint32_t minimum, std::uint32_t maximum);
     void project_decode(std::uint32_t batch, std::uint32_t width);
     void decide_decode(std::uint32_t batch, std::uint32_t width);
-    void readback_decode();
-    void initialize_graphs();
+    void readback_decode(std::uint32_t batch, bool speculative);
+    GraphPreparationSample initialize_graphs(GraphPreparationMode = GraphPreparationMode::Complete);
     void release_graphs();
     void append_draft_history(ComputeOperation&);
     void append_draft_history(std::uint32_t batch, ops::KVCacheAppendPrefixExecutionEnvelope);
     void commit_draft_history(ComputeOperation&);
     void align_mtp_history(ComputeOperation&);
-    void rebuild_mtp_history(std::uint32_t batch, std::uint32_t columns);
+    void rebuild_mtp_history(std::uint32_t batch);
+    void execute_mtp_commit(std::uint32_t batch, bool repair, bool counts,
+                            DecodeGraphSection* repair_section = nullptr,
+                            DecodeGraphSection* counts_section = nullptr);
     void request_decision(ComputeOperation&);
     void launch_decision(ComputeOperation&);
     void launch_commit(ComputeOperation&);
@@ -167,9 +168,7 @@ public:
     PinnedHostBuffer context_counts;
     PinnedHostBuffer context_prompt_presence;
     std::array<Residency, kMaximumConcurrency> residencies;
-    qwen::VisionHandoffState vision_handoff;
     std::size_t workspace_peak = 0;
-    std::size_t vision_peak    = 0;
     std::unique_ptr<ComputeOperation> compute;
     CudaCompletionEvent result_ready;
     CudaCompletionEvent drafts_ready;

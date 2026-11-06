@@ -9,14 +9,16 @@
 namespace ninfer::models::qwen4_exp::execution {
 namespace {
 void mtp_stem(const TextConfig& c, const MtpParameters& p, const Tensor& conditioning,
-              const BatchView& batch, std::optional<VisualEmbeddingView> visual, Tensor& residual,
-              Tensor& normalized, MemoryArena& arena, CudaExecutionView cuda) {
+              const BatchView& batch, std::optional<models::vision::EmbeddingView> visual,
+              Tensor& residual, Tensor& normalized, MemoryArena& arena, CudaExecutionView cuda) {
     const auto m = batch.tokens * batch.batch;
     const auto h = dimension(c.hidden), streams = dimension(c.hc.streams);
     auto scope = arena.scope();
     auto b     = workspace::mtp_stem(arena, c, m);
     ops::embedding(batch.ids.view({m}), p.embedding, b.embedding, cuda);
-    if (visual) ops::scatter(visual->features, visual->columns, b.embedding, cuda);
+    if (visual)
+        for (const auto& slice : visual->slices)
+            ops::scatter(slice.features, slice.columns, b.embedding, cuda);
     ops::rmsnorm(b.embedding, p.embedding_norm, c.norm_epsilon, true, b.normalized_embedding, cuda);
     ops::rmsnorm(conditioning.view({dimension(c.residual_width()), m}), p.hidden_norm,
                  c.norm_epsilon, true, b.normalized_hidden, cuda);
@@ -105,7 +107,7 @@ void mtp_forward(const TextConfig& c, const QsaConfig& qsa_config, const MtpPara
 void mtp_history(const TextConfig& c, const QsaConfig& qsa_config, const MtpParameters& p,
                  const Tensor& conditioning, const BatchView& batch,
                  const ops::QsaTailStateView& before, ops::QsaTailStateView after,
-                 ops::QsaCacheView cache, std::optional<VisualEmbeddingView> visual,
+                 ops::QsaCacheView cache, std::optional<models::vision::EmbeddingView> visual,
                  MemoryArena& arena, CudaExecutionView cuda) {
     auto scope = arena.scope();
     auto roots = workspace::history_roots(arena, c, batch.tokens * batch.batch);

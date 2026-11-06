@@ -1,8 +1,11 @@
 # Definitions and immutable weights are independent of execution ownership.
 add_library(ninfer_model_loading STATIC
   registry.cpp
+  common/frontend/resources.cpp
   common/bindings.cpp
   common/parallel.cpp
+  common/parallel_weights.cpp
+  common/vision/resources.cpp
   common/weights.cpp
   common/moe/weights.cpp
   qwen4_exp/ple/parameters.cpp
@@ -12,6 +15,16 @@ target_link_libraries(ninfer_model_loading PUBLIC ninfer_artifact ninfer_text ni
 
 # Coordinator-owned sessions, context directories and frontend policy.
 add_library(ninfer_model_control STATIC
+  common/token_input.cpp
+  common/frontend/chat_template.cpp
+  common/frontend/prompt.cpp
+  common/frontend/output_resources.cpp
+  common/frontend/output_session.cpp
+  common/frontend/tools.cpp
+  common/frontend/image_transform.cpp
+  common/frontend/media_cache.cpp
+  common/vision/window.cpp
+  common/frontend/digest.cpp
   common/context/directory.cpp
   common/context/directory/records.cpp
   common/context/directory/state.cpp
@@ -27,8 +40,19 @@ target_include_directories(ninfer_model_control PRIVATE
 target_include_directories(ninfer_model_control SYSTEM PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/xgrammar/3rdparty/picojson)
 
+if(NINFER_ENABLE_DISTRIBUTED)
+  target_sources(ninfer_model_control PRIVATE common/context/wire.cpp common/vision/input.cpp
+    common/parallel_wire.cpp)
+  target_link_libraries(ninfer_model_control PRIVATE ninfer_distributed_wire)
+endif()
+
 # Rank-owned storage, mathematical execution and graph preparation.
 add_library(ninfer_model_execution STATIC
+  common/graph.cpp
+  common/graph_preparation.cpp
+  common/vocabulary.cpp
+  common/vision/execution.cpp
+  common/parallel_execution.cpp
   common/context/storage.cpp
   common/context/transfer.cpp
   common/moe/execution.cpp

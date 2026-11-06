@@ -31,6 +31,7 @@ ResidencyBinding SessionImpl::context_binding(BindOperation& operation) {
             sequence.speculative.backend      = SpeculativeBackend::Mtp;
             sequence.speculative.enabled      = true;
             sequence.speculative.draft_window = shape.draft_tokens;
+            sequence.speculative.attempted_per_position.resize(shape.draft_tokens);
             sequence.speculative.accepted_per_position.resize(shape.draft_tokens);
         }
     }
@@ -63,27 +64,13 @@ ResidencyBinding SessionImpl::context_binding(BindOperation& operation) {
 
     const auto generated = std::span<const TokenId>(sequence.identity.tokens)
                                .subspan(sequence.request->summary.prompt_tokens);
-    ResidencyBinding result{member(sequence),
-                            sequence.request->sampling,
-                            {generated.begin(), generated.end()},
-                            sequence.request->vision};
-    if (result.sampling.repetition_penalty != 1.0F)
+    ResidencyBinding result{member(sequence), sequence.request->sampling, {}};
+    const auto& sampling = sequence.request->sampling;
+    if (sampling.presence_penalty || sampling.frequency_penalty || sampling.repetition_penalty != 1.0F)
+        result.counts =
+            count_builder.build(generated, definition->resources().text.public_token_count);
+    if (sampling.repetition_penalty != 1.0F)
         result.prompt_tokens = sequence.request->prompt.token_ids;
-    if (result.vision) {
-        auto suffix = std::make_shared<qwen::VisionExecutionInput>(*result.vision);
-        std::erase_if(suffix->plan.uses,
-                      [&](const auto& use) { return use.end <= operation.frontier; });
-        if (suffix->plan.uses.empty())
-            result.vision.reset();
-        else {
-            suffix->plan.max_merged_count = 0;
-            for (const auto& use : suffix->plan.uses)
-                suffix->plan.max_merged_count =
-                    std::max(suffix->plan.max_merged_count,
-                             suffix->plan.control->items[use.control_index].merged_count);
-            result.vision = std::move(suffix);
-        }
-    }
     operation.binding = std::move(binding);
     return result;
 }
@@ -99,12 +86,12 @@ void SessionImpl::prepare_binding_resources(context::ContextReservation& reserve
                               directory.pool(pool).histories().prepare_binding(
                                   prefix, prefix ? prefix->frontier() : 0,
                                   pool ? mtp_history_frontier(bind.peak) : bind.peak, bind.lane,
-                                  reserved.take_history(pool), bind.consume_source));
+                                  reserved.take(bind.history_targets[pool]), bind.consume_source));
     }
     if (bind.state_action == StateBindingAction::Move) return;
     const bool materialize = bind.state_action == StateBindingAction::Root ||
                              bind.state_action == StateBindingAction::Fork;
-    auto state_records     = reserved.take_state();
+    auto state_records     = reserved.take(bind.state_target);
     const auto destination = materialize ? states.reserve_destination(std::move(state_records))
                                          : states.reserve_logical_destination(state_records);
     if (!destination) throw std::logic_error("binding lost its State metadata reservation");
@@ -127,14 +114,23 @@ void SessionImpl::prepare_pause_resources(context::ContextReservation& targets) 
     sequence.recovery_peak   = 0;
     settle(sequence);
     if (sequence.phase == Phase::Replay) sequence.phase = sequence.resume_phase;
-    if (pause.save_snapshot)
+    if (pause.action.kind == runtime::PauseKind::ReleaseAndReplay) {
+        clear(sequence);
+    } else {
         pause.paused->snapshot =
             detach(sequence, runtime::CheckpointRole::Continuation, std::move(pause.checkpoint));
-    if (!pause.paused->snapshot) clear(sequence);
+        if (!pause.paused->snapshot)
+            throw std::logic_error("prepared pause lost its checkpoint reservation");
+        checkpoints.at(*pause.paused->snapshot)
+            .snapshot.set_use(context::ContextUse::Request,
+                              pause.action.kind == runtime::PauseKind::HostSnapshot
+                                  ? context::ContextMemory::Host
+                                  : context::ContextMemory::Device);
+    }
     pause.paused->sequence = std::move(sequences[pause.lane]);
-    if (pause.paused->snapshot) {
+    if (pause.paused->snapshot && pause.action.kind == runtime::PauseKind::HostSnapshot) {
         const auto plan = demotion({&*pause.paused->snapshot, 1});
-        if (plan && !prepare_demotion(operation->migration, *plan, targets))
+        if (plan && !prepare_demotion(operation->migration, *plan, targets, pause.targets))
             throw std::logic_error("prepared pause lost its reserved Host targets");
     }
 }
@@ -153,7 +149,7 @@ void SessionImpl::resume_context(context::ContextReservation targets) {
     } else if (std::holds_alternative<PauseOperation>(operation->action)) {
         prepare_pause_resources(targets);
     } else if (const auto* demote = std::get_if<DemoteOperation>(&operation->action)) {
-        if (!prepare_demotion(operation->migration, *demote->plan, targets))
+        if (!prepare_demotion(operation->migration, *demote->plan, targets, demote->targets))
             throw std::logic_error("reserved demotion changed during Context maintenance");
     } else {
         throw std::logic_error("Context maintenance has no continuation");
@@ -183,12 +179,17 @@ void SessionImpl::submit_context() {
         }
         Work work;
         transaction.final_batch = true;
+        std::vector<context::ContextActionBatchSource> sources;
+        sources.reserve(plan.context.ranks.size());
         for (const auto& rank : plan.context.ranks) {
             const auto& actions = transaction.migration.actions(rank.rank);
             auto& cursor        = transaction.cursors[rank.rank];
-            auto batch          = context::take_action_batch(actions, cursor);
-            if (!batch.empty()) work.actions.emplace(rank.rank, std::move(batch));
-            transaction.final_batch &= cursor.complete(actions);
+            sources.push_back({rank.rank, &actions, &cursor});
+        }
+        auto batches = context::take_action_batches(sources);
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            if (!batches[i].empty()) work.actions.emplace(sources[i].rank, std::move(batches[i]));
+            transaction.final_batch &= sources[i].cursor->complete(*sources[i].actions);
         }
         work.operation = transaction.final_batch ? std::move(transaction.residency) : ContextWork{};
         transaction.ticket = executor->submit(std::move(transaction.reservation), std::move(work));

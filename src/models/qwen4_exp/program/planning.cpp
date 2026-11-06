@@ -85,15 +85,7 @@ ExecutionPlan physical_plan(std::shared_ptr<const execution::ModelProfile> profi
                             DeviceContext& device, const moe::Plan* schedule) {
     ExecutionPlan out;
     out.profile    = std::move(profile);
-    out.shape      = {o.max_context,
-                      o.max_concurrency,
-                      o.prefill_chunk,
-                      o.speculative.draft_tokens,
-                      o.kv_cache,
-                      o.purpose,
-                      o.context_cache.enabled,
-                      o.use_cuda_graph,
-                      o.observability.gpu_timing};
+    out.shape      = describe_execution_shape(*out.profile, o);
     out.persistent = persistent(*out.profile, o);
     out.workspace  = execution::plan_workspace(*out.profile, o, o.prefill_chunk,
                                                device.multiprocessor_count(), schedule);
@@ -111,29 +103,20 @@ ExecutionPlan physical_plan(std::shared_ptr<const execution::ModelProfile> profi
             ? 0
             : context::host_context_capacity(o.context_cache.host_capacity_bytes,
                                              out.persistent.state.images.image_bytes);
-    // Keep all per-call metadata in the pinned ingress as well as input IDs/positions.
-    out.pinned_io_bytes = out.persistent.buffers.batch.count_slots.region.offset +
-                          out.persistent.buffers.batch.count_slots.region.bytes -
-                          out.persistent.buffers.batch.ids.region.offset;
     if (const auto& trace = out.persistent.buffers.route_trace)
         out.pinned_trace_bytes = trace->region.bytes +
             10ULL * o.speculative.draft_tokens * o.max_concurrency * sizeof(std::int32_t);
-    if (out.persistent.buffers.mtp)
-        out.pinned_mtp_bytes =
-            out.persistent.buffers.mtp->ingress.bytes +
+    out.pinned_io_bytes = out.persistent.buffers.host_region.bytes;
+    if (out.persistent.buffers.mtp && out.profile->ple_placement == ple::Placement::Disk)
+        out.pinned_ple_handoff_bytes =
             2ULL * o.speculative.draft_tokens * o.max_concurrency * sizeof(TokenId);
     if (out.persistent.buffers.mtp && out.profile->ple_placement == ple::Placement::Device)
         out.pinned_draft_bytes =
             (o.speculative.draft_tokens + 1) * o.max_concurrency * sizeof(TokenId);
     if (out.persistent.buffers.sampled_ids) {
-        out.pinned_sampling_bytes =
-            o.max_concurrency *
-            (sizeof(ops::SamplingConfig) + sizeof(std::int32_t) +
-             (o.speculative.draft_tokens + 1) * ((out.profile->public_tokens + 31) / 32) *
-                 sizeof(std::uint32_t));
-        const auto& buffers = out.persistent.buffers;
-        const auto end =
-            buffers.accepted_drafts ? *buffers.accepted_drafts : *buffers.output_counts;
+        out.pinned_sampling_bytes = out.persistent.buffers.grammar_masks->region.bytes;
+        const auto& buffers       = out.persistent.buffers;
+        const auto end            = *buffers.output_counts;
         out.pinned_output_bytes =
             end.region.offset + end.region.bytes - buffers.sampled_ids->region.offset;
     }
@@ -144,8 +127,23 @@ ExecutionPlan physical_plan(std::shared_ptr<const execution::ModelProfile> profi
 }
 } // namespace
 
+ExecutionShape describe_execution_shape(const execution::ModelProfile& profile,
+                                        const EngineOptions& supplied) {
+    const auto o = options(profile, supplied);
+    return {o.max_context,
+            o.max_concurrency,
+            o.prefill_chunk,
+            o.speculative.draft_tokens,
+            o.kv_cache,
+            o.purpose,
+            o.context_cache.enabled,
+            o.use_cuda_graph,
+            o.observability.gpu_timing};
+}
+
 std::size_t ExecutionPlan::device_bytes() const {
     return capacity.device_bytes + persistent.bytes + workspace.bytes + ple_upload.device_bytes +
+           (workspace.vision ? workspace.vision->output_bytes : 0) +
            (moe ? moe->description().device_bytes : 0);
 }
 
@@ -181,9 +179,10 @@ std::size_t ExecutionPlan::host_reservation_bytes() const {
         moe ? moe->description().bridge_pinned_bytes + moe->description().cpu_workspace_bytes : 0;
     return host_context_bytes + pinned_draft_bytes + ple_prepare_bytes +
            ple_upload.ordinary_host_bytes + ple_upload.pinned_host_bytes + pinned_io_bytes +
-           pinned_output_bytes + pinned_sampling_bytes + pinned_mtp_bytes + pinned_context_bytes() +
-           pinned_aux_bytes() + pinned_context_counts_bytes() + pinned_trace_bytes + pinned_score_hidden_bytes() +
-           (persistent.readout ? persistent.readout->host_bytes : 0) + expert;
+           pinned_output_bytes + pinned_sampling_bytes + pinned_ple_handoff_bytes +
+           pinned_context_bytes() + pinned_aux_bytes() + pinned_context_counts_bytes() + expert + pinned_trace_bytes + pinned_score_hidden_bytes() +
+            (persistent.readout ? persistent.readout->host_bytes : 0) +
+           (workspace.vision ? workspace.vision->encoder.host_staging_bytes : 0);
 }
 
 std::size_t ExecutionPlan::device_reservation_bytes() const {
@@ -207,20 +206,24 @@ runtime::ContextCapacityPlan capacity_plan(const ExecutionPlan& base, const Engi
         set.records.push_back({geometry.spec_classes[0], states});
         set.records.push_back({geometry.spec_classes[1], main});
         if (base.persistent.mtp) set.records.push_back({geometry.spec_classes[2], mtp});
-        plan.working_sets.push_back(std::move(set));
+        return set;
     };
     const auto pages = [](std::uint64_t tokens) {
         return static_cast<std::uint32_t>((tokens + 63) / 64);
     };
-    work("maximum context", 1, pages(o.max_context), pages(o.max_context ? o.max_context - 1 : 0));
+    auto maximum   = work("maximum context", 1, pages(o.max_context),
+                          pages(o.max_context ? o.max_context - 1 : 0));
+    plan.reference = {o.max_context, 1, geometry.required_bytes(maximum.records)};
+    plan.working_sets.push_back(std::move(maximum));
     if (o.clamp_concurrency_to_pool)
-        work("complete concurrent contexts", o.max_concurrency,
+        plan.working_sets.push_back(work("complete concurrent contexts", o.max_concurrency,
              o.max_concurrency * pages(o.max_context),
-             o.max_concurrency * pages(o.max_context ? o.max_context - 1 : 0));
+             o.max_concurrency * pages(o.max_context ? o.max_context - 1 : 0)));
     const auto short_tokens = std::min<std::uint64_t>(
         o.max_context, std::uint64_t(o.prefill_chunk) + o.speculative.draft_tokens + 1);
-    work("concurrent requests", o.max_concurrency, o.max_concurrency * pages(short_tokens),
-         o.max_concurrency * pages(short_tokens ? short_tokens - 1 : 0));
+    plan.working_sets.push_back(
+        work("concurrent requests", o.max_concurrency, o.max_concurrency * pages(short_tokens),
+             o.max_concurrency * pages(short_tokens ? short_tokens - 1 : 0)));
     plan.fixed_device_bytes = base.device_reservation_bytes();
     plan.fixed_host_bytes   = base.host_reservation_bytes();
     plan.metadata           = session_metadata_plan(base, geometry);
@@ -235,11 +238,10 @@ std::optional<ExecutionPlan> plan_execution(std::shared_ptr<const execution::Mod
                                             std::shared_ptr<const moe::Plan> prototype,
                                             bool control_owner, std::size_t available_host_bytes) {
     if (!profile) throw std::invalid_argument("execution planning requires a model profile");
-    const auto o = options(*profile, supplied);
-    auto out     = physical_plan(std::move(profile), table, o, device, prototype.get());
-    auto budget  = capacity_plan(out, o);
-    auto policy  = o.context_capacity;
-    policy.automatic_headroom_bytes = 0;
+    const auto o       = options(*profile, supplied);
+    auto out           = physical_plan(std::move(profile), table, o, device, prototype.get());
+    auto budget        = capacity_plan(out, o);
+    const auto& policy = o.context_capacity;
     if (policy.mode == ContextCapacityMode::Explicit &&
         policy.explicit_bytes < budget.minimum_capacity().device_bytes) return {};
     if (prototype) {
@@ -275,7 +277,8 @@ std::optional<ExecutionPlan> plan_execution(std::shared_ptr<const execution::Mod
 
 ExecutionPlan plan_graph_probe(std::shared_ptr<const execution::ModelProfile> profile,
                                ple::disk::TableGeometry table, const EngineOptions& supplied,
-                               DeviceContext& device, std::shared_ptr<const moe::Plan> schedule) {
+                               DeviceContext& device, std::shared_ptr<const moe::Plan> schedule,
+                               GraphProbeBacking backing) {
     auto o                              = options(*profile, supplied);
     o.context_cache.host_capacity_bytes = 0;
     auto plan           = physical_plan(std::move(profile), table, o, device, schedule.get());
@@ -285,7 +288,9 @@ ExecutionPlan plan_graph_probe(std::shared_ptr<const execution::ModelProfile> pr
     const auto geometry = describe_context_pool(budget.records);
     std::vector<RecordRequest> records;
     for (const auto id : geometry.spec_classes) records.push_back({id, o.max_concurrency});
-    plan.capacity.device_bytes              = geometry.required_bytes(records);
+    plan.capacity.device_bytes              = backing == GraphProbeBacking::Inputs
+                                                  ? geometry.required_bytes(records)
+                                                  : budget.minimum_capacity().device_bytes;
     plan.capacity.block_bytes               = geometry.block_bytes;
     plan.capacity.runtime_reservation_bytes = plan.device_reservation_bytes();
     return plan;
@@ -293,11 +298,10 @@ ExecutionPlan plan_graph_probe(std::shared_ptr<const execution::ModelProfile> pr
 
 runtime::ContextCapacityPlan
 describe_execution_capacity(std::shared_ptr<const execution::ModelProfile> profile,
-                            const EngineOptions& supplied, DeviceContext& device) {
+                            ple::disk::TableGeometry table, const EngineOptions& supplied,
+                            DeviceContext& device) {
     const auto o = options(*profile, supplied);
-    if (profile->local.size == 1)
-        throw std::invalid_argument("resident rank capacity requires partitioned execution");
-    return capacity_plan(physical_plan(profile, {}, o, device, nullptr), o);
+    return capacity_plan(physical_plan(profile, table, o, device, nullptr), o);
 }
 
 } // namespace ninfer::models::qwen4_exp

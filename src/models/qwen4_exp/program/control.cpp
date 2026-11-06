@@ -21,7 +21,7 @@ void RankProgramImpl::prepare_control_window() {
     f.control_window = original;
     auto& row        = *f.control_window;
     row.ids.assign(original.ids.begin() + begin, original.ids.begin() + begin + count);
-    row.count_tokens.clear();
+    row.control_last_token.reset();
     row.window_ends.clear();
     row.main_frontier += begin;
     row.mtp_frontier = row.main_frontier ? row.main_frontier - 1 : 0;
@@ -53,9 +53,6 @@ void RankProgramImpl::finish_control_window() {
     if (f.control_window) {
         auto& result = f.result.rows[f.control_row];
         result.processed += f.tokens;
-        if (auto ns = collect_vision_timing(binding(f.rows.front().member.residency),
-                                            f.rows.front().main_frontier + f.tokens))
-            f.gpu.add_vision(*ns);
         if (f.timer_started)
             f.gpu.add_prefill(
                 static_cast<std::uint64_t>(double(prefill_timer.elapsed_ms()) * 1.0e6 + 0.5));
@@ -73,12 +70,7 @@ void RankProgramImpl::finish_control_window() {
             return;
         }
     } else {
-        for (std::size_t b = 0; b < work.rows.size(); ++b) {
-            f.result.rows[b].processed = 1;
-            if (auto ns = collect_vision_timing(binding(work.rows[b].member.residency),
-                                                work.rows[b].main_frontier + 1))
-                f.gpu.add_vision(*ns);
-        }
+        for (std::size_t b = 0; b < work.rows.size(); ++b) { f.result.rows[b].processed = 1; }
     }
     f.rows           = work.rows;
     f.control_row    = 0;
@@ -96,10 +88,10 @@ void RankProgramImpl::enqueue_control_counts() {
     std::uint32_t used  = 0;
     while (f.control_row < work.rows.size() && used < capacity) {
         const auto& row = work.rows[f.control_row];
-        const auto n =
-            std::min<std::size_t>(capacity - used, row.count_tokens.size() - f.control_offset);
+        const auto n    = std::min<std::size_t>(capacity - used, row.ids.size() - f.control_offset);
         if (n) {
-            std::copy_n(row.count_tokens.begin() + f.control_offset, n, host + used);
+            ControlTokens{row.ids, *row.control_last_token}.copy({host + used, n},
+                                                                 f.control_offset);
             auto input = device_ids.slice(0, used, n);
             copy_bytes_async({input.data, input.bytes(), cuda.device()},
                              {host + used, input.bytes(), Device::cpu(), true}, cuda);
@@ -109,7 +101,7 @@ void RankProgramImpl::enqueue_control_counts() {
             used += n;
             f.control_offset += n;
         }
-        if (f.control_offset == row.count_tokens.size()) {
+        if (f.control_offset == row.ids.size()) {
             ++f.control_row;
             f.control_offset = 0;
         }

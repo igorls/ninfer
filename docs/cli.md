@@ -364,8 +364,9 @@ The artifact describes its model configuration and weight representations;
 The default `auto` accounts for weights, workspace, Graph rebuilding, control metadata and other
 required resources before allocating the remainder. Explicit capacity is specified in bytes,
 for example `--context-capacity 4GiB`. Both modes validate the model's complete minimum working
-sets and keep 1 GiB of startup planning headroom. On Spark, Host resources such as live media
-also consume the unified-memory budget. Graph calibration releases its temporary storage before
+sets and use `--memory-headroom` for startup planning (default `1GiB`; `0B` is allowed).
+Actual startup allocation may consume that cushion while preserving the desktop and Host
+resource budgets. Graph calibration releases its temporary storage before
 final sizing. The backing stays fixed during inference; its allocation among State and the
 selected KV histories follows actual demand.
 
@@ -381,3 +382,5 @@ project-owned device allocation or growth. CLI accepts the shared context-cache 
 or Host context backing. Explicit values are passed to Engine resource planning.
 
 All weight, sequence, workspace, and graph allocations are released when the Engine is destroyed.
+
+`--memory-headroom` and `--vision-memory-budget` use the shared startup contracts in [startup configuration](startup-configuration.md#planning-headroom-and-bounded-vision). The `fp8` KV selection now uses E4M3FN groups of 128 with UE8M0 scales; this changed numerical route requires its own qualification.

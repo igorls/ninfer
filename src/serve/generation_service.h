@@ -140,9 +140,12 @@ public:
 
     [[nodiscard]] const StartupReport& startup_report() const { return engine_->startup_report(); }
 
-    [[nodiscard]] EngineSnapshot snapshot() const { return engine_->snapshot(); }
-    [[nodiscard]] std::optional<EngineSnapshot> try_snapshot() const {
-        return engine_->try_snapshot();
+    [[nodiscard]] EngineSnapshot snapshot(SnapshotOptions options = {}) const {
+        return engine_->snapshot(options);
+    }
+
+    [[nodiscard]] std::optional<EngineSnapshot> try_snapshot(SnapshotOptions options = {}) const {
+        return engine_->try_snapshot(options);
     }
     [[nodiscard]] bool is_available() const { return engine_->is_available(); }
 
@@ -169,6 +172,10 @@ public:
     // Frontend-only preparation: inspect template boundaries without submitting generation.
     [[nodiscard]] ninfer::PromptSummary
     describe_prompt(const GenerationRequest& req, std::function<bool()> is_cancelled = {}) const;
+
+    // Establishes admission before an HTTP adapter commits its streaming response.
+    void wait_for_admission(PreparedRequest& prepared,
+                            std::function<bool()> is_cancelled = {}) const;
 
     // Consumes prepared.generation. A PreparedRequest is single-use.
     GenerationOutcome run(PreparedRequest& prepared, const StreamSink* sink,

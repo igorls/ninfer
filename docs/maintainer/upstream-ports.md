@@ -83,7 +83,7 @@ Python 3.11 environment. This is not hardware or release acceptance.
 Context capacity is now a byte budget shared by recurrent state and all KV
 histories, with automatic sizing as the default. The token-capacity API and
 separate extra-state quota are retired. Desktop reserve remains 8 GiB by default;
-the automatic slack floor moves to `--context-slack-floor`. Optional lane clamping
+the intermediate automatic slack floor is superseded below by upstream configurable planning headroom. Optional lane clamping
 checks complete model-declared concurrent working sets against actual record
 packing, including state, instead of dividing a KV token quota by max context.
 Startup also checks available Host RAM on discrete Windows/Linux GPUs. Earlier
@@ -1562,6 +1562,7 @@ were produced with recipe overrides and are not committed recipes.
 | Chat Completions `allowed_tools` entries (`d17f6a52`) | flat `{"type":"function","name":...}` only | also OpenAI's documented `{"type":"function","function":{"name":...}}` | The documented shape returned HTTP 400 `function name must be a string`; worth offering upstream |
 | Routed-expert statistics and trace | no routed-expert observation | `--expert-stats` / `--expert-trace DIR`: the NVFP4-bank `sparse_moe` optionally publishes its top-10 selection, the `qwen4_exp` Program mirrors it per executed unit, and the server keeps live counts (`GET /admin/experts`) and writes `.nxtr` traces with request-log ids | Measures expert-activation skew on real traffic for an expert VRAM budget (keeping only part of the routed experts resident). Off by default; startup reserves the trace slices only when enabled. Op test checks the published ids against the FP64 oracle selection; Engine real cases check record shape, tags, positions and unchanged greedy output |
 | Engine-discovered shared prefix on first sighting (`493b78c4`, `bb8c4068`) | saved whenever its coverage budget allows, ahead of the request's deeper points | takes free space only on its first sighting; the next request to reach it publishes it under the ordinary optional-capture budget (repeated demand still needs two committed requests) | As a fallback it shrank the same request's turn-closure budget to the tokens between them, so with a full context cache a plain multi-turn chat resumed only from the system prefix. Flash-Next v3 with a full cache (Host context 9.49 of 9.52 GB): turns 2 to 4 of a 5.2K-token-system chat reused 5,182 tokens each before and 5,189 / 5,226 / 5,263 after; with ~500-token answers turn 5 reused 5,182 of 7,292 before and 6,892 of 7,480 after. `493b78c4` gated on reused demand, which a capture sees only from the third request, so a full-cache shared system message (~5.7K tokens) asked different questions reused 0, 0, 0, then 5,738; `bb8c4068` gates on another request's crossing: 0, 0, then 5,740 from the third request. The cost against upstream, which reuses from the second request: with no free space, the second request over a new unmarked system message still prefills it cold; an explicit `prompt_cache_breakpoint` on that message reuses from the second request. Real case `conversation chain survives a full cache` also requires a third question over the conversation's system message to resume from it (1,850 of 1,871 tokens); Flash-Next reuse cases pass, and the 27B `prefix_real` and native-transaction tests passed with `493b78c4`. Proposed upstream |
+| JSON structural whitespace | unbounded at every site | each run is limited to 128 bytes, at the root and inside containers and const/enum literals | Sampling could stay in whitespace until the output limit and never reach the value. On the final source a schema request with a thinking budget of 2 returned 160 tokens of whitespace from the first byte, and `{"const":{"changed":true}}` did the same inside the object once the root alone was bounded, so every site needs the limit. Upstream's test rejects "an arbitrary length limit" but only checks 80 spaces, and it passes unchanged. Cost: the first JSON compile in a process took about 260 ms instead of about 9 ms on the Qwen3.8 vocabulary (about 171 ms at a limit of 80, 77 ms at 32); later new grammars in that fixture took about 10-45 ms. Decode time for the same output is unchanged |
 | `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Added 2026-10-02. `return_documents` defaults to true. Choice labels stay off the public response |
 
 ## Dropped
@@ -1706,9 +1707,6 @@ row-256 KV are the supported cache representations.
   pristine base and the fork line (the demoted turn closure is not the selected source): upstream
   behaviour on that revision. The complete suite passes after adopting upstream context
   replacement and preemption; the earlier failure is retained here as historical evidence.
-- A json_schema request whose prompt asks for prose produces whitespace until its output limit on
-  both the pre-v3 build and the fork line: the grammar admits unbounded leading
-  whitespace. A bound on outer whitespace would fix it.
 - On the pre-v3 line, exploratory T=1500 GDN input and LinearAdd 5120x6144 NVFP4 fixtures disagreed
   with their oracles on both baseline and candidate; not re-examined on v3.
 - `dflash2_real`'s default probe (K=15, one 24-token generation) accepted 21 of 23 drafted tokens
@@ -1759,3 +1757,199 @@ Windows, MSVC 19.51, CUDA 13.3, `sm_120a`, RTX PRO 6000 Blackwell (driver 616.92
   - The upgrade tool, run from a Windows checkout (`core.autocrlf=true`), embeds the chat template
     with CRLF line endings. The vendored Jinja lexer normalizes line endings, so the rendered
     prompts are unchanged; only the embedded bytes differ from a Linux run.
+
+### Final frozen source batch: 1fcc6dc5 through a754fcf3
+
+Integration is in progress on the isolated release branch; it has not been accepted on
+`workstation`, qualified on final-source hardware, or published as a stable release.
+The batch adopts shared frontend infrastructure with explicit Qwen policy, bounded
+execution messages, pure sampling followed by explicit committed-count updates,
+separate planning/allocation budgets, configurable memory headroom, bounded Vision
+windows, admission before streaming headers, terminal publication after cleanup,
+request/retained Context observations, monitor events and recovery-aware fairness.
+
+The fork retains 8 GiB desktop reserve and a 1 GiB default planning headroom.
+`engine.memory_headroom` / `--memory-headroom` replaces the intermediate context-slack
+setting, without an alias; zero is allowed. Headroom applies during planning for both
+automatic and explicit Context capacities, but startup allocation may consume it.
+The final complete instance must fit the desktop-adjusted budget. Complete-context
+concurrency clamping remains optional and uses native record working sets.
+
+Upstream now supplies resident text graphs with replaceable QSA children and explicit
+head activation; those replace the fork's interim resident split without introducing
+Host expert offload for models that fit. Both Device-PLE and Host-PLE resident routes
+retain independent acceptance. Packed MTP operand binding, logprob/reference/hidden
+readouts, prompt-aware repetition penalties, routed-expert traces, nonblocking telemetry,
+quiescence, Windows I/O/dependencies and the Supervisor remain fork requirements.
+The previously qualified RTX NVFP4 vector/down and shared-term fusion stay selected;
+upstream's wider Spark expert-geometry generalization is deferred.
+
+The native graph port includes Core external-event waits and separate captured PLE
+handoffs with Host submission bookkeeping. Resident Host-PLE execution replays the
+complete graph; bounded expert offload retains its prefix/suffix handoffs. Eager
+execution projects the requested head at Text completion, while graph execution
+owns its optional head section. Readouts and routed-expert traces follow these
+same completed execution boundaries; final-source runtime acceptance remains pending.
+
+Service observation instance IDs and perplexity report timestamps use the fork's
+shared platform helpers on both platforms. QSA oracle fixtures follow the selected nested KV preparation parameters
+and explicit head geometry, with direct standard-library includes rather than
+transitive dependencies. These source/build repairs retain the independent oracle
+and fixed numerical tolerances; numerical execution is recorded separately.
+The native Context-capacity query also accepts the single-rank resident profile:
+its State/KV record geometry is independent of expert placement. The upstream
+partition-only query guard otherwise prevents the fork's real Engine fixtures
+from selecting explicit complete-context budgets before startup.
+The query takes the selected PLE table geometry explicitly, so its Host preparation
+reservation uses the actual artifact's row segmentation instead of an empty table.
+
+Focused qualification of this batch uses CUDA 13.3 on RTX PRO 6000 Blackwell.
+Linux passes the 19 selected independent GPU Op/graph suites, without skips or
+relaxed tolerances, plus eight foundation and 15 product/frontend/configuration
+checks. Native Windows (MSVC 19.51, driver 621.14) passes 22 selected CPU contracts
+and five GPU suites covering producer-event replay, sampling, exact KV append,
+speculative licensing and distinct-input LinearPair. Dense MTP history passes in
+eager and Graph modes on both platforms. On Windows the real Flash-Next resident
+fixture passes ordinary Graph/eager token equality across eight prompts and MTP
+K=1/3/5 Graph/eager/ragged batches. These results do not qualify physical RTX 5090,
+all Flash Engine cases, final-package lifecycle, or final performance acceptance.
+Those Windows Flash results precede the envelope repair below and must be repeated
+for its final source.
+The earlier proposal-count and adverse performance findings remain open pending
+the comparable final-source measurement and its recorded disposition.
+
+Sequence prefill/scoring retains the fork's fixed logical-context QSA envelope.
+The incoming per-chunk visible frontier selected different attention arithmetic
+for the same prefix at different chunk sizes. Decode still selects the native
+context tier; valid positions and causal visibility remain device metadata.
+Eager Main and MTP calls share that tier selector with both graph implementations,
+without allocating a tier vector on each eager call.
+Final-source chunk-invariance qualification is separate from the Op oracle checks.
+The per-chunk frontier failed 3,580 of 3,599 score comparisons against the 4096
+control (maximum absolute log-probability difference 8.8285). Restoring the sequence
+envelope passes that exact check, but its next Graph/eager check exposed differing
+decode trajectories before the eager tier selection was restored.
+
+The first run of the complete Flash-Next Engine set on that source also failed ordinary
+batching and MTP target parity (top-2 gaps of 0.125 and 1.0 against a 0.05 near-tie
+limit). Forcing one context tier, eager execution, or both left the failures unchanged, so
+tier selection is not the cause. A per-layer B=1 against B=2 capture found every value
+identical through the MoE input, then single BF16 differences at the MoE output. The
+fused T=1 down kernel accumulates in even/odd pairs. `vector_down` matches that order only
+in its `NINFER_TARGET_RTX5090` branch, and `compute.cuh` tested that macro without
+including `core/platform.h`, so RTX builds silently compiled the other branch. The header
+now includes it, and `ninfer_moe_block_scaled_test` checks that a token's public output is
+byte-identical from one token through the 48-column vector limit. That check fails at
+every width from 2 to 48 without the include and passes with it; both batch cases then
+passed three consecutive runs. The earlier Flash Vision failure was a fixture read of a
+rate-limited snapshot taken before any sample, not a retained window: the fixture now
+publishes a sample first, as the 35B and DFlash fixtures do, with its criteria unchanged.
+
+On the Linux G4 all 26 Flash-Next Engine cases pass on this source. Native Windows passes
+the block-scaled MoE suite and prefill chunk invariance on this source; its Graph/eager,
+batching, MTP and Vision cases did not complete because the shared desktop GPU lacked the
+free memory the resident fixture needs, so they remain unqualified there. The earlier
+Windows Flash results predate these repairs.
+
+The asynchronous coordinator kept one thread at a full core whenever a dense request was
+active, undoing the fork's blocking synchronization default on a shared desktop. A
+deliberate fork divergence now makes it block on the active stream after a poll without
+progress. Host experts and Host PLE keep polling, so Flash-Next is unchanged. All 26 Flash
+Engine cases and dense MTP history pass with it, as do dense preemption, fairness,
+quiescence, scoring, tools and reasoning features. Costs and the unchanged Flash CPU
+are in [performance](../performance.md#coordinator-wait-repair-2026-11-06).
+
+Prefix, preemption, quiescence and reasoning-feature fixtures did not compile on this
+source (fields moved under `stats`, a removed prompt constant, missing link libraries) and
+were repaired without changing their criteria. Two dense failures then appeared. They
+reproduce with the coordinator wait removed, so neither comes from it.
+`ninfer_qwen3_5_prefix_real_test` stopped at a late system instruction: the next turn
+reused 0 of the required 30 tokens and recomputed all 95, so output stayed correct but no
+checkpoint existed to reuse. The first `CheckpointStore::reserve` was 117 metadata bytes
+short, on an empty catalog. `PageDirectory::coverage_metadata_bytes` planned `2h + 2`
+partial-coverage entries, but coverage grows in whole slabs: 256 histories need 514 entries
+and allocate 768, which is 61,360 bytes more per pool than planned. Other slack hid most of
+that, so it surfaced only on a one-pool engine at minimum capacity, whose budget grows by
+2,600 bytes per block against 42,288 with MTP. The plan now counts `2h + 256` entries, which
+keeps the marginal per-state cost unchanged. A complete-admission regression in
+`ninfer_context_store_test` fails without the change. The prefix fixture's
+`cudaEventQuery` interposer has no Windows implementation.
+
+The fixture's Host-restore case then found no pressure. Its 512-token context used 9 of the
+36 pages in a KV block, and the pool's five blocks (three State, one per KV pool) held the
+retained checkpoint beside the active request, so nothing was demoted and the case could
+not reach Host restore. It now sizes its context from the pool geometry, so a retained
+checkpoint fills a KV block and a second copy cannot fit. Its assertions are unchanged, and
+Device-to-Host demotion followed by Checkpoint restore passes. All fourteen scenarios and
+the complete sequence pass on the G4.
+
+As a control, unmodified `a754fcf3` built on the same G4 with the same artifact fails
+`explicit-anchor`, `late-instructions` and Host-restore with these exact messages. Its
+grammar fixture fails at `thinking control broke constrained content`, the literal thinking
+case the `reasoning_prefix` change below makes pass. Neither defect comes from this
+adaptation, and both fixes are worth offering upstream. The first-sighting gate is not
+involved: disabling it leaves Host-restore unchanged.
+
+`ninfer_qwen3_5_grammar_real_test` stopped at a choice constraint with a thinking budget of
+2: content began with a second `</think>`. Upstream `1407c62f` rebuilt `reasoning_prefix`
+so its body could end at any partial delimiter match. `\n</think>\n\n` ends with its own
+first byte, so a second close could start on the first close's final newline, and the
+grammar stayed in thinking after the injected close while the output session had moved to
+content. The prefix is now a deterministic first-match automaton, still compiled as an FSM.
+`a754fcf3` has the same code; this is worth offering upstream. A byte-level regression in
+`ninfer_grammar_test` fails without the change.
+
+The fixture then reached JSON whitespace running to the output limit, an open question on
+this line since the pre-v3 build. The fix is a bound on every whitespace run: bounding the
+root alone, as previously proposed, left the same failure inside objects. See
+[deliberate divergences](#deliberate-divergences-from-upstream). With both fixes the
+fixture passes unchanged with no speculation (graphs and eager) and with MTP on the G4, as
+does `ninfer_qwen3_5_tools_real_test`. MTP passed before the bound only because it sampled
+a different path.
+
+With these repairs the final source passes on the G4: all 26 Flash-Next Engine cases, dense
+MTP history in graph and eager modes, every dense real fixture, `loading_real` with and
+without MTP, and the selected context, grammar, JSON, tool-constraint and MoE CPU suites.
+MSVC compiles the repaired sources and passes the grammar, regex, JSON and tool-constraint
+suites. Windows Flash parity on this source and physical RTX 5090 remain unqualified, and
+[paired acceptance](../performance.md#comparison-after-the-dense-repairs-2026-11-06) still
+fails on the same criteria as before these repairs. The
+[disposition](../performance.md#disposition-of-the-remaining-items-2026-11-06) attributes all
+three failures: a Flash counter definition, a one-step BF16 tie in the dense drafter, and an
+ordinary Flash decode cost from upstream's single resident graph plus a graph dispatch mode
+whose trigger is unknown.
+
+The unified FP8 KV codec changes stored cache arithmetic to E4M3FN groups of 128 with
+UE8M0 scales. This is a numerical change requiring final-source oracle and real-model
+qualification; earlier FP8 results do not qualify it. Existing oracle tolerances are
+not relaxed. Existing independent fork test runners remain; the consolidated upstream
+Op-test hierarchy and its unsupported-target fixtures are still deferred. Active
+fixtures are adapted to current inputs and explicit commit semantics.
+
+GLM5Next is not registered, constructed, converted by the product CLI, or included in
+the active model/test source lists. Spark and multi-GPU product activation remain
+deferred. Their upstream source history is retained; dormant implementation source
+does not advertise support. The separate upstream web dashboard is not the workstation
+control surface; the native Supervisor remains the supported application. The fork's
+detailed representation and operational references remain active instead of adopting
+the upstream documentation consolidation wholesale.
+
+The new frontend/tokenizer ownership follows resource-described normalization and BPE
+rules; the OrcaRouter/Qwen2 letters-only single-digit split remains supported explicitly.
+Reference-distribution scoring retains its command and readouts while joining the same
+startup configuration route as ordinary perplexity. Benchmark collection now uses
+upstream request-ID correlation and measurement windows, retaining selected proposal
+heads and per-request responses. Method changes must be recorded in comparisons;
+earlier adverse exact-MTP-count, timing, load and RSS findings remain unresolved.
+
+
+The final numerical review found that retaining the old dense-cache fixtures would
+leave FP8 encoded with obsolete FP16 row scales. That invalidates their use as
+oracles for the new codec. The deferral is therefore narrowed for this affected
+boundary: causal-cache and full/prefix-append fixtures now use the upstream scalar
+UE8M0 references, packed-record helpers and common OpSuite runner. The prior fixed
+attention criteria remain identical. The fork batched full-append entry runs against
+that exact scalar encoder, with ragged/Graph replay, untouched bytes and metadata
+checks, plus its rejected shape boundaries. Other independent fork runners remain.
+The old duplicate append fixture is removed. This is source migration, not a GPU
+pass; all these tests still require compilation and execution on final source.

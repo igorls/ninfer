@@ -126,6 +126,8 @@ reserve, and the compute processes on the device. Driver queries refresh at most
 seconds; while one is in progress, concurrent requests receive the previous snapshot with its
 `device.age_ms`, or HTTP 503 before the first snapshot. The Engine memory plan is read without
 waiting for an execution unit, so `/admin/vram` stays responsive under load.
+`plan.cuda_graph_calibration_peak_bytes` reports the observed calibration peak; signed
+calibration and preparation increments remain separate fields.
 `resources.allocations` names physical owned storage; workspace cursor and required/measurement
 peaks are separate observations, not estimates of live tensor bytes. The bundled Supervisor
 uses this schema. `/admin/stats` schema 2 names session calls, executor polls/flushes and
@@ -214,8 +216,9 @@ errors distinguish `invalid_json_schema`, `unsupported_json_schema` and `unsatis
 selected `text.format` in aggregate responses and SSE response objects.
 
 JSON output accepts spaces, tabs, carriage returns and newlines between structural tokens and
-before/after the root value; declared property order is retained. Compact and formatted forms are
-allowed, including container-valued const/enum entries. Whitespace inside strings remains part of
+before/after the root value, up to 128 bytes per run; declared property order is retained. Compact
+and formatted forms are allowed, including container-valued const/enum entries. The first JSON
+constraint compiled in a process takes longer than later ones. Whitespace inside strings remains part of
 the value, and schema assertions still apply. State the desired content in the prompt; the schema
 is not inserted into it. Only one output constraint may be supplied.
 
@@ -1850,8 +1853,9 @@ outside the GPU executor and do not delay formation of the next batch.
 
 `--max-context` is each sequence's logical ceiling. `--context-capacity` is a byte capacity for
 active and retained KV/State records. Its default `auto` accounts for the complete enabled runtime
-and the model's minimum working sets. Both explicit and automatic capacity use 1 GiB of startup
-planning headroom. On Spark, Vision's live media capacity is included in the shared-memory budget.
+and the model's minimum working sets. Both explicit and automatic capacity use the configured
+`--memory-headroom` planning cushion (default `1GiB`; `0B` is allowed). Actual startup allocation
+may consume it while preserving the desktop and Host resource budgets.
 Backing capacity resolves once at startup; the mix of KV and State records changes with demand.
 
 Before each prefill, decode or replay unit, the runtime reserves the additional pages and temporary
@@ -1898,3 +1902,26 @@ responses. NInfer does not execute tools. Tool framing and argument constraints 
 
 Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
 from accepted output token IDs, including a stop token whose decoded text may be withheld.
+
+
+## Admission, terminal cleanup and monitoring
+
+Chat, Responses and Anthropic streaming adapters establish Engine admission before
+committing HTTP stream headers, so a queued rejection can retain its endpoint-shaped
+HTTP error. Engine terminal publication follows transaction/resource cleanup; a
+completed result does not leave its lane occupied for a later request to discover.
+These changes require final-source serving acceptance, including cancellation.
+
+The existing API-key policy also protects `/monitor/info`, `/monitor/snapshot` and
+`/monitor/events`; `/health` remains available for readiness checks. Info reports
+redacted normalized configuration, selected model, startup resources and placements.
+Snapshot combines Engine scheduling/resource facts with service ingress/transport
+facts. Events uses SSE with at most four subscribers, each bounded to 64 events and
+64 KiB; overflow closes that subscriber. Events has no replay/history. The native
+Supervisor remains the workstation control surface; the separate upstream dashboard
+is not activated as a second application.
+
+Request JSONL schema is 31. Benchmark readers must use the matching source schema
+and correlate terminal records by response/request identity. Shared Context pool
+occupancy and request versus retained ownership are reported from actual backing;
+estimated token capacity is diagnostic and is not a fixed scheduling quota.

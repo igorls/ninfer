@@ -31,7 +31,7 @@ DFlash2, OrcaRouter and NVFP4 prefill-schedule measurements with their own condi
 
 Qwen3.8-Flash-Next is supported, but has no published result page in this campaign.
 The Qwen3.8-27B measurements above describe a different architecture and artifact.
-Flash Next's current execution scope is documented [here](maintainer/qwen4_exp-execution.md).
+Flash Next's current execution scope is documented [here](maintainer/qwen4_exp-model.md).
 
 ## Reading the results
 
@@ -1415,3 +1415,220 @@ the uninstrumented slowdown and does not replace the matched matrix. It finds no
 changed kernel inventory, but does not establish a quantitative cause for the
 1.629% wave regression. Profiling stops here; the adverse timing and unresolved
 attribution remain in the disposition.
+
+## Final-source comparison (2026-11-06)
+
+This evaluates the uncommitted adaptation through upstream `a754fcf3`, including the
+QSA envelope and NVFP4 MoE include repairs, against accepted `e1ab9af3`. The method is
+the native-session comparison above: Linux RTX PRO 6000 Server Edition, resident GPU
+experts, three AB/BA/AB pairs, nice 10, 16 profiles, 48 processes, 720 measured requests.
+**Acceptance fails on both predeclared criteria.** Physical RTX 5090 and Windows
+performance are not measured here, and this is not a stable-release qualification.
+
+All generated token IDs match in all 720 requests. Exact proposal counts differ in 54
+paired rows, in two groups:
+
+- Flash K=3 P512 (45 rows): `rounds` is one lower with identical drafted and accepted
+  counts. Each affected row has `fallback_steps=1`; rows with no fallback step match.
+  The baseline incremented `rounds` on every Flash decode step, the candidate only on steps
+  that drafted, so this is a counter definition change. It brings Flash in line with dense,
+  which has counted only drafting steps in both arms.
+- Dense C4/K3 P512 row 3 (9 rows): rounds 29 → 28, drafted 86 → 83, accepted 35 → 36,
+  per-position `[21, 11, 3]` → `[20, 12, 4]`. This is the earlier exact-count failure.
+  [Its cause is established below](#disposition-of-the-remaining-items-2026-11-06).
+
+Paired wave-time change, B against A (median and range over three pairs, positive is
+slower):
+
+| Model | C | K | P512 % | P2048 % |
+|---|---:|---:|---|---|
+| dense | 1 | 0 | −0.20 (−0.22 to −0.20) | −0.19 (−0.20 to −0.15) |
+| dense | 1 | 3 | −1.33 (−1.38 to −1.32) | −0.98 (−1.00 to −0.97) |
+| dense | 4 | 0 | −0.08 (−0.11 to −0.08) | −0.15 (−0.15 to −0.11) |
+| dense | 4 | 3 | −1.66 (−2.36 to −1.56) | −1.16 (−1.52 to −1.07) |
+| flash | 1 | 0 | +0.88 (+0.07 to +1.67) | +0.47 (−0.69 to +0.97) |
+| flash | 1 | 3 | −0.86 (−0.87 to −0.84) | −0.02 (−0.17 to −0.00) |
+| flash | 4 | 0 | **+2.33 (+2.29 to +2.37)** | +1.38 (+1.32 to +1.47) |
+| flash | 4 | 3 | −0.12 (−0.14 to −0.11) | −0.19 (−0.20 to −0.16) |
+
+Twelve of the 16 are faster and four slower; the median is −0.17%, the worst +2.33%.
+Flash C4/K0 P512 crosses the 2% investigation flag, and its cost is in decode (+3.4% at
+P512, +3.1% at P2048) with prefill unchanged. A per-node graph trace of both arms shows
+no kernel becoming slower. Launch counts rise about 2% across the same kernels, about 13
+more forward passes per process. That count was read here as about 1.6 extra decode steps
+per wave. [That reading is retracted](#disposition-of-the-remaining-items-2026-11-06):
+measured waves run the same 64 steps in both arms.
+
+Process costs match the earlier comparison. Dense CPU time stays well above the
+baseline (C1/K0 2.0 → 10.1 s, C4/K0 2.1 → 13.3 s, C1/K3 2.1 → 6.0 s, C4/K3 2.3 → 9.3 s)
+at unchanged wall time, almost all of it user time. Flash stays near parity (C4/K0 13.8 →
+14.1 s) but moves from system to user time. The candidate coordinator yields in a loop
+while work is outstanding; that fits the increase but has not been measured as its cause.
+Engine construction is slower in every profile checked (dense C1/K0 3.32 → 3.45 s, Flash
+C4/K0 8.86 → 9.27 s). Peak RSS rises by up to 0.1 GiB.
+
+### Coordinator wait repair (2026-11-06)
+
+Per-thread sampling attributed the dense CPU cost above: one coordinator thread ran at a
+full core from the start of generation to exit, where the baseline slept in a blocking
+stream synchronize. That undid the fork's blocking default on a shared desktop. After a
+poll without progress the coordinator now blocks on the active stream through the same
+blocking-synchronize default. Host experts and the Host PLE pipeline keep polling, because
+the coordinator overlaps Host work with that stream.
+
+The full comparison was repeated, same method and baseline. **Acceptance still fails on
+the same two criteria.** All IDs match in all 720 requests, and the same 54 count rows
+differ with the same values.
+
+| Profile | CPU s before repair | CPU s after repair | Baseline CPU s |
+|---|---:|---:|---:|
+| dense C1/K0 | 10.1 | 2.2 | 2.1 |
+| dense C1/K3 | 6.0 | 2.2 | 2.1 |
+| dense C4/K0 | 13.3 | 2.3 | 2.2 |
+| dense C4/K3 | 9.3 | 2.4 | 2.4 |
+| flash C1/K0 | 8.3 | 8.3 | 8.2 |
+| flash C1/K3 | 7.5 | 7.6 | 7.5 |
+| flash C4/K0 | 14.1 | 14.2 | 14.0 |
+| flash C4/K3 | 14.5 | 14.7 | 14.6 |
+
+The dense cost is removed. **Flash is unchanged**: Flash runs the Host PLE pipeline, so it
+still polls and holds a core while active, as the baseline already did. This is not a
+regression, but it is also not a repair for that model.
+
+The repair has a small dense timing cost, which is wake-up latency. Median wave change
+against the baseline, before → after the repair:
+
+| Model | C | K | P512 % | P2048 % |
+|---|---:|---:|---|---|
+| dense | 1 | 0 | −0.20 → +0.31 | −0.19 → +0.34 |
+| dense | 1 | 3 | −1.33 → −0.62 | −0.98 → −0.47 |
+| dense | 4 | 0 | −0.08 → +0.40 | −0.15 → +0.24 |
+| dense | 4 | 3 | −1.66 → −1.11 | −1.16 → −0.72 |
+| flash | 1 | 0 | +0.88 → −0.44 | +0.47 → +1.31 |
+| flash | 1 | 3 | −0.86 → −0.89 | −0.02 → −0.01 |
+| flash | 4 | 0 | **+2.33 → +2.21** | +1.38 → +1.36 |
+| flash | 4 | 3 | −0.12 → −0.09 | −0.19 → +0.00 |
+
+Eight profiles are now faster and eight slower, median 0.00%, worst +2.21%. Flash does not
+take the new wait, so its movement between these runs shows campaign-to-campaign variation
+of up to about 1.3 points on C1/K0; the other Flash rows moved by 0.2 points or less. Flash
+C4/K0 P512 still crosses the 2% flag and is not addressed by this repair. Windows wake-up
+latency for this blocking wait is unmeasured.
+
+### Comparison after the dense repairs (2026-11-06)
+
+The checkpoint metadata, reasoning prefix and JSON whitespace repairs changed runtime source,
+so the full comparison was repeated on the final source with the same method and baseline.
+**Acceptance still fails on the same two criteria.** All IDs match in all 720 requests, and
+the same 54 count rows differ with the same values.
+
+| Model | C | K | P512 % | P2048 % |
+|---|---:|---:|---|---|
+| dense | 1 | 0 | +0.36 (+0.35 to +0.38) | +0.34 (+0.26 to +0.37) |
+| dense | 1 | 3 | −0.67 (−0.75 to −0.66) | −0.41 (−0.44 to −0.21) |
+| dense | 4 | 0 | +0.36 (+0.35 to +0.47) | +0.31 (+0.13 to +0.37) |
+| dense | 4 | 3 | −1.00 (−1.03 to −0.89) | −0.65 (−0.80 to −0.52) |
+| flash | 1 | 0 | +0.89 (+0.41 to +1.76) | +1.59 (+0.14 to +1.71) |
+| flash | 1 | 3 | −0.86 (−0.92 to −0.80) | −0.03 (−0.08 to +0.05) |
+| flash | 4 | 0 | **+2.05 (+1.71 to +2.28)** | +1.37 (+1.26 to +1.43) |
+| flash | 4 | 3 | −0.15 (−0.16 to −0.11) | −0.05 (−0.18 to −0.03) |
+
+Eight of the 16 are faster and eight slower; the median is +0.14% and the worst +2.05%.
+Flash C4/K0 P512 is the only investigation flag;
+[its attribution follows below](#disposition-of-the-remaining-items-2026-11-06). Speculative
+profiles are faster or level, and every ordinary profile
+is slower, by up to +0.36% on dense and +2.05% on Flash.
+
+In the dense C4/K3 P512 test, each row's counts are identical across all nine repetitions in
+each arm, and the four rows give four different ID sequences in both arms. Only row 3 changes:
+86 drafted and 35 accepted become 83 and 36, with its IDs unchanged. The drafter proposed
+differently for that row without changing the output.
+[The cause is established below](#disposition-of-the-remaining-items-2026-11-06).
+
+Process costs are small but consistent. Peak RSS is 0.07 to 0.10 GiB higher in every profile.
+Process wall time including loading is 0.2 to 0.9 s higher. CPU seconds match the baseline to
+within 0.3 s; the baseline's Flash C1/K0 mean of 14.3 s contains one cold first process at
+25.5 s, and its other two match the candidate at about 8.7 s.
+
+Bounding JSON whitespace raises constraint compilation. On the Qwen3.8 vocabulary the first
+JSON compile in a process took about 260 ms instead of about 9 ms, about 171 ms at a bound of
+80 and 77 ms at 32. Later new grammars in that fixture took about 10 to 45 ms, and a cached
+grammar under 1 ms. Decoding the same tokens takes the same time. Larger schemas were not
+measured. Windows and physical RTX 5090 performance are not measured here.
+
+### Disposition of the remaining items (2026-11-06)
+
+The three items that fail acceptance were investigated on the same binaries, artifacts and
+server. Host timing used an `LD_PRELOAD` shim on the unmodified executables; device records
+used private object overrides at link time. None of this instrumentation is in the source.
+
+**`rounds`.** In all 90 Flash K=3 rows, the baseline's `rounds` minus the candidate's equals
+`fallback_steps` and every other field matches. The change is a counter definition only.
+The old Flash counter was the outlier: dense counted only drafting steps in both arms.
+
+**Dense C4/K3 P512 row 3.** The cause is a one-step BF16 tie in the drafter. Private
+binaries that record each proposal reproduce the 86/35 → 83/36 change. At the first
+differing proposal, the second draft position of one round:
+
+| Arm | Top token | Logit | Second token | Logit | Proposal |
+|---|---:|---:|---:|---:|---|
+| baseline | 35935 | 19.125 | 1433 | 19.000 | wrong |
+| candidate | 1433 | 19.125 | 35935 | 19.125 | matches the generated token |
+
+An exact tie goes to the lower proposal-head row, which here is token 1433. Before that
+proposal, hidden states already differ at rounding level in all four rows: 69%, 30% and 23%
+of elements are bit-identical at draft positions one to three, cosine similarity stays at or
+above 0.99996, and top-1 logits move by at most 0.125, one BF16 step at this size. One more
+proposal differs in rows 0 to 2 later in the wave without changing any count. The two arms
+compose the draft differently:
+the baseline takes the first draft from a batched MTP forward of width K+1, while the
+candidate runs a one-token forward after a KV-only history pass. That fits rounding-level
+differences, but the first differing kernel was not isolated. Proposals only affect how
+many tokens verification accepts, so generated IDs stay exact.
+
+**Flash C4/K0 P512.** The attribution given above, about 1.6 extra decode steps per wave, is
+**retracted**. Each measured wave runs 64 decode steps in both arms. The slowdown has two
+parts, both measured without a tracer. Nsight Systems changes the result here: under its API
+trace the baseline, not the candidate, was the slower arm.
+
+| Part | Per step | Per wave | Evidence |
+|---|---:|---:|---|
+| Candidate launch order | about +0.1 ms | about +7 ms | every step, also in fast waves |
+| Slow dispatch mode | about +0.3 ms | about +20 ms | on or off, in both arms |
+
+The launch order comes from upstream's single resident main graph (`1408277a`). The baseline
+launches its prefix graph at once and prepares PLE rows while it runs. The candidate waits
+for those rows before its one launch. Host time between GPU completion and the next launch
+rises from 18 to 82 µs, and first launch to GPU completion rises by about 40 µs.
+
+The slow mode is a discrete adder. Step-by-step profiles are otherwise nearly identical
+between waves. In the comparison above it is on for 8 of 9 candidate P512 waves and all
+candidate P2048 waves, and for no baseline P512 wave, but the baseline reaches it too: whole
+P512 waves in one process, and often the first 4 to 14 steps of P2048 waves. In the other
+direction, Flash C1/K3 P512 reaches its faster mode only in the candidate.
+
+| Hypothesis | Test | Result |
+|---|---|---|
+| Extra decode work | Count steps per wave | 64 in both arms |
+| Clock or throttling | Sample clocks at 20 ms | SM about 2,400 MHz in both modes (one cold first wave dipped to 2,265), memory unchanged, no throttle flags |
+| Clock transitions | Lock the SM clock at 2,407 MHz | The baseline still shows both modes; the candidate stays slow |
+| GPU idle between steps | Delay each step by 0 to 600 µs | Step time net of delay unchanged: 10.95 ms baseline, 11.33 ms candidate |
+| Context pool placement | Grow the candidate pool by 96 MiB to 2 GiB | Modes unchanged |
+
+Device timestamps inside the candidate's graph locate the adder. It is spread evenly across
+all 48 layers: per layer, about +4.4 µs in the mixer, +2.3 µs in MoE and +0.7 µs in the
+single combine kernel, and only +1.4 µs in the 855 µs final stage. It follows kernel count
+rather than kernel time, at 25% of the combine stage and 0.16% of the final stage. That
+points to dispatch between graph nodes and agrees with the earlier finding that no kernel
+became slower.
+
+Graph structure changes how often the mode occurs. One extra one-thread kernel per layer
+moved 15 of 20 P512 waves and 16 of 20 P2048 waves to the fast mode, so the instrumented
+candidate ran at about 1,007 ms instead of 1,021 ms despite the added work. What selects the
+mode remains unknown. The timestamps were taken on the candidate only. This is a real cost
+to ordinary Flash decoding, not noise, and it is not repaired here. Flash MTP K=3 profiles
+show no net cost: their wave changes are −0.86% to −0.03%. Physical RTX 5090 and Windows
+behavior were not measured.
+
+All three items were accepted for this merge with these findings on record. That covers
+the source integration only; it is not release acceptance or RTX 5090 qualification.

@@ -36,6 +36,7 @@ const SplitShape& select(ProjectionProfile weights, const auto& rows) {
             &kBf16SplitN640K2560, &kBf16SplitN13312K2560,
 #endif
 #if NINFER_TARGET_SPARK
+            &kBf16SplitN20480K1536,
             &kBf16SplitN288K4096,
             &kBf16SplitN1152K2560,
             &kBf16SplitN7296K2560,

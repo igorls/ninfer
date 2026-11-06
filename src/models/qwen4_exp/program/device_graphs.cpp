@@ -23,38 +23,42 @@ execution::TextRun DeviceGraphs::main_run(std::uint32_t batch, bool verify, std:
                                        r.tensor(io.main_qsa.coordinates),
                                        r.tensor(io.ple_records),
                                        p.route_trace ? &*p.route_trace : nullptr,
-                                       p.parallel ? &*p.parallel : nullptr};
+                                       p.parallel ? &*p.parallel : nullptr,
+                                       p.parallel ? &p.ple_ready : nullptr};
     execution::StateUpdate update = execution::StepUpdate{};
     if (verify) update.emplace<execution::VerifyRecords>(*r.gdn_records);
     return execution::TextRun(p.parameters, execution, r.main_batch(tokens, batch, visible), update,
                               p.cuda);
 }
 
-void DeviceGraphs::body(Batch& profiles, Round* round, std::uint32_t batch, std::uint32_t depth,
-                        DeviceRound mode) {
-    auto& p        = owner_;
-    auto& r        = p.resources;
-    const auto& io = r.plan.persistent.buffers;
-    const auto& c  = p.parameters.profile->config.text;
-    const int b = batch, t = depth ? p.shape.draft_tokens + 1 : 1;
+void DeviceGraphs::body(Batch& profiles, Round* round, std::uint32_t batch, bool verify) {
+    auto& p          = owner_;
+    auto& r          = p.resources;
+    const auto& io   = r.plan.persistent.buffers;
+    const auto& c    = p.parameters.profile->config.text;
+    const auto depth = verify ? p.shape.draft_tokens : 0;
+    const int b = batch, t = verify ? p.shape.draft_tokens + 1 : 1;
     const auto visible = round ? bounds_.front() : bounds_.back();
+    p.install_decode(batch);
     if (depth) {
+        p.gpu_timer.begin_draft(round != nullptr);
         for (std::uint32_t step = 0; step < depth; ++step) {
             DecodeGraphChild child;
             p.draft_forward(step, batch, visible, round ? &profiles.drafts[step].front() : nullptr,
                             round ? &child : nullptr);
             if (round) round->draft.push_back(child);
-            p.save_draft(step, batch);
         }
         const auto& mtp = *io.mtp;
-        auto anchors    = r.tensor(mtp.anchors).slice(0, 0, batch);
-        auto extents    = r.tensor(mtp.extents).slice(0, 0, batch);
-        auto drafts     = r.packed(mtp.drafts, {t - 1, b});
-        auto ids        = r.main_batch(t, b, visible).ids;
+        p.gpu_timer.end_draft(round != nullptr);
+        auto anchors = r.tensor(io.anchors).slice(0, 0, batch);
+        auto extents = r.tensor(mtp.extents).slice(0, 0, batch);
+        auto drafts  = p.draft_proposals(b);
+        auto ids     = r.main_batch(t, b, visible).ids;
         ops::prepare_verify_ids(anchors, drafts, extents, ids, p.cuda);
-        p.copy_verify_inputs(batch, round != nullptr);
+        p.copy_verify_inputs(batch, round ? &round->readback : nullptr);
     }
     const auto call = r.main_batch(t, b, visible);
+    p.gpu_timer.begin_target(round != nullptr);
     p.prepare_device_ple(call);
     {
         auto run = main_run(batch, depth != 0, visible);
@@ -79,33 +83,26 @@ void DeviceGraphs::body(Batch& profiles, Round* round, std::uint32_t batch, std:
         if (io.pending_conditioning)
             output.conditioning =
                 r.packed(*io.pending_conditioning, {dimension(c.residual_width()), t, b});
-        Tensor logits;
-        if (mode != DeviceRound::Control)
-            logits =
-                r.packed(*io.logits, {dimension(p.parameters.profile->local.vocabulary), t, b});
         run.finish(output);
-        if (logits.data) {
+        const auto project = [&] {
             auto sample = output.sample.view({dimension(c.hidden), t * b});
-            logits = logits.view({dimension(p.parameters.profile->local.vocabulary), t * b});
+            auto logits =
+                r.packed(*io.logits, {dimension(p.parameters.profile->local.vocabulary), t * b});
             execution::project_head(sample, p.parameters.text.head, logits, r.workspace, p.cuda);
-        }
-    }
-    if (mode == DeviceRound::Greedy || mode == DeviceRound::Sample) {
-        const auto k = mode == DeviceRound::Greedy ? 1 : 20;
-        if (depth)
-            p.vocabulary_accept(batch, k);
+        };
+        if (round)
+            round->head.capture(p.cuda.stream(), project);
         else
-            p.vocabulary_sample(batch, false, k);
-        p.copy_sample_result(batch, depth != 0);
+            project();
     }
+    p.gpu_timer.end_target(round != nullptr);
 }
 
-void DeviceGraphs::prepare(GraphInputs& inputs) {
-    auto& p        = owner_;
-    auto& r        = p.resources;
-    const auto& io = r.plan.persistent.buffers;
-    const auto drafts =
-        p.parameters.mtp ? std::min(p.shape.draft_tokens, p.shape.max_context - 1) : 0;
+void DeviceGraphs::prepare(GraphInputs& inputs, GraphPreparation& preparation) {
+    auto& p           = owner_;
+    auto& r           = p.resources;
+    const auto& io    = r.plan.persistent.buffers;
+    const auto drafts = p.parameters.mtp ? p.shape.draft_tokens : 0;
     batches_.resize(p.shape.max_concurrency);
     const auto write = [&](const Tensor& target, std::int32_t value) {
         std::vector<std::int32_t> values(target.numel(), value);
@@ -115,19 +112,23 @@ void DeviceGraphs::prepare(GraphInputs& inputs) {
     for (std::uint32_t b = 1; b <= p.shape.max_concurrency; ++b) {
         auto& batch = batches_[b - 1];
         batch.drafts.resize(drafts);
-        batch.rounds.resize(drafts + 1);
         for (std::uint32_t verify = 0; verify < (drafts ? 2U : 1U); ++verify) {
             const auto t = verify ? p.shape.draft_tokens + 1 : 1;
             inputs.batch(r.main_batch(t, b, bounds_.back()), bounds_.back());
             for (auto visible : bounds_) {
                 auto& profile = batch.main[verify].emplace_back();
-                auto run      = main_run(b, verify, visible);
+                if (!preparation.capturing()) inputs.batch(r.main_batch(t, b, visible), visible);
+                auto run = main_run(b, verify, visible);
+                if (!preparation.capturing()) run.stem();
                 for (std::uint32_t layer = 0; layer < p.parameters.text.layers.size(); ++layer) {
                     if (!std::holds_alternative<execution::QsaParameters>(
                             p.parameters.text.layers[layer].mixer))
                         continue;
-                    profile.emplace_back().capture(p.cuda.stream(),
-                                                   [&] { run.local_mixer(layer); });
+                    if (preparation.capturing())
+                        profile.emplace_back().capture(p.cuda.stream(),
+                                                       [&] { run.local_mixer(layer); });
+                    else
+                        run.local_mixer(layer);
                 }
             }
         }
@@ -135,47 +136,56 @@ void DeviceGraphs::prepare(GraphInputs& inputs) {
             inputs.batch(r.mtp_batch(io.mtp->draft_steps[step], 1, b, bounds_.back()),
                          bounds_.back());
             for (auto visible : bounds_) {
+                if (!preparation.capturing())
+                    inputs.batch(r.mtp_batch(io.mtp->draft_steps[step], 1, b, visible), visible);
                 auto run = p.draft_run(step, b, visible);
-                batch.drafts[step].emplace_back().capture(p.cuda.stream(),
-                                                          [&] { run.local_mixer(); });
+                if (preparation.capturing())
+                    batch.drafts[step].emplace_back().capture(p.cuda.stream(),
+                                                              [&] { run.local_mixer(); });
+                else {
+                    run.stem();
+                    run.local_mixer();
+                }
             }
         }
-        for (std::uint32_t depth = 0; depth <= drafts; ++depth) {
-            const auto t = depth ? p.shape.draft_tokens + 1 : 1;
+        for (int verify = 0; verify < (drafts ? 2 : 1); ++verify) {
+            const auto depth = verify ? drafts : 0;
+            const auto t     = verify ? drafts + 1 : 1;
             inputs.batch(r.main_batch(t, b, bounds_.back()), bounds_.back());
-            write(r.tensor(io.batch.valid_columns).slice(0, 0, b), depth + 1);
-            if (depth) {
-                write(r.tensor(io.mtp->extents).slice(0, 0, b), depth);
-                write(r.tensor(io.mtp->anchors).slice(0, 0, b),
+            write(r.tensor(io.batch.valid_columns).slice(0, 0, b),
+                  std::min(t, p.shape.max_context));
+            if (verify) {
+                write(r.tensor(io.mtp->extents).slice(0, 0, b),
+                      std::min(drafts, p.shape.max_context - 1));
+                write(r.tensor(io.anchors).slice(0, 0, b),
                       p.parameters.profile->config.text.ple.eos);
             }
-            body(batch, nullptr, b, depth, DeviceRound::Sample);
-            p.device.synchronize();
-            for (std::uint32_t m = 0; m < (depth ? 3U : 4U); ++m) {
-                auto& round = batch.rounds[depth][m];
-                round.installed_draft.resize(depth);
-                round.graph.prepare(
-                    p.cuda, [&] { body(batch, &round, b, depth, static_cast<DeviceRound>(m)); },
-                    p.parallel ? &*p.parallel : nullptr);
+            const auto decision = [&] {
+                if (verify)
+                    p.accept_forward(b);
+                else
+                    p.sample_forward(b, false);
+                p.copy_sample_result(b, verify);
+            };
+            inputs.stage();
+            if (!preparation.capturing()) {
+                body(batch, nullptr, b, verify);
+                decision();
+                preparation.checkpoint();
+                continue;
             }
-            // Replay a complete round after construction; all ranks enter the same variant.
-            replay(b, DeviceRound::Sample, std::vector<std::uint32_t>(depth, bounds_.back()),
-                   bounds_.back());
-            p.device.synchronize();
+            auto& round = batch.rounds[verify];
+            round.installed_draft.resize(depth);
+            round.graph.prepare(
+                p.cuda, [&] { body(batch, &round, b, verify); },
+                p.parallel ? &*p.parallel : nullptr);
+            batch.decisions[verify].prepare(p.cuda, decision,
+                                            p.parallel ? &*p.parallel : nullptr);
+            replay(b, std::vector<std::uint32_t>(depth, bounds_.back()), bounds_.back(), true,
+                   false);
+            decide(b, verify);
+            preparation.checkpoint();
         }
-        for (int verify = 0; verify < (drafts ? 2 : 1); ++verify)
-            for (int sampled = 0; sampled < 2; ++sampled) {
-                batch.decisions[verify * 2 + sampled].prepare(
-                    p.cuda,
-                    [&] {
-                        if (verify)
-                            p.vocabulary_accept(b, sampled ? 20 : 1);
-                        else
-                            p.vocabulary_sample(b, false, sampled ? 20 : 1);
-                        p.copy_sample_result(b, verify);
-                    },
-                    p.parallel ? &*p.parallel : nullptr);
-            }
     }
     workspace_peak_ = r.workspace.peak_used();
 }
@@ -186,10 +196,10 @@ std::size_t DeviceGraphs::bound(std::uint32_t visible) const {
     return found - bounds_.begin();
 }
 
-void DeviceGraphs::replay(std::uint32_t batch, DeviceRound mode,
-                          std::span<const std::uint32_t> draft_visible, std::uint32_t visible) {
+void DeviceGraphs::replay(std::uint32_t batch, std::span<const std::uint32_t> draft_visible,
+                          std::uint32_t visible, bool head, bool read_drafts) {
     auto& profiles  = batches_.at(batch - 1);
-    auto& round     = profiles.rounds.at(draft_visible.size())[static_cast<int>(mode)];
+    auto& round     = profiles.rounds[!draft_visible.empty()];
     const auto main = bound(visible);
     if (main != round.installed_main) {
         const auto& selected = profiles.main[!draft_visible.empty()][main];
@@ -204,12 +214,14 @@ void DeviceGraphs::replay(std::uint32_t batch, DeviceRound mode,
             round.installed_draft[step] = selected;
         }
     }
+    round.head.set_enabled(round.graph.executable, head);
+    round.readback.set_enabled(round.graph.executable, read_drafts);
     round.graph.launch(owner_.cuda, owner_.parallel ? &*owner_.parallel : nullptr);
 }
 
-void DeviceGraphs::decide(std::uint32_t batch, bool verify, std::int32_t candidates) {
-    batches_.at(batch - 1).decisions[verify * 2 + (candidates == 20)].launch(
-        owner_.cuda, owner_.parallel ? &*owner_.parallel : nullptr);
+void DeviceGraphs::decide(std::uint32_t batch, bool verify) {
+    batches_.at(batch - 1).decisions[verify].launch(owner_.cuda,
+                                                    owner_.parallel ? &*owner_.parallel : nullptr);
 }
 
 } // namespace ninfer::models::qwen4_exp::detail

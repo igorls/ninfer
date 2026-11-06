@@ -224,7 +224,10 @@ def main(argv=None):
         }
         if args.override:
             provenance["override"] = args.override
-        if args.proposal and not is_qwen4_exp:
+        if (
+            args.proposal
+            and model.components["text"]["proposal"]["domain"] == "indexed"
+        ):
             provenance["ranking"] = str(args.ranking)
         report = convert(
             model,

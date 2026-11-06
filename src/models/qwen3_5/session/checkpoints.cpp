@@ -55,7 +55,8 @@ CheckpointMetadata SessionImpl::checkpoint_metadata(CheckpointHandle handle) con
             .role     = record.role,
             .leased   = checkpoints[handle.index].pins != 0 ||
                       state_store->source_pins(record.continuation().image) != 0,
-            .origin = record.origin};
+            .origin   = record.origin,
+            .evidence = record.evidence};
 }
 
 CheckpointSummary SessionImpl::checkpoint_summary(CheckpointHandle handle) const {
@@ -90,11 +91,7 @@ SessionImpl::pause_host_requirements(SequenceHandle handle) const {
                               ? control.prefill->cursor
                               : sequence.continuation.metadata.execution_frontier;
     if (!frontier) { return std::nullopt; }
-    if (control.base->vision_control_plan) {
-        for (const auto& item : control.base->vision_control_plan->items) {
-            if (item.token_begin < frontier && frontier < item.token_end) { return std::nullopt; }
-        }
-    }
+    if (control.base->vision && !control.base->vision->can_checkpoint(frontier)) return {};
     context::HostWriteRequirements write;
     write.state_images = state_store->host_resident(sequence.continuation.image) ? 0 : 1;
     write.kv_pages.resize(directory.pool_count());

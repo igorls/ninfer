@@ -3,6 +3,7 @@
 #include "models/qwen3_5/startup.h"
 #include "models/qwen3_5/measurement.h"
 #include "models/qwen4_exp/startup.h"
+#include "runtime/engine/prepared_startup.inl"
 #if NINFER_ENABLE_DISTRIBUTED
 #    include "runtime/engine/distributed_startup.inl"
 #    include "models/qwen4_exp/parallel/startup.h"

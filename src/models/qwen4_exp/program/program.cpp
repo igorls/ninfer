@@ -30,7 +30,7 @@ RankProgramImpl::RankProgramImpl(const execution::Parameters& p, ExecutionPlan p
       resources(p, std::move(plan), d, observer), ple_inputs(d), ple_ready(d), draft_copied(d),
       draft_output(resources.plan.pinned_draft_bytes), shape(resources.plan.shape),
       prefill_timer(d), gpu_timer(d, shape.gpu_timing), compute_done(d), context_done(d) {
-    if (binding.group) parallel.emplace(binding, d);
+    if (binding.group) parallel.emplace(binding);
     if (parameters.profile->local.size != (parallel ? parallel->size() : 1))
         throw std::logic_error("Qwen4Exp Program communication differs from its weight partition");
     if (resources.ple_prepare) host_ple = std::make_unique<PlePipeline>(resources, d);
@@ -64,8 +64,12 @@ ResidentBinding& RankProgramImpl::binding(runtime::ResidencyId residency) {
 }
 
 void RankProgramImpl::validate_work(const Work& work, runtime::FrameKind kind) const {
-    WorkContract{shape, parameters.profile->config.text.vocabulary,
-                 parameters.profile->public_tokens, bool(parameters.mtp), bool(parameters.vision)}
+    WorkContract{shape,
+                 parameters.profile->config.text.vocabulary,
+                 parameters.profile->public_tokens,
+                 bool(parameters.mtp),
+                 bool(parameters.vision),
+                 parameters.profile->control_token_limit}
         .validate(work, kind);
     const auto check_resident = [&](const runtime::ExecutionMember& member) {
         const auto& resident = bindings[member.residency.lane.value];
@@ -137,8 +141,12 @@ void RankProgramImpl::prepare_commit(runtime::ExecutionTicket ticket, const Comm
         compute->phase != ComputePhase::PendingCommit)
         throw std::logic_error("Qwen4Exp commit does not match the pending execution");
     const auto& frame = *compute;
-    WorkContract{shape, parameters.profile->config.text.vocabulary,
-                 parameters.profile->public_tokens, bool(parameters.mtp), bool(parameters.vision)}
+    WorkContract{shape,
+                 parameters.profile->config.text.vocabulary,
+                 parameters.profile->public_tokens,
+                 bool(parameters.mtp),
+                 bool(parameters.vision),
+                 parameters.profile->control_token_limit}
         .validate_commit(frame.request.work, frame.result.rows, commit);
     for (const auto& row : commit.rows)
         check_selectors(row.states.at(parameters.profile->local.rank), resources.states->storage());
@@ -162,15 +170,13 @@ RankProgram::RankProgram(const execution::Parameters& parameters, ExecutionPlan 
     : impl_(std::make_unique<detail::RankProgramImpl>(parameters, std::move(plan), device, observer,
                                                       binding)) {}
 
-void RankProgram::prepare_execution() {
-    if (impl_->shape.cuda_graph) { impl_->initialize_graphs(); }
+GraphPreparationSample RankProgram::prepare_execution(GraphPreparationMode mode) {
+    return impl_->initialize_graphs(mode);
 }
 
 void RankProgram::release_execution() { impl_->release_graphs(); }
 
 RankProgram::~RankProgram() = default;
-
-runtime::ExecutionCapacity RankProgram::capacity() const noexcept { return {1, 1}; }
 
 SessionPlan RankProgram::session_plan() const {
     auto plan = plan_session(impl_->resources.plan);
@@ -216,6 +222,8 @@ std::optional<runtime::ExecutionEvent<ExecutionTypes>> RankProgram::poll() { ret
 
 void RankProgram::drain() { impl_->drain(); }
 
+void RankProgram::wait_for_device() const { impl_->wait_for_device(); }
+
 std::optional<GraphMemorySummary> RankProgram::graph_memory_observation() const {
     return impl_->graph_memory;
 }
@@ -233,6 +241,10 @@ RankMemoryBudget RankProgram::resource_budget() const {
 }
 
 RankMemoryUsage RankProgram::observe_resources() const { return impl_->observe_resources(); }
+
+MemorySpan RankProgram::input_storage() {
+    return impl_->resources.vision ? impl_->resources.vision->staging() : MemorySpan{};
+}
 
 void RankProgram::reset_measurement_peaks() noexcept { impl_->reset_measurement_peaks(); }
 

@@ -45,6 +45,21 @@ struct ContextRecordBinding {
     std::uint64_t binding_epoch = 0;
 };
 
+struct RecordUsage {
+    std::uint64_t stride_bytes = 0;
+    std::uint64_t live_records = 0, pending_retirement_records = 0;
+    std::uint64_t cached_records = 0;
+};
+
+// Record-relative fields supplied by the layout owner. Copies preserve represented content.
+struct RecordRangeCopy {
+    std::uint32_t source_rank      = 0;
+    std::uint32_t destination_rank = 0;
+    std::size_t source_offset      = 0;
+    std::size_t destination_offset = 0;
+    std::size_t bytes              = 0;
+};
+
 // Owns one rank-local replica. The domain outlives all record owners and reservations.
 class RecordLease {
 public:
@@ -64,6 +79,7 @@ public:
     [[nodiscard]] AllocationId allocation() const noexcept { return allocation_; }
 
     [[nodiscard]] ContextRecordBinding binding() const;
+    void set_use(ContextUse use) noexcept;
     void defer_retirement();
     void cancel_retirement();
     void reset() noexcept;
@@ -73,7 +89,12 @@ private:
     ContextPool* pool_ = nullptr;
     ContextDomainId domain_;
     AllocationId allocation_;
-    bool retiring_ = false;
+    bool retiring_      = false;
+    ContextUse use_     = ContextUse::Request;
+    RecordUsage* usage_ = nullptr;
+    void account(bool add) noexcept;
+    void set_retiring(bool retiring) noexcept;
+    void forget() noexcept;
     friend class RecordReservation;
     friend class RecordDomains;
 };
@@ -116,6 +137,8 @@ public:
 
     [[nodiscard]] bool ready() const noexcept;
     [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] bool contributes_to(const RecordAssessment&,
+                                      bool metadata_pressure) const noexcept;
     [[nodiscard]] std::uint32_t remaining(std::uint32_t rank) const noexcept;
 
     [[nodiscard]] std::span<const std::uint32_t> ranks() const noexcept { return ranks_; }
@@ -171,6 +194,10 @@ public:
     [[nodiscard]] const ContextRecordLayout& layout(std::uint32_t id) const;
     [[nodiscard]] ContextPool& pool(ContextDomainId);
     [[nodiscard]] const ContextPool& pool(ContextDomainId) const;
+    // Logical directories classify an owned replica; equal physical classes may serve
+    // different layouts. Classification never changes allocation or reservation policy.
+    void classify(RecordLease&, std::uint32_t layout);
+    [[nodiscard]] const RecordUsage& usage(ContextDomainId, std::uint32_t layout) const;
     [[nodiscard]] RecordAssessment assess(std::span<const RecordDemand>,
                                           std::span<const RecordRelease> = {}) const;
     [[nodiscard]] RecordReserveResult reserve(std::span<const RecordDemand>);

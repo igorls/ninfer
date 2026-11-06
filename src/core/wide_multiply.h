@@ -34,6 +34,24 @@ struct WideProduct {
     return product.high != 0 ? std::numeric_limits<std::uint64_t>::max() : product.low;
 }
 
+// Floor of a 128-bit numerator divided by a positive 64-bit denominator.
+// Overflow and a zero denominator saturate; callers requiring division reject zero.
+[[nodiscard]] constexpr std::uint64_t divide_wide_saturating(WideProduct value,
+                                                            std::uint64_t denominator) noexcept {
+    if (!denominator || value.high >= denominator)
+        return std::numeric_limits<std::uint64_t>::max();
+    std::uint64_t remainder = value.high, quotient = 0;
+    for (int bit = 63; bit >= 0; --bit) {
+        const bool carry = (remainder >> 63U) != 0;
+        remainder = (remainder << 1U) | ((value.low >> bit) & 1U);
+        if (carry || remainder >= denominator) {
+            remainder -= denominator;
+            quotient |= std::uint64_t{1} << bit;
+        }
+    }
+    return quotient;
+}
+
 [[nodiscard]] constexpr std::uint64_t saturating_add(std::uint64_t a, std::uint64_t b) noexcept {
     return b > std::numeric_limits<std::uint64_t>::max() - a
                ? std::numeric_limits<std::uint64_t>::max()

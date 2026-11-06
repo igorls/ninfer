@@ -20,7 +20,8 @@ struct Record {
 };
 
 struct View {
-    context::MetadataBudget metadata{context::CheckpointStore<Record>::metadata_bytes(128)};
+    context::MetadataBudget metadata{context::CheckpointStore<Record>::metadata_bytes(128) +
+                                     context::RecoveryIndex<>::metadata_bytes(128) * 4};
     context::CheckpointStore<Record> store{128, metadata};
     bool collide = false;
 
@@ -114,7 +115,7 @@ void known_losses() {
         left.resize(150);
         right.resize(150);
         const auto x = view.add(left), y = view.add(right);
-        context::RecoveryIndex index;
+        context::RecoveryIndex index(view.metadata);
         index.synchronize(view);
         const std::array removed{root, a, b};
         const std::array one{x};
@@ -134,7 +135,7 @@ void known_losses() {
 void lifecycle() {
     View view;
     view.collide = true;
-    context::RecoveryIndex index;
+    context::RecoveryIndex index(view.metadata);
     const auto deep = view.add({1, 2, 3, 4});
     index.synchronize(view);
     const auto shallow   = view.add({1, 2});
@@ -180,7 +181,7 @@ void exhaustive_and_random() {
     for (unsigned fixture = 0; fixture < 80; ++fixture) {
         View view;
         view.collide = fixture % 4 == 0;
-        context::RecoveryIndex index;
+        context::RecoveryIndex index(view.metadata);
         std::vector<Handle> handles;
         for (unsigned i = 0; i < 32; ++i) {
             std::vector<std::uint32_t> tokens;
@@ -280,6 +281,37 @@ void physical_selection() {
         }
     }
 }
+
+void marginal_dependencies() {
+    View view;
+    std::vector<Handle> all;
+    for (const auto& key : std::vector<std::vector<std::uint32_t>>{
+             {1}, {1, 2}, {1, 3}, {1, 2, 4}, {1, 2, 4}, {1, 3, 5}, {9}, {9, 8}})
+        all.push_back(view.add(key));
+    context::RecoveryIndex index(view.metadata);
+    index.synchronize(view);
+    auto evaluation = index.evaluate(all);
+    for (unsigned mask = 0; mask < (1U << all.size()); ++mask) {
+        std::vector<Handle> removed;
+        for (unsigned i = 0; i < all.size(); ++i)
+            if (mask & (1U << i)) removed.push_back(all[i]);
+        for (unsigned a = 0; a < all.size(); ++a) {
+            const std::array additions{all[a], all[(a + 3) % all.size()]};
+            const auto dependencies = evaluation.dependencies(removed, additions);
+            auto trial              = removed;
+            trial.insert(trial.end(), additions.begin(), additions.end());
+            const auto marginal = oracle(view, trial, all) - oracle(view, removed, all);
+            for (const auto b : all) {
+                if (dependencies.intersects(std::span<const Handle>(&b, 1))) continue;
+                auto changed = removed, combined = trial;
+                changed.push_back(b);
+                combined.push_back(b);
+                require(oracle(view, combined, all) - oracle(view, changed, all) == marginal,
+                        "unrelated removal changed cached marginal recovery loss");
+            }
+        }
+    }
+}
 } // namespace
 
 int main() {
@@ -289,6 +321,7 @@ int main() {
         lifecycle();
         exhaustive_and_random();
         physical_selection();
+        marginal_dependencies();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {

@@ -151,9 +151,16 @@ void PlePipeline::append_device(ple::Ticket ticket, const Tensor& ids,
 MemorySpan PlePipeline::append_destination(std::uint32_t slot, std::uint32_t step,
                                            std::uint32_t batch) {
     const auto index  = slot * resources_.plan.shape.draft_tokens + step;
-    const auto offset = resources_.plan.persistent.buffers.mtp->ingress.bytes +
-                        index * resources_.plan.shape.max_concurrency * sizeof(std::int32_t);
-    return resources_.mtp_ingress().subspan(offset, batch * sizeof(std::int32_t));
+    const auto offset = index * resources_.plan.shape.max_concurrency * sizeof(std::int32_t);
+    return resources_.ple_handoff().subspan(offset, batch * sizeof(std::int32_t));
+}
+
+void PlePipeline::capture_append(std::uint32_t slot, const Tensor& ids, std::uint32_t step,
+                                 CudaExecutionView cuda) {
+    auto& transfer = appends_.at(slot * resources_.plan.shape.draft_tokens + step);
+    copy_bytes_async(append_destination(slot, step, ids.numel()),
+                     {ids.data, ids.bytes(), cuda.device()}, cuda);
+    transfer.copied.record_external(cuda.stream());
 }
 
 void PlePipeline::append_submitted(ple::Ticket ticket, std::span<const std::uint32_t> extents,
@@ -231,10 +238,9 @@ void PlePipeline::progress() {
         if (!w.cancelled && !w.error) {
             try {
                 const auto offset =
-                    resources_.plan.persistent.buffers.mtp->ingress.bytes +
                     i * resources_.plan.shape.max_concurrency * sizeof(std::int32_t);
                 const auto* ids = reinterpret_cast<const std::int32_t*>(
-                    resources_.mtp_ingress()
+                    resources_.ple_handoff()
                         .subspan(offset, transfer.batch * sizeof(std::int32_t))
                         .data);
                 std::array<ple::Append, kMaximumConcurrency> additions;

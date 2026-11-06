@@ -44,7 +44,7 @@ struct Settings {
 ninfer::KvCacheStorage parse_kv_dtype(const std::string& value) {
     if (value == "bf16") { return ninfer::KvCacheStorage::BFloat16; }
     if (value == "int8") { return ninfer::KvCacheStorage::Int8Group64; }
-    if (value == "fp8") { return ninfer::KvCacheStorage::Fp8E4M3Row256; }
+    if (value == "fp8") { return ninfer::KvCacheStorage::Fp8E4m3fnGroup128Ue8m0; }
     if (value == "nvfp4") { return ninfer::KvCacheStorage::Nvfp4Group16; }
     if (value == "k8v4") { return ninfer::KvCacheStorage::Fp8KeyNvfp4Value; }
     throw std::invalid_argument("--kv-dtype must be bf16, int8, fp8, nvfp4 or k8v4");

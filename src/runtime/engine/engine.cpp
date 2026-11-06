@@ -22,14 +22,14 @@
 namespace ninfer {
 namespace {
 
-runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefaults& defaults,
-                                                        SamplingMode mode, RequestOptions options) {
+runtime::ResolvedRequestOptions resolve_request_options(const SamplingPreset& preset,
+                                                        RequestOptions options) {
     if (options.execution.thinking.budget && *options.execution.thinking.budget == 0) {
         throw std::invalid_argument("thinking budget must be positive");
     }
     runtime::ResolvedRequestOptions resolved;
     resolved.execution.sampling =
-        runtime::resolve_sampling(defaults, mode, options.execution.sampling);
+        runtime::resolve_sampling(preset, options.execution.sampling);
     resolved.execution.requested_output_tokens  = options.execution.requested_output_tokens;
     resolved.execution.allow_prefix_reuse       = options.execution.allow_prefix_reuse;
     resolved.execution.allow_prefix_publication = options.execution.allow_prefix_publication;
@@ -93,16 +93,38 @@ struct CoreKind<std::unique_ptr<runtime::CausalScoreCore<Instance>>> {
 } // namespace
 
 class PreparedPrompt::Impl {
+    struct Payload {
+        virtual ~Payload() = default;
+    };
+
+    template <class Prompt>
+    struct ModelPayload final : Payload {
+        explicit ModelPayload(Prompt value) : value(std::move(value)) {}
+
+        Prompt value;
+    };
 public:
-    Impl(PromptSummary prompt_summary, PromptPreparationStats preparation, SamplingMode mode,
-         models::qwen::PreparedPrompt prepared)
-        : summary(std::move(prompt_summary)), prepare(std::move(preparation)), sampling_mode(mode),
-          value(std::move(prepared)) {}
+    template <class Frontend, class Prompt>
+    Impl(const Frontend& frontend, Prompt prompt)
+        : summary(prompt.summary()), prepare(prompt.preparation_stats()),
+          sampling(frontend.sampling_for(prompt)), domain(frontend.identity()),
+          value(std::make_unique<ModelPayload<Prompt>>(std::move(prompt))) {}
+
+    template <class Prompt>
+    Prompt take() {
+        auto* selected = dynamic_cast<ModelPayload<Prompt>*>(value.get());
+        if (!selected) throw std::logic_error("prepared prompt has a different model input type");
+        Prompt prompt = std::move(selected->value);
+        value.reset();
+        return prompt;
+    }
 
     PromptSummary summary;
     PromptPreparationStats prepare;
-    SamplingMode sampling_mode = SamplingMode::Thinking;
-    models::qwen::PreparedPrompt value;
+    SamplingPreset sampling;
+    std::shared_ptr<const void> domain;
+private:
+    std::unique_ptr<Payload> value;
 };
 
 PreparedPrompt::PreparedPrompt() noexcept                            = default;
@@ -128,7 +150,8 @@ class GenerationHandle::Impl {
 public:
     class Concept {
     public:
-        virtual ~Concept() = default;
+        virtual ~Concept()                                                    = default;
+        virtual void wait_for_admission(const CancellationView& cancellation) = 0;
         virtual GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) = 0;
     };
 
@@ -137,6 +160,10 @@ public:
     public:
         Model(std::shared_ptr<void> keep_alive, Submission submission)
             : keep_alive_(std::move(keep_alive)), submission_(std::move(submission)) {}
+
+        void wait_for_admission(const CancellationView& cancellation) override {
+            submission_.wait_for_admission(cancellation);
+        }
 
         GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) override {
             return submission_.wait(sink, cancellation);
@@ -150,8 +177,13 @@ public:
     template <class Submission>
     Impl(std::shared_ptr<void> keep_alive, Submission submission,
          ResolvedSamplingParameters sampling)
-        : state_(std::make_unique<Model<Submission>>(std::move(keep_alive), std::move(submission))),
+        : request_id_(submission.request_id()),
+          state_(std::make_unique<Model<Submission>>(std::move(keep_alive), std::move(submission))),
           sampling_(sampling) {}
+
+    void wait_for_admission(const CancellationView& cancellation) {
+        state_->wait_for_admission(cancellation);
+    }
 
     GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) {
         return state_->wait(sink, cancellation);
@@ -161,7 +193,10 @@ public:
         return sampling_;
     }
 
+    [[nodiscard]] std::uint64_t request_id() const noexcept { return request_id_; }
+
 private:
+    std::uint64_t request_id_ = 0;
     std::unique_ptr<Concept> state_;
     ResolvedSamplingParameters sampling_;
 };
@@ -175,9 +210,18 @@ GenerationHandle::GenerationHandle(std::unique_ptr<Impl> impl) noexcept : impl_(
 
 GenerationHandle::operator bool() const noexcept { return impl_ != nullptr; }
 
+std::uint64_t GenerationHandle::request_id() const noexcept {
+    return impl_ ? impl_->request_id() : 0;
+}
+
 const ResolvedSamplingParameters& GenerationHandle::resolved_sampling() const noexcept {
     static const ResolvedSamplingParameters empty;
     return impl_ != nullptr ? impl_->resolved_sampling() : empty;
+}
+
+void GenerationHandle::wait_for_admission(const CancellationView& cancellation) {
+    if (impl_ == nullptr) { throw std::logic_error("GenerationHandle is empty"); }
+    impl_->wait_for_admission(cancellation);
 }
 
 GenerationResult GenerationHandle::wait(OutputSink* sink, const CancellationView& cancellation) {
@@ -200,10 +244,15 @@ public:
     explicit Impl(EngineOptions engine_options)
         : options(runtime::normalize_engine_options(std::move(engine_options))) {
         nvtx::ScopedRange load_range(nvtx::Name::EngineLoad, nvtx::Category::Runtime);
-        auto constructed  = runtime::construct_model(options);
-        active            = std::move(constructed.instance);
-        startup.load      = std::move(constructed.load);
-        sampling_defaults = frontend().sampling_defaults();
+        auto constructed = runtime::construct_model(options);
+        active           = std::move(constructed.instance);
+        startup.load     = std::move(constructed.load);
+        std::visit(
+            [&](const auto& instance) {
+                sampling_defaults = instance->frontend.sampling_defaults();
+                frontend_domain   = instance->frontend.identity();
+            },
+            active);
         initialize_description();
         StartupPhaseScope finalize_phase(options.startup_observer, StartupPhase::EngineFinalize);
         std::visit(
@@ -222,14 +271,22 @@ public:
 
     ~Impl() noexcept { core.emplace<std::monostate>(); }
 
-    [[nodiscard]] const models::qwen::Frontend& frontend() const {
-        return std::visit(
-            [](const auto& instance) -> const models::qwen::Frontend& {
-                return instance->frontend;
+    EngineSnapshot measure(runtime::MeasurementCommand command) {
+        auto result = std::visit(
+            [&](auto& value) -> EngineSnapshot {
+                using State = std::remove_cvref_t<decltype(value)>;
+                if constexpr (std::is_same_v<State, std::monostate>)
+                    throw std::logic_error("Engine core is unavailable");
+                else
+                    return value->measure(command);
             },
-            active);
+            core);
+        result.media = std::visit(
+            [](const auto& instance) { return instance->frontend.media_cache_summary(); }, active);
+        return result;
     }
 
+    std::shared_ptr<const void> frontend_domain;
     EngineOptions options;
     runtime::ActiveModel active;
     EngineDescription description;
@@ -247,6 +304,8 @@ private:
         description.kv_cache        = options.kv_cache;
         std::visit(
             [&](const auto& instance) {
+                description.context_token_capacity_estimate =
+                    runtime::estimate_context_token_capacity(instance->context_capacities);
                 const auto usage = instance->session->physical_usage();
                 for (const auto& pool : usage.pools)
                     description.context_pools.push_back(
@@ -254,15 +313,9 @@ private:
                 startup.ranks = instance->rank_budgets;
                 for (const auto& pool : instance->session->kv_pools())
                     description.kv_pools.push_back({pool.id.index, std::string(pool.label), 0});
-                for (const auto& rank : instance->executor->observations()) {
-                    int device = options.device;
-                    if (options.deployment)
-                        for (const auto& configured : options.deployment->ranks)
-                            if (configured.rank == rank.rank) device = configured.device;
-                    description.ranks.push_back(
-                        {rank.rank, rank.node, device, rank.hardware,
-                         rank.physical_memory && rank.physical_memory->shared_physical_memory});
-                }
+                const auto ranks = instance->executor->rank_descriptions();
+                description.ranks.assign(ranks.begin(), ranks.end());
+                description.placements = instance->session->placement_descriptions();
             },
             active);
     }
@@ -282,16 +335,15 @@ Engine& Engine::operator=(Engine&&) noexcept = default;
 PreparedPrompt Engine::prepare(PromptInput input, const PreparationControl& control) const {
     nvtx::ScopedRange prepare_range(nvtx::Name::FrontendPrepare, nvtx::Category::Runtime);
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    auto prepared      = impl_->frontend().prepare(std::move(input), control);
-    PromptSummary info = prepared.summary();
-    const SamplingMode sampling_mode =
-        info.starts_in_reasoning ? SamplingMode::Thinking : SamplingMode::NonThinking;
-    if (info.prompt_tokens > impl_->options.max_context) {
+    auto prepared = std::visit(
+        [&](const auto& instance) {
+            auto value = instance->frontend.prepare(std::move(input), control);
+            return std::make_unique<PreparedPrompt::Impl>(instance->frontend, std::move(value));
+        },
+        impl_->active);
+    if (prepared->summary.prompt_tokens > impl_->options.max_context)
         throw std::logic_error("target Frontend admitted a prompt beyond Engine capacity");
-    }
-    const PromptPreparationStats preparation = prepared.preparation_stats();
-    return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(info, preparation, sampling_mode,
-                                                                 std::move(prepared)));
+    return PreparedPrompt(std::move(prepared));
 }
 
 PreparedPrompt Engine::prepare_tokens(std::vector<TokenId> token_ids,
@@ -300,27 +352,32 @@ PreparedPrompt Engine::prepare_tokens(std::vector<TokenId> token_ids,
                                     static_cast<std::uint64_t>(token_ids.size()));
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
     if (token_ids.size() > impl_->options.max_context) {
-        throw RequestError(RequestErrorKind::ContextLengthExceeded,
-                           context_capacity_error(token_ids.size(), impl_->options.max_context));
+        throw RequestError(
+            RequestErrorKind::ContextLengthExceeded,
+            runtime::context_length_error_message(token_ids.size(), impl_->options.max_context));
     }
-    auto prepared = impl_->frontend().prepare_tokens(std::move(token_ids), allow_prefix_identity);
-    PromptSummary info = prepared.summary();
-    if (info.prompt_tokens > impl_->options.max_context) {
+    auto prepared = std::visit(
+        [&](const auto& instance) {
+            auto value =
+                instance->frontend.prepare_tokens(std::move(token_ids), allow_prefix_identity);
+            return std::make_unique<PreparedPrompt::Impl>(instance->frontend, std::move(value));
+        },
+        impl_->active);
+    if (prepared->summary.prompt_tokens > impl_->options.max_context)
         throw std::logic_error("target Frontend admitted prompt tokens beyond capacity");
-    }
-    const PromptPreparationStats preparation = prepared.preparation_stats();
-    return PreparedPrompt(std::make_unique<PreparedPrompt::Impl>(
-        info, preparation, SamplingMode::Thinking, std::move(prepared)));
+    return PreparedPrompt(std::move(prepared));
 }
 
 std::vector<TokenId> Engine::tokenize_text(std::string_view text) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->frontend().tokenize_text(text);
+    return std::visit([&](const auto& instance) { return instance->frontend.tokenize_text(text); },
+                      impl_->active);
 }
 
 std::string Engine::token_bytes(TokenId token) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->frontend().token_bytes(token);
+    return std::visit([token](const auto& instance) { return instance->frontend.token_bytes(token); },
+                      impl_->active);
 }
 
 std::vector<float> Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t first_target) {
@@ -358,7 +415,9 @@ CausalScores Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t fir
             if constexpr (std::is_same_v<CoreState, std::monostate>) {
                 throw std::logic_error("Engine core is unavailable");
             } else if constexpr (CoreState::element_type::purpose == EnginePurpose::CausalScoring) {
-                return core->score(std::move(prompt.impl_->value), first_target, readout);
+                return core->score(
+                    prompt.impl_->take<typename CoreState::element_type::PreparedPrompt>(),
+                    first_target, readout);
             } else {
                 throw std::logic_error("Engine scoring core is unavailable");
             }
@@ -382,7 +441,11 @@ CausalScores Engine::score_tokens(std::vector<TokenId> tokens, std::uint32_t fir
 
 std::uint32_t Engine::count_tokens(PromptInput input, const PreparationControl& control) const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->frontend().count_tokens(std::move(input), control);
+    return std::visit(
+        [&](const auto& instance) {
+            return instance->frontend.count_tokens(std::move(input), control);
+        },
+        impl_->active);
 }
 
 ModelSamplingDefaults Engine::sampling_defaults() const {
@@ -392,12 +455,16 @@ ModelSamplingDefaults Engine::sampling_defaults() const {
 
 const PromptCapabilities& Engine::prompt_capabilities() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->frontend().prompt_capabilities();
+    return std::visit([](const auto& instance) -> const PromptCapabilities& {
+        return instance->frontend.prompt_capabilities();
+    }, impl_->active);
 }
 
 const std::string& Engine::chat_template_source() const {
     if (impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
-    return impl_->frontend().chat_template_source();
+    return std::visit([](const auto& instance) -> const std::string& {
+        return instance->frontend.chat_template_source();
+    }, impl_->active);
 }
 
 GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
@@ -409,6 +476,8 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         throw std::logic_error("submit requires a Generation Engine");
     }
     if (prompt.impl_ == nullptr) { throw std::invalid_argument("PreparedPrompt is empty"); }
+    if (prompt.impl_->domain != impl_->frontend_domain)
+        throw std::invalid_argument("PreparedPrompt belongs to a different Frontend");
     if (consumer_mode != OutputConsumerMode::Streaming &&
         (observation.live_timings || observation.prompt_progress)) {
         throw std::invalid_argument("live generation observations require a Streaming consumer");
@@ -428,7 +497,7 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         options.execution.allow_prefix_publication = false;
     }
     runtime::ResolvedRequestOptions resolved_options = resolve_request_options(
-        impl_->sampling_defaults, prompt.impl_->sampling_mode, std::move(options));
+        prompt.impl_->sampling, std::move(options));
     if (capture_features) {
         resolved_options.execution.reasoning_feature_position =
             *prompt.impl_->summary.reasoning_frontier - 1U;
@@ -445,15 +514,32 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         throw std::invalid_argument("prompt position logprobs exceed the prompt");
     }
     if (prompt_summary.prompt_tokens > impl_->options.max_context) {
-        throw RequestError(
-            RequestErrorKind::ContextLengthExceeded,
-            context_capacity_error(prompt_summary.prompt_tokens, impl_->options.max_context));
+        throw RequestError(RequestErrorKind::ContextLengthExceeded,
+                           runtime::context_length_error_message(prompt_summary.prompt_tokens,
+                                                                 impl_->options.max_context));
     }
     const double prepare_seconds = prompt.impl_->prepare.seconds;
     if (resolved_options.execution.requested_output_tokens == 0) {
         struct ImmediateSubmission {
             GenerationResult result;
             OutputConsumerMode consumer_mode = OutputConsumerMode::Aggregate;
+
+            [[nodiscard]] std::uint64_t request_id() const noexcept { return 0; }
+
+            void wait_for_admission(const CancellationView& cancellation) {
+                try {
+                    if (cancellation.requested()) {
+                        result.finish_reason = FinishReason::Cancelled;
+                    }
+                } catch (...) {
+                    result.finish_reason = FinishReason::Cancelled;
+                    throw;
+                }
+                if (result.finish_reason == FinishReason::Cancelled) {
+                    throw RequestError(RequestErrorKind::Cancelled,
+                                       "inference request cancelled before admission");
+                }
+            }
 
             GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) {
                 const bool streaming = consumer_mode == OutputConsumerMode::Streaming;
@@ -485,10 +571,10 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             } else if constexpr (CoreState::element_type::purpose == EnginePurpose::CausalScoring) {
                 throw std::logic_error("Engine generation core is unavailable");
             } else {
-                auto submission =
-                    core->submit(std::move(prompt.impl_->value), prompt_summary, prepare_seconds,
-                                 std::move(resolved_options), consumer_mode, std::move(observation),
-                                 pending_deadline);
+                auto submission = core->submit(
+                    prompt.impl_->take<typename CoreState::element_type::PreparedPrompt>(),
+                    prompt_summary, prepare_seconds, std::move(resolved_options), consumer_mode,
+                    std::move(observation), pending_deadline);
                 return GenerationHandle(std::make_unique<GenerationHandle::Impl>(
                     impl_, std::move(submission), resolved_sampling));
             }
@@ -519,32 +605,35 @@ const StartupReport& Engine::startup_report() const {
     return impl_->startup;
 }
 
-EngineSnapshot Engine::snapshot() const {
+EngineSnapshot Engine::snapshot(SnapshotOptions options) const {
     if (!impl_) throw std::logic_error("Engine is moved from");
     auto result = std::visit(
-        [](const auto& core) -> EngineSnapshot {
+        [options](const auto& core) -> EngineSnapshot {
             using State = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<State, std::monostate>)
                 throw std::logic_error("Engine core is unavailable");
             else
-                return core->snapshot();
+                return core->snapshot(options);
         },
         impl_->core);
-    result.media = impl_->frontend().media_cache_summary();
+    result.media =
+        std::visit([](const auto& instance) { return instance->frontend.media_cache_summary(); },
+                   impl_->active);
     return result;
 }
 
-std::optional<EngineSnapshot> Engine::try_snapshot() const {
+std::optional<EngineSnapshot> Engine::try_snapshot(SnapshotOptions options) const {
     if (!impl_) throw std::logic_error("Engine is moved from");
     auto result = std::visit(
-        [](const auto& core) -> std::optional<EngineSnapshot> {
+        [options](const auto& core) -> std::optional<EngineSnapshot> {
             using State = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<State, std::monostate>)
                 throw std::logic_error("Engine core is unavailable");
             else
-                return core->try_snapshot();
+                return core->try_snapshot(options);
         }, impl_->core);
-    if (result) result->media = impl_->frontend().media_cache_summary();
+    if (result) result->media = std::visit(
+        [](const auto& instance) { return instance->frontend.media_cache_summary(); }, impl_->active);
     return result;
 }
 
@@ -590,15 +679,18 @@ Engine::QuiescenceReport Engine::run_at_quiescence(std::function<void()> work) {
 }
 
 void Engine::reset_measurement_peaks() {
-    if (impl_ == nullptr) { return; }
-    std::visit(
-        [](auto& core) {
-            using CoreState = std::remove_cvref_t<decltype(core)>;
-            if constexpr (!std::is_same_v<CoreState, std::monostate>) {
-                core->reset_measurement_peaks();
-            }
-        },
-        impl_->core);
+    if (!impl_) throw std::logic_error("Engine is moved from");
+    (void)impl_->measure({runtime::MeasurementAction::Reset});
+}
+
+EngineSnapshot Engine::begin_measurement(MeasurementOptions options) {
+    if (!impl_) throw std::logic_error("Engine is moved from");
+    return impl_->measure({runtime::MeasurementAction::Begin, options.profile});
+}
+
+EngineSnapshot Engine::end_measurement() {
+    if (!impl_) throw std::logic_error("Engine is moved from");
+    return impl_->measure({runtime::MeasurementAction::End});
 }
 
 } // namespace ninfer

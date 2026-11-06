@@ -20,6 +20,7 @@ struct ShapeCase {
     std::int32_t second_row;
     std::span<const std::int32_t> route_starts;
     std::span<const std::int32_t> route_interiors;
+    bool distinct_inputs = false;
 };
 
 int run_q8_a16_shape(std::string_view label, const ShapeCase& shape);

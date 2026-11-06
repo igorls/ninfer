@@ -6,9 +6,7 @@ namespace ninfer::models::qwen4_exp::detail {
 
 bool RequestPlan::can_checkpoint(std::uint32_t frontier) const {
     if (!frontier) return false;
-    if (vision)
-        for (const auto& item : vision->plan.control_plan->items)
-            if (item.token_begin < frontier && frontier < item.token_end) return false;
+    if (vision && !vision->can_checkpoint(frontier)) return false;
     return true;
 }
 
@@ -29,28 +27,8 @@ std::shared_ptr<const qwen::VisionExecutionInput>
 SessionImpl::plan_vision(const qwen::PreparedPromptData& prompt) const {
     if (!definition->options().vision || !definition->config().vision)
         throw std::invalid_argument("Vision is disabled for this Engine");
-    const auto& config    = *definition->config().vision;
-    auto input            = std::make_shared<qwen::VisionExecutionInput>();
-    input->prompt_tokens  = prompt.token_ids.size();
-    input->vision_items   = prompt.vision_items;
-    input->media_payloads = prompt.media_payloads;
-    auto& vision          = input->plan;
-    vision.control_plan =
-        std::make_shared<qwen::VisionControlPlan>(qwen::plan_vision_control(prompt, config));
-    vision.control = std::make_shared<qwen::VisionControl>(
-        qwen::build_vision_control(prompt, *vision.control_plan, 0));
-    for (std::uint32_t i = 0; i < vision.control_plan->items.size(); ++i) {
-        const auto& item  = vision.control_plan->items[i];
-        const auto& media = input->media_payloads[i];
-        if (!media ||
-            media->patch_elements != input->vision_items[i].patch_count * config.patch_width())
-            throw std::invalid_argument("Vision item has an invalid patch payload");
-        if (item.merged_count > plan.vision_max_merged_tokens)
-            throw std::invalid_argument("Vision item exceeds the prepared workspace envelope");
-        vision.uses.push_back({item.token_begin, item.token_end, i, i});
-        vision.max_merged_count = std::max(vision.max_merged_count, item.merged_count);
-    }
-    return input;
+    return qwen::prepare_vision_input(prompt, *definition->config().vision,
+                                      plan.vision_max_features);
 }
 
 } // namespace ninfer::models::qwen4_exp::detail
@@ -61,7 +39,7 @@ const runtime::RequestPlanSummary& RequestBasePlan::summary() const noexcept {
     return plan_->summary;
 }
 
-const qwen::PreparedContextCache& RequestBasePlan::context_cache() const noexcept {
+const models::frontend::PreparedContextCache& RequestBasePlan::context_cache() const noexcept {
     return plan_->prompt.context_cache;
 }
 
@@ -85,7 +63,7 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
         throw std::invalid_argument("prepared prompt media payload is incomplete");
     if (input.has_media()) plan->vision = p.plan_vision(input);
     for (const auto id : input.token_ids)
-        if (id < 0 || std::uint32_t(id) >= p.definition->resources().public_token_count)
+        if (id < 0 || std::uint32_t(id) >= p.definition->resources().text.public_token_count)
             throw std::invalid_argument("prompt token is outside the public vocabulary");
     std::uint32_t previous = 0;
     for (const auto f : input.identity.rewrite_execution_frontiers) {
@@ -107,7 +85,7 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
     plan->logprobs = options.logprobs;
     plan->reasoning_feature_position = options.reasoning_feature_position;
     for (auto id : plan->logprobs.candidates)
-        if (id < 0 || std::uint32_t(id) >= p.definition->resources().public_token_count)
+        if (id < 0 || std::uint32_t(id) >= p.definition->resources().text.public_token_count)
             throw std::invalid_argument("logprob candidate is outside vocabulary");
     if (plan->logprobs.candidates.size() > kMaximumLogprobCandidates ||
         plan->logprobs.top > kMaximumTopLogprobs ||
@@ -143,21 +121,23 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
             auto found = std::find_if(plan->captures.begin(), plan->captures.end(),
                                       [&](const auto& c) { return c.frontier == f; });
             if (found == plan->captures.end()) {
-                plan->captures.push_back({f, {role}, runtime::CheckpointOrigin::Semantic, evidence});
+                plan->captures.push_back(
+                    {f, {role}, runtime::CheckpointOrigin::Semantic, evidence});
             } else {
+                found->evidence |= evidence;
                 if (std::find(found->roles.begin(), found->roles.end(), role) == found->roles.end())
                     found->roles.push_back(role);
-                if (evidence != SharedCandidateEvidence::EngineStructural)
-                    found->shared_evidence = evidence;
             }
         };
         add(input.identity.rewrite_checkpoint ? input.identity.rewrite_checkpoint->recovery_frontier
                                               : count,
             runtime::CheckpointRole::InputReplay);
         for (const auto& o : input.context_cache.opportunities)
-            add(o.frontier, o.kind == PromptCacheMarkerKind::PrivateLongAnchor
-                                ? runtime::CheckpointRole::LongAnchor
-                                : runtime::CheckpointRole::SharedPrefix, o.evidence);
+            add(o.frontier,
+                o.kind == PromptCacheMarkerKind::PrivateLongAnchor
+                    ? runtime::CheckpointRole::LongAnchor
+                    : runtime::CheckpointRole::SharedPrefix,
+                o.evidence);
         std::sort(plan->captures.begin(), plan->captures.end(),
                   [](const auto& a, const auto& b) { return a.frontier < b.frontier; });
     }

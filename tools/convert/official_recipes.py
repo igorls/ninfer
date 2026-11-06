@@ -10,6 +10,7 @@ from .methods import (
     AuxiliaryValue,
     cast_direct,
     fp8_row_maxabs,
+    fp8_block_maxabs,
     grouped_absmax,
     import_encoded,
     nvfp4_maxabs,
