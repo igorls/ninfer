@@ -12,3 +12,5 @@ target_link_libraries(ninfer_tokenizer_probe PRIVATE ninfer_text ninfer::json)
 add_test(NAME ninfer_tokenizer_oracle_test
   COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/tokenizer_oracle.py"
           --probe $<TARGET_FILE:ninfer_tokenizer_probe>)
+# Tokenizer data is UTF-8; Python otherwise writes it in the Windows code page.
+set_tests_properties(ninfer_tokenizer_oracle_test PROPERTIES ENVIRONMENT "PYTHONUTF8=1")

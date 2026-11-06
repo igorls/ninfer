@@ -10,6 +10,7 @@
 #include <memory>
 #include <numeric>
 #include <set>
+#include <string_view>
 
 using namespace ninfer;
 using namespace ninfer::test;
@@ -243,6 +244,24 @@ int validation(DeviceContext& device, const Profile& profile, const Weight& weig
     return failures;
 }
 
+// The query-first order covers the same rows, so only the segmentation can tell them apart.
+int rejects_retired_order(DeviceContext& device, const Weight& weight) {
+    const Profile retired{"retired-order",
+                          false,
+                          {{"query", 6144, 256},
+                           {"key", 512, 256},
+                           {"gate", 6144, 256},
+                           {"value", 512, 256},
+                           {"index_query", 512, 128},
+                           {"index_key", 128, 128}},
+                          {2}};
+    DeviceBuffer data(ninfer::test::cuda_environment().context.device(), kInputRows * 2 * 2);
+    Tensor x(data.span(), DType::BF16, {kInputRows, 2});
+    Outputs outputs(retired, 2, false);
+    return rejects("retired segment order",
+                   [&] { launch(x, weight, outputs.views, device.execution_view()); });
+}
+
 } // namespace
 
 int main() {
@@ -264,14 +283,14 @@ int main() {
               {"index_key", 128, 128}},
              {1,  2,  4,  8,   15,  16,  17,  47,  48,  49,   63,   64,   65,
               95, 96, 97, 127, 128, 129, 511, 512, 513, 1024, 2048, 4096, 4097}},
-            {"qkgv-index",
+            {"kv-index-qg",
              false,
-             {{"query", 6144, 256},
-              {"key", 512, 256},
-              {"gate", 6144, 256},
+             {{"key", 512, 256},
               {"value", 512, 256},
-              {"index_query", 512, 128},
-              {"index_key", 128, 128}},
+              {"index_key", 128, 128},
+              {"query", 6144, 256},
+              {"gate", 6144, 256},
+              {"index_query", 512, 128}},
              {1,  2,  4,  7,  8,  9,   15,  16,  17,  31,  32,  33,   47,   48,   49,  63,
               64, 65, 95, 96, 97, 127, 128, 129, 511, 512, 513, 1024, 2048, 4096, 4097}}};
         int failures = 0;
@@ -282,6 +301,8 @@ int main() {
                                           ? linear::make_q8_g32_fp16_weight(rows, kInputRows, 317U)
                                           : linear::make_bf16_weight(rows, kInputRows, 331U));
             failures += validation(device, profile, parent.view());
+            if (std::string_view(profile.name) == "kv-index-qg")
+                failures += rejects_retired_order(device, parent.view());
             for (int t : profile.tokens)
                 failures +=
                     run_case(device, profile, parent, t,

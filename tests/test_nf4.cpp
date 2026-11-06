@@ -1,5 +1,10 @@
 #include "core/nf4.h"
 
+#ifdef _WIN32
+#    include <fcntl.h>
+#    include <io.h>
+#endif
+
 #include <algorithm>
 #include <bit>
 #include <iostream>
@@ -46,6 +51,10 @@ void validation() {
 } // namespace
 
 int main(int argc, char**) {
+#ifdef _WIN32
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     try {
         if (argc == 1) {
             validation();

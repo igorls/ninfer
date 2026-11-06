@@ -73,7 +73,8 @@ void folded_up(Operands o, Scratch scratch, cudaStream_t stream) {
     const int bytes       = common::prepare_shared<S::kSharedBytes, kernel, true>();
     common::for_each_token_slice(o.columns, Tokens, [&](int offset, int count) {
         const unsigned blocks = (kWidth / Features) * common::div_up(count, Tokens);
-        kernel<<<blocks, S::kThreads, bytes, stream>>>(
+        // Named again here: MSVC cannot reach a constexpr local from inside this lambda (C2326).
+        up_mma_mix_kernel<Features, Tokens><<<blocks, S::kThreads, bytes, stream>>>(
             o, static_cast<const __nv_bfloat16*>(scratch.activation), offset);
         CUDA_CHECK(cudaGetLastError());
     });

@@ -219,13 +219,18 @@ void invalid_directories() {
         file.seekp(16);
         file.put(0);
     }
-    Reader wrong_part(fixture.entry);
-    rejects([&] { (void)wrong_part.read_object(wrong_part.find("q5")); },
-            "foreign continuation accepted");
+    {
+        Reader wrong_part(fixture.entry);
+        rejects([&] { (void)wrong_part.read_object(wrong_part.find("q5")); },
+                "foreign continuation accepted");
+    }
     fixture.write();
+#ifndef _WIN32
+    // Windows refuses to shrink a file an open Reader holds.
     Reader shortened(fixture.entry);
     std::filesystem::resize_file(fixture.entry, std::filesystem::file_size(fixture.entry) - 1);
     rejects([&] { (void)shortened.read_range(499, 1); }, "premature EOF accepted");
+#endif
 }
 
 } // namespace

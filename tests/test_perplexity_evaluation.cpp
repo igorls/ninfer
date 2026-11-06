@@ -13,6 +13,13 @@
 #include <stdexcept>
 #include <vector>
 
+// Node paths must be absolute for the platform that parses the launch file.
+#ifdef _WIN32
+#    define NODE_ROOT "C:"
+#else
+#    define NODE_ROOT ""
+#endif
+
 namespace {
 
 int require(bool condition, const char* label) {
@@ -99,13 +106,13 @@ control_host = "127.0.0.1"
 tp = 2
 [[distributed.nodes]]
 id = 0
-worker = "/ninfer-worker"
-artifact = "/weights/model.ninfer"
+worker = ")" NODE_ROOT R"(/ninfer-worker"
+artifact = ")" NODE_ROOT R"(/weights/model.ninfer"
 [[distributed.nodes]]
 id = 1
 ssh = "user@spark"
-worker = "/ninfer-worker"
-artifact = "/weights/model.ninfer"
+worker = ")" NODE_ROOT R"(/ninfer-worker"
+artifact = ")" NODE_ROOT R"(/weights/model.ninfer"
 [[distributed.ranks]]
 rank = 0
 node = 0

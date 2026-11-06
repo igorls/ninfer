@@ -36,7 +36,13 @@ existing deferral of upstream's consolidated Op-test reorganization continues;
 the fork's independent oracle fixtures must migrate to the selected native APIs. A full Windows
 build of the merge found six that had not: RoPE, Context KV materialization, GDN conv snapshot
 and record, KDA, and the OrcaRouter tokenizer. They now build against the native APIs with their
-criteria unchanged. The prefix fixture interposes on the dynamic linker, so it is Linux-only.
+criteria unchanged. LinearSplit's Flash profile now uses the KV-first segmentation that the model
+binds, and the query-first order is checked as rejected. The prefix fixture runs on Windows and
+skips only its instance-failure case, which needs dynamic-linker interposition.
+
+Host compilers before MSVC 19.51 reject a `constexpr` kernel alias read inside a nested lambda
+(C2326). Five launchers therefore name the kernel template at the launch; the kernels, schedules
+and arguments are unchanged.
 The three new Spark expert-partition benchmarks depending on that rewritten
 fixture suite are deferred with the unsupported target, rather than registered
 against absent fixtures in the Windows/RTX build.

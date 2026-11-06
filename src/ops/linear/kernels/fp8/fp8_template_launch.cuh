@@ -88,7 +88,9 @@ void launch_fp8_a16_sliced_k_mma(const Fp8A16OperandsT<Scale>& p, Output output,
     const int bytes       = common::prepare_shared<Schedule::kSharedBytes, kernel>();
     common::for_each_token_slice(p.tokens, capacity, [&](int offset, int count) {
         const dim3 grid(p.rows / Schedule::kBlockRows, common::div_up(count, capacity));
-        kernel<<<grid, Schedule::kThreads, bytes, stream>>>(p, output, epilogue, rows, offset);
+        // Named again here: MSVC cannot reach a constexpr local from inside this lambda (C2326).
+        fp8_a16_sliced_k_mma_kernel<Schedule, Output, Epilogue, Rows, Scale>
+            <<<grid, Schedule::kThreads, bytes, stream>>>(p, output, epilogue, rows, offset);
         CUDA_CHECK(cudaGetLastError());
     });
 }
