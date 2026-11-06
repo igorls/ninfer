@@ -1,0 +1,11 @@
+# Paired comparison harness; see README.md. Include after ninfer_bench is defined.
+add_executable(ninfer_release_compare "${CMAKE_CURRENT_LIST_DIR}/release_compare.cpp")
+ninfer_internal_includes(ninfer_release_compare)
+target_include_directories(ninfer_release_compare PRIVATE "${PROJECT_SOURCE_DIR}/tests")
+if(EXISTS "${PROJECT_SOURCE_DIR}/tests/models/qwen3_5/context_budget.h")
+  target_compile_definitions(ninfer_release_compare PRIVATE NINFER_CURRENT=1)
+else()
+  target_compile_definitions(ninfer_release_compare PRIVATE NINFER_CURRENT=0)
+endif()
+get_target_property(ninfer_compare_libraries ninfer_bench LINK_LIBRARIES)
+target_link_libraries(ninfer_release_compare PRIVATE ${ninfer_compare_libraries})
