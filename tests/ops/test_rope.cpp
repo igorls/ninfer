@@ -498,11 +498,16 @@ int main() {
 
     failures += run_vision_packed_case(execution);
 
-    for (int tokens : {1, 7, 32, 128, 4097})
-        pair({"vision D64", 64, 64, 2, tokens, kVisionTheta}, 16, 16, 5, 0, 0, 0, tokens == 7);
-    pair({"vision D64 packed", 64, 64, 2, 17, kVisionTheta}, 16, 16, -2, 2048, 2048);
-    pair({"vision D64 odd heads/stride", 64, 64, 2, 3, 5700.F}, 5, 3, 41, 1, 1);
-    single({"vision D64 single", 64, 64, 2, 13, kVisionTheta}, 16, 7, 4);
+    for (int tokens : {1, 7, 32, 128, 4097}) {
+        failures += run_pair_case(execution, {"vision D64", 64, 64, 2, tokens, kVisionTheta}, 16,
+                                  16, 5, 0, 0, 0, tokens == 7);
+    }
+    failures += run_pair_case(execution, {"vision D64 packed", 64, 64, 2, 17, kVisionTheta}, 16, 16,
+                              -2, 2048, 2048);
+    failures += run_pair_case(execution, {"vision D64 odd heads/stride", 64, 64, 2, 3, 5700.F}, 5,
+                              3, 41, 1, 1);
+    failures +=
+        run_single_case(execution, {"vision D64 single", 64, 64, 2, 13, kVisionTheta}, 16, 7, 4);
 
     // DFlash proposal consumes 2..16 tokens; context append uses the single-K form.
     failures += run_pair_case(execution, {"35b dflash proposal", 128, 128, 1, 16, kTextTheta}, 32,

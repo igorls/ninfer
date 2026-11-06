@@ -343,8 +343,9 @@ MIT 许可证。`third_party/tomlplusplus/` 保存未修改的上游单头文件
 
 ### Existing fork launches
 
-Update saved commands and Supervisor model arguments when adopting this parser.
-The replaced flags are removed; they are not aliases.
+Update saved commands when adopting this parser. The replaced flags are removed; they are not
+aliases. The Supervisor applies this table to its own `engine.args` and `models[].args` when it
+starts, as described in the [Windows app guide](windows-app.md#request-capacity).
 
 | Previous flag | Current form |
 |---|---|
@@ -358,8 +359,10 @@ The replaced flags are removed; they are not aliases.
 | `--default-max-tokens N` | `--max-tokens N` |
 
 Here `N` is the existing numeric value. Size quantities are one argument, such as
-`--desktop-reserve 8GiB`. The independent `ninfer_bench` interface retains its own
-flags; use its executable help for benchmark commands.
+`--desktop-reserve 8GiB`. Because a token count has no byte equivalent, the Supervisor replaces
+`--kv-capacity` with `--context-capacity auto`; set an explicit size afterwards if the profile
+needs one. The independent `ninfer_bench` interface retains its own flags; use its executable
+help for benchmark commands.
 
 ### Fields
 

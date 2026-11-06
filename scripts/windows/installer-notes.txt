@@ -28,7 +28,9 @@ The full model is validated by the engine when it loads.
 Models stay where you downloaded them. Settings and logs are stored in
 %LOCALAPPDATA%\NInfer. Uninstall keeps these files. Quit NInfer from its
 tray menu before updating or uninstalling. Login startup can be enabled
-from the tray after configuration.
+from the tray after configuration. Settings from an earlier release are
+updated the first time NInfer starts; the previous file stays beside them
+as supervisor.json.pre-migration.
 
 This build is unsigned. Windows may show an unknown-publisher warning.
 The matching SHA256SUMS file identifies the installer provided for testing.

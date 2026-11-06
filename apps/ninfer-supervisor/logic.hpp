@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -500,6 +501,87 @@ inline product::ServeOptions child_startup_options(const std::vector<std::string
     return product::parse_serve_options(static_cast<int>(pointers.size()), pointers.data());
 }
 
+// Engine flags that earlier releases accepted and the engine now rejects. The previous stable
+// launcher wrote several into every first-run profile, so an upgrade has to replace them or the
+// engine never starts again. A value is rewritten as `value + unit`, or as `fixed` when the units
+// changed meaning, and an empty replacement means the setting no longer exists.
+struct RetiredEngineFlag {
+    std::string_view flag;
+    std::string_view replacement;
+    std::string_view unit;
+    std::string_view fixed;
+    bool takes_value = true;
+};
+
+inline constexpr std::array<RetiredEngineFlag, 22> kRetiredEngineFlags{{
+    {"--kv-capacity", "--context-capacity", "", "auto"},
+    {"--lm-head-draft", "--proposal-head", "", "optimized", false},
+    {"--greedy", "--temperature", "", "0", false},
+    {"--desktop-reserve-gib", "--desktop-reserve", "GiB"},
+    {"--desktop-reserve-mib", "--desktop-reserve", "MiB"},
+    {"--host-context-mib", "--host-cache-capacity", "MiB"},
+    {"--max-request-mib", "--max-request-size", "MiB"},
+    {"--media-cache-mib", "--media-cache-capacity", "MiB"},
+    {"--media-live-mib", "--media-live-capacity", "MiB"},
+    {"--response-store-max-mib", "--response-store-max-size", "MiB"},
+    {"--expert-trace-max-gib", "--expert-trace-max-size", "GiB"},
+    {"--log-stats-interval-ms", "--stats-interval", "ms"},
+    {"--pending-timeout-ms", "--pending-timeout", "ms"},
+    {"--default-max-tokens", "--max-tokens"},
+    {"--default-thinking-budget", "--thinking-budget"},
+    {"--kv-slack-floor", "--memory-headroom"},
+    {"--kv-slack-floor-mib", "--memory-headroom", "MiB"},
+    {"--device-state-slots", ""},
+    {"--extra-state-slots", ""},
+    {"--gdn-state-dtype", ""},
+    {"--output-head-dtype", ""},
+    {"--token-embedding-dtype", ""},
+}};
+
+inline bool engine_args_contain(const std::vector<std::string>& args, std::string_view flag) {
+    const std::string assigned = std::string(flag) + "=";
+    return std::any_of(args.begin(), args.end(), [&](const std::string& token) {
+        return token == flag || token.starts_with(assigned);
+    });
+}
+
+// Rewrites retired flags in place and describes each change. A replacement already on the line
+// wins, because it was set for the current engine and the old flag can only restate it.
+inline std::vector<std::string> migrate_retired_engine_flags(std::vector<std::string>& args) {
+    std::vector<std::string> migrated;
+    std::vector<std::string> changes;
+    migrated.reserve(args.size());
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const auto retired =
+            std::find_if(kRetiredEngineFlags.begin(), kRetiredEngineFlags.end(),
+                         [&](const RetiredEngineFlag& entry) { return entry.flag == args[i]; });
+        if (retired == kRetiredEngineFlags.end()) {
+            migrated.push_back(args[i]);
+            continue;
+        }
+        std::string old_value;
+        if (retired->takes_value && i + 1 < args.size() && !args[i + 1].starts_with("--")) {
+            old_value = args[++i];
+        }
+        std::string change = std::string(retired->flag);
+        if (!old_value.empty()) change += " " + old_value;
+        const std::string value = !retired->fixed.empty() ? std::string(retired->fixed)
+                                  : old_value.empty()     ? std::string()
+                                                          : old_value + std::string(retired->unit);
+        if (retired->replacement.empty() || value.empty() ||
+            engine_args_contain(args, retired->replacement) ||
+            engine_args_contain(migrated, retired->replacement)) {
+            changes.push_back(change + " removed");
+            continue;
+        }
+        migrated.emplace_back(retired->replacement);
+        migrated.push_back(value);
+        changes.push_back(change + " -> " + std::string(retired->replacement) + " " + value);
+    }
+    args = std::move(migrated);
+    return changes;
+}
+
 // The tray edits whole GiB. Preserve an explicitly finer-grained quantity.
 inline bool desktop_reserve_pinned(const std::vector<std::string>& args) {
     try {
@@ -903,9 +985,14 @@ inline int desktop_reserve_from_args(const std::vector<std::string>& args) {
     } catch (...) { return 0; }
 }
 
-inline std::uint64_t desktop_reserve_launch_mib(const std::vector<std::string>& args, int preference) {
-    const auto effective = preference >= 0 ? with_desktop_reserve(args, preference) : args;
-    return child_startup_options(effective).launch.engine.desktop_reserve_bytes >> 20;
+// Empty when the saved flags are not a valid engine command line: the state report still has to
+// answer, because the dashboard is where the engine's refusal gets read.
+inline std::optional<std::uint64_t> desktop_reserve_launch_mib(const std::vector<std::string>& args,
+                                                               int preference) {
+    try {
+        const auto effective = preference >= 0 ? with_desktop_reserve(args, preference) : args;
+        return child_startup_options(effective).launch.engine.desktop_reserve_bytes >> 20;
+    } catch (const std::exception&) { return std::nullopt; }
 }
 
 enum class TrayAction : std::uint8_t {

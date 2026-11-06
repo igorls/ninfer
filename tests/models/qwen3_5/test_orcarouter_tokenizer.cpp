@@ -1,4 +1,4 @@
-#include "models/common/qwen/frontend/tokenizer.h"
+#include "text/tokenizer.h"
 
 #include <nlohmann/json.hpp>
 
@@ -17,7 +17,7 @@
 // its added-token definitions only there. The fixture holds token ids and decodes produced by the
 // Hugging Face `tokenizers` Rust library from that stored tokenizer.json, including combining
 // marks, multilingual text, special tokens parsed and literal, and a long input.
-namespace fi = ninfer::models::qwen::frontend;
+namespace fi = ninfer::text;
 
 namespace {
 
@@ -39,8 +39,7 @@ int main() {
         const std::filesystem::path dir(source);
         const std::string tokenizer_json = read(dir / "tokenizer.json");
         const std::string config         = read(dir / "tokenizer_config.json");
-        const std::string generation     = read(dir / "generation_config.json");
-        const fi::Tokenizer tokenizer({tokenizer_json, config, generation});
+        const fi::Tokenizer tokenizer({tokenizer_json, config});
         const auto fixture = nlohmann::json::parse(
             read(std::filesystem::path(NINFER_SOURCE_DIR) /
                  "tests/fixtures/qwen3_8_27b_orcarouter_tokenizer.json"));

@@ -74,6 +74,7 @@ public:
     // what the first version did, could never reach the command line.
     // kReserveUnset leaves the config's own arguments untouched.
     void set_desktop_reserve_gib(int gib);
+    void note_config_migration(const std::vector<std::string>& changes, const std::string& error);
     bool save_desktop_reserve_gib(int gib);
     void set_reserve_budget_provider(std::function<nlohmann::json()> provider) { reserve_budget_provider_ = std::move(provider); }
     nlohmann::json reserve_budget() const { return reserve_budget_provider_ ? reserve_budget_provider_() : nlohmann::json{{"ok", false}}; }

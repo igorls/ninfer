@@ -305,19 +305,19 @@ int run_q4_q5() {
         return run_case(
             "Q4/Q5 B=" + std::to_string(batch) + " T=" + std::to_string(width), kHidden, kValueRows,
             kZRows, width, batch, std::move(valid), snapshot_bytes, record_bytes,
-            [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid_columns,
-                const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
-                Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
+            [&](const Tensor& x, const Tensor& conv, StateFieldView source, Tensor& state,
+                const Tensor& valid_columns, const Tensor& snapshot_base, Tensor& q, Tensor& k,
+                Tensor& v, Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
                 ops::gdn_input_proj_conv_snapshot(
                     x, ops::PairedProjectionWeights{qk.view(), value_z.view()}, conv,
-                    {state, initial, snapshot_base}, valid_columns, {q, k, v, z}, workspace, cuda);
+                    {source, state, snapshot_base}, valid_columns, {q, k, v, z}, workspace, cuda);
             },
-            [&](const Tensor& x, const Tensor& conv, const Tensor& state,
-                const Tensor& valid_columns, const Tensor& initial, Tensor& record, Tensor& q,
-                Tensor& k, Tensor& v, Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
+            [&](const Tensor& x, const Tensor& conv, StateFieldView state,
+                const Tensor& valid_columns, Tensor& record, Tensor& q, Tensor& k, Tensor& v,
+                Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
                 ops::gdn_input_proj_conv_record(
-                    x, ops::PairedProjectionWeights{qk.view(), value_z.view()}, conv,
-                    {state, initial}, valid_columns, {q, k, v, z}, record, workspace, cuda);
+                    x, ops::PairedProjectionWeights{qk.view(), value_z.view()}, conv, state,
+                    valid_columns, {q, k, v, z}, record, workspace, cuda);
             },
             seed);
     };
@@ -361,19 +361,19 @@ int run_q8(std::int32_t kHidden = 2048) {
                 " T=" + std::to_string(width),
             kHidden, kValueRows, kZRows, width, batch, std::move(valid), snapshot_bytes,
             record_bytes,
-            [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid_columns,
-                const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
-                Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
+            [&](const Tensor& x, const Tensor& conv, StateFieldView source, Tensor& state,
+                const Tensor& valid_columns, const Tensor& snapshot_base, Tensor& q, Tensor& k,
+                Tensor& v, Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
                 ops::gdn_input_proj_conv_snapshot(
                     x, ops::SingleProjectionWeight{parent.view(), ops::LinearPolicy::A16Only}, conv,
-                    {state, initial, snapshot_base}, valid_columns, {q, k, v, z}, workspace, cuda);
+                    {source, state, snapshot_base}, valid_columns, {q, k, v, z}, workspace, cuda);
             },
-            [&](const Tensor& x, const Tensor& conv, const Tensor& state,
-                const Tensor& valid_columns, const Tensor& initial, Tensor& record, Tensor& q,
-                Tensor& k, Tensor& v, Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
+            [&](const Tensor& x, const Tensor& conv, StateFieldView state,
+                const Tensor& valid_columns, Tensor& record, Tensor& q, Tensor& k, Tensor& v,
+                Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
                 ops::gdn_input_proj_conv_record(
                     x, ops::SingleProjectionWeight{parent.view(), ops::LinearPolicy::A16Only}, conv,
-                    {state, initial}, valid_columns, {q, k, v, z}, record, workspace, cuda);
+                    state, valid_columns, {q, k, v, z}, record, workspace, cuda);
             },
             seed);
     };
@@ -417,18 +417,18 @@ int run_nvfp4() {
                 " B=" + std::to_string(batch) + " T=" + std::to_string(width),
             kHidden, kValueRows, kZRows, width, batch, std::move(valid), snapshot_bytes,
             record_bytes,
-            [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid_columns,
-                const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
-                Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
+            [&](const Tensor& x, const Tensor& conv, StateFieldView source, Tensor& state,
+                const Tensor& valid_columns, const Tensor& snapshot_base, Tensor& q, Tensor& k,
+                Tensor& v, Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
                 ops::gdn_input_proj_conv_snapshot(
                     x, ops::SingleProjectionWeight{parent.view(), policy}, conv,
-                    {state, initial, snapshot_base}, valid_columns, {q, k, v, z}, workspace, cuda);
+                    {source, state, snapshot_base}, valid_columns, {q, k, v, z}, workspace, cuda);
             },
-            [&](const Tensor& x, const Tensor& conv, const Tensor& state,
-                const Tensor& valid_columns, const Tensor& initial, Tensor& record, Tensor& q,
-                Tensor& k, Tensor& v, Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
+            [&](const Tensor& x, const Tensor& conv, StateFieldView state,
+                const Tensor& valid_columns, Tensor& record, Tensor& q, Tensor& k, Tensor& v,
+                Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
                 ops::gdn_input_proj_conv_record(
-                    x, ops::SingleProjectionWeight{parent.view(), policy}, conv, {state, initial},
+                    x, ops::SingleProjectionWeight{parent.view(), policy}, conv, state,
                     valid_columns, {q, k, v, z}, record, workspace, cuda);
             },
             seed);
@@ -453,19 +453,19 @@ int run_fp8_case(DevicePackedWeight& parent, std::int32_t width, std::int32_t ba
         "FP8 policy=" + std::to_string(static_cast<int>(policy)) + " B=" + std::to_string(batch) +
             " W=" + std::to_string(width),
         parent.view().k, 6144, 6144, width, batch, std::move(valid), snapshot_bytes, record_bytes,
-        [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid_columns,
-            const Tensor& initial, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
-            Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
+        [&](const Tensor& x, const Tensor& conv, StateFieldView source, Tensor& state,
+            const Tensor& valid_columns, const Tensor& snapshot_base, Tensor& q, Tensor& k,
+            Tensor& v, Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
             ops::gdn_input_proj_conv_snapshot(x, ops::SingleProjectionWeight{parent.view(), policy},
-                                              conv, {state, initial, snapshot_base}, valid_columns,
+                                              conv, {source, state, snapshot_base}, valid_columns,
                                               {q, k, v, z}, workspace, cuda);
         },
-        [&](const Tensor& x, const Tensor& conv, const Tensor& state, const Tensor& valid_columns,
-            const Tensor& initial, Tensor& record, Tensor& q, Tensor& k, Tensor& v, Tensor& z,
-            MemoryArena& workspace, CudaExecutionView cuda) {
+        [&](const Tensor& x, const Tensor& conv, StateFieldView state, const Tensor& valid_columns,
+            Tensor& record, Tensor& q, Tensor& k, Tensor& v, Tensor& z, MemoryArena& workspace,
+            CudaExecutionView cuda) {
             ops::gdn_input_proj_conv_record(x, ops::SingleProjectionWeight{parent.view(), policy},
-                                            conv, {state, initial}, valid_columns, {q, k, v, z},
-                                            record, workspace, cuda);
+                                            conv, state, valid_columns, {q, k, v, z}, record,
+                                            workspace, cuda);
         },
         seed);
 }

@@ -313,6 +313,20 @@ void EngineChild::observe_health(int http_status) {
 // the engine exits with code 1 either way, because that is what TerminateProcess
 // is given here. Diagnosing one after the fact meant ruling out possibilities
 // rather than reading the answer.
+void EngineChild::note_config_migration(const std::vector<std::string>& changes,
+                                        const std::string& error) {
+    if (changes.empty()) return;
+    std::string line = "[supervisor] replaced retired engine flags: ";
+    for (std::size_t i = 0; i < changes.size(); ++i) {
+        if (i != 0) line += "; ";
+        line += changes[i];
+    }
+    line += error.empty()
+                ? ". The previous settings are saved beside the config as .pre-migration.\n"
+                : ". The config file could not be updated: " + error + "\n";
+    append_log(line.data(), line.size());
+}
+
 void EngineChild::note_restart_reason(const std::string& reason) {
     const std::string line = "[supervisor] restarting engine: " + reason + "\n";
     append_log(line.data(), line.size());

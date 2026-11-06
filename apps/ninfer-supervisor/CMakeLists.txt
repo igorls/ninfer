@@ -46,7 +46,6 @@ target_link_options(ninfer-supervisor PRIVATE
   "LINKER:/DEFAULTLIB:crypt32")
 # One setting for every translation unit that includes the header-only httplib.
 target_compile_definitions(ninfer-supervisor PRIVATE
-  CPPHTTPLIB_NO_EXCEPTIONS
   WIN32_LEAN_AND_MEAN
   NOMINMAX
   _WIN32_WINNT=0x0A00)

@@ -591,13 +591,15 @@ nlohmann::json DashboardServer::state_json() {
     std::string cap       = extract_context_capacity_line(log);
     if (cap.empty()) { cap = snap.engine_capacity_line; }
     nlohmann::json insights = collector_.insights_report();
+    const auto next_reserve_mib =
+        desktop_reserve_launch_mib(child_.config().engine.args, st.desktop_reserve_gib);
     return {{"monitor_only", !manages_engine_process(cfg_)},
             {"engine", std::move(engine)},
             {"dxgi", std::move(dxgi)},
             {"device_memory", std::move(nvidia)},
             {"gpu_processes", snap.gpu_processes},
             {"reserve_budget", child_.reserve_budget()},
-            {"desktop_reserve", {{"next_gib", desktop_reserve_launch_mib(child_.config().engine.args, st.desktop_reserve_gib) / 1024.0},
+            {"desktop_reserve", {{"next_gib", next_reserve_mib ? nlohmann::json(double(*next_reserve_mib) / 1024.0) : nlohmann::json()},
                                   {"pinned", desktop_reserve_pinned(child_.config().engine.args)}}},
             {"engine_capacity_line", cap},
             {"admin_vram", snap.admin_vram},

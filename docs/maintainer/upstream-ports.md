@@ -33,10 +33,21 @@ vocabulary Q4 MTP heads, and MTP history/commit changes. Distributed and Spark
 implementation sources are carried with distributed execution disabled by
 default; they do not activate a multi-GPU or Spark product in this fork. The
 existing deferral of upstream's consolidated Op-test reorganization continues;
-the fork's independent oracle fixtures must migrate to the selected native APIs.
+the fork's independent oracle fixtures must migrate to the selected native APIs. A full Windows
+build of the merge found six that had not: RoPE, Context KV materialization, GDN conv snapshot
+and record, KDA, and the OrcaRouter tokenizer. They now build against the native APIs with their
+criteria unchanged. The prefix fixture interposes on the dynamic linker, so it is Linux-only.
 The three new Spark expert-partition benchmarks depending on that rewritten
 fixture suite are deferred with the unsupported target, rather than registered
 against absent fixtures in the Windows/RTX build.
+
+Upstream's startup configuration removes flags that the previous stable launcher wrote into every
+first-run profile, so a preserved profile would stop the engine from starting. The Supervisor
+therefore replaces retired flags once at managed startup, keeping the earlier file as
+`.pre-migration`. This is a deliberate fork divergence from the rule against compatibility paths:
+the engine still rejects those flags, and the table lives only in the Supervisor. It also no
+longer aborts when a saved command line is invalid, and httplib now turns an exception in a
+dashboard handler into a 500.
 
 Adaptations retain Windows dependencies and I/O, NVML-based desktop budgeting,
 the concurrency clamp, scoring/reference/hidden readouts, logprobs, expert traces,

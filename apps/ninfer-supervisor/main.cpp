@@ -142,6 +142,18 @@ int main(int argc, char** argv) {
             cfg.source_stamp =
                 ninfer::supervisor::config_file_stamp(cfg.source_path);
         }
+        // Ahead of the command-line overrides, which must not reach the file. A failed write still
+        // starts the engine from the migrated flags and says so in the log.
+        std::vector<std::string> migrated_flags;
+        std::string migration_error;
+        if (ninfer::supervisor::manages_engine_process(cfg)) {
+            migrated_flags = ninfer::supervisor::migrate_retired_flags(cfg);
+            if (!migrated_flags.empty()) {
+                try {
+                    ninfer::supervisor::persist_migrated_config(cfg);
+                } catch (const std::exception& error) { migration_error = error.what(); }
+            }
+        }
         if (!host_override.empty()) { cfg.host = host_override; }
         if (port_override > 0) {
             cfg.port = port_override;
@@ -222,6 +234,7 @@ int main(int argc, char** argv) {
         const std::string prefs_path = ninfer::supervisor::tray_prefs_path(config_abs);
         child.set_desktop_reserve_gib(
             ninfer::supervisor::load_tray_prefs(prefs_path).desktop_reserve_gib);
+        child.note_config_migration(migrated_flags, migration_error);
         ninfer::supervisor::Collector collector(cfg.engine, cfg.logs_dir);
         child.set_reserve_budget_provider([&collector, &child, probe = cfg.engine] {
             const auto snapshot = collector.snapshot();

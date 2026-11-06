@@ -671,13 +671,13 @@ int run_q4_q5() {
                 value_z_weight.host, kValueRows + row,
                 activation.data() + static_cast<std::size_t>(flat_column) * kHidden, kHidden);
         },
+        // One token writes its new history straight to the destination record.
         [&](const Tensor& x, const Tensor& conv, StateFieldView source, StateFieldView destination,
-            Tensor& state, const Tensor& valid, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
-            Tensor& z, MemoryArena& workspace, CudaExecutionView execution) {
-            ops::gdn_input_proj_conv_snapshot(
+            Tensor&, const Tensor& valid, const Tensor&, Tensor& q, Tensor& k, Tensor& v, Tensor& z,
+            MemoryArena& workspace, CudaExecutionView execution) {
+            ops::gdn_input_proj_conv_update(
                 x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, conv,
-                {source, state, snapshot_base}, valid, {q, k, v, z}, workspace,
-                execution);
+                source, destination, valid, {q, k, v, z}, workspace, execution);
         });
     // The batched organisations whose aggregate column count is 10 reach the same Q5 parent
     // mechanism as the dense B=1 W=10 case above, through the seam of a multi-request call: B=2/W=5
@@ -969,13 +969,19 @@ int run_q8(std::int32_t hidden = 2048) {
                         parent.host, channels + row,
                         activation.data() + static_cast<std::size_t>(column) * hidden, hidden);
                 },
-                [&](const Tensor& x, const Tensor& conv, Tensor& state, const Tensor& valid,
-                    const Tensor& initial, const Tensor& bases, Tensor& q, Tensor& k, Tensor& v,
-                    Tensor& z, MemoryArena& workspace) {
-                    ops::gdn_input_proj_conv_snapshot(
-                        x, ops::SingleProjectionWeight{parent.view(), ops::LinearPolicy::A16Only},
-                        conv, {state, initial, bases}, valid, {q, k, v, z}, workspace,
-                        ninfer::test::cuda_environment().default_execution);
+                [&](const Tensor& x, const Tensor& conv, StateFieldView source,
+                    StateFieldView destination, Tensor& state, const Tensor& valid,
+                    const Tensor& bases, Tensor& q, Tensor& k, Tensor& v, Tensor& z,
+                    MemoryArena& workspace, CudaExecutionView execution) {
+                    const ops::SingleProjectionWeight weights{parent.view(),
+                                                              ops::LinearPolicy::A16Only};
+                    if (x.ne[1] == 1) {
+                        ops::gdn_input_proj_conv_update(x, weights, conv, source, destination, valid,
+                                                        {q, k, v, z}, workspace, execution);
+                    } else {
+                        ops::gdn_input_proj_conv_snapshot(x, weights, conv, {source, state, bases},
+                                                          valid, {q, k, v, z}, workspace, execution);
+                    }
                 });
         }
     }

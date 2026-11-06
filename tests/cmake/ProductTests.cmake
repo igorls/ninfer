@@ -99,7 +99,7 @@ if(WIN32)
     ${PROJECT_SOURCE_DIR}/apps/ninfer-supervisor)
   # Same httplib configuration as the supervisor, whose frontend server this test links.
   target_compile_definitions(ninfer_supervisor_test PRIVATE
-    CPPHTTPLIB_NO_EXCEPTIONS WIN32_LEAN_AND_MEAN NOMINMAX)
+    WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 ninfer_add_test(ninfer_tool_streaming_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_tool_streaming.cpp"

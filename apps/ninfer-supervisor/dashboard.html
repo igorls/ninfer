@@ -3131,7 +3131,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
         if (spec.key === 'spec') {
           if (!input.value) {
             cfgEdit('params', 'draft_tokens', '', (cfgData.params || {}).draft_tokens || '');
-            cfgEdit('params', 'lm_head_draft', false, (cfgData.params || {}).lm_head_draft === 'true');
+            cfgEdit('params', 'proposal_head', '', (cfgData.params || {}).proposal_head || '');
           } else {
             const limit = input.value === 'mtp' ? 5 : 15;
             const draft = Object.prototype.hasOwnProperty.call(cfgEdits.params, 'draft_tokens') ? cfgEdits.params.draft_tokens : (cfgData.params || {}).draft_tokens;
@@ -3153,7 +3153,7 @@ dialog p{margin:12px 0 16px;font-size:13px;color:var(--dim)}
     }
     const help = document.createElement('div'); help.className = 'cfg-help';
     input.id = 'param-' + spec.key;
-    if (spec.key === 'draft_tokens' || spec.key === 'lm_head_draft') input.disabled = !backend;
+    if (spec.key === 'draft_tokens' || spec.key === 'proposal_head') input.disabled = !backend;
     label.id = input.id + '-label';
     input.setAttribute('aria-labelledby', label.id);
     input.setAttribute('aria-describedby', input.id + '-help');

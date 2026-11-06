@@ -400,13 +400,14 @@ int run_case(Fixture& fixture, const std::string& label, int width, int batch,
                 positions_device.copy_from_host(next_positions.data(), columns * 4);
                 executable.launch(stream);
                 cuda_synchronize(stream);
+                const Snapshot replayed(fixture);
                 failures +=
-                    verify_state_effect(label + " replay " + std::to_string(replay), fixture,
+                    verify_state_effect(label + " replay " + std::to_string(replay), replayed,
                                         next_positions, next_counts, next_slots, width);
                 if (replay != 2)
                     failures +=
-                        verify_numeric_samples(label + " replay", fixture, context, next_positions,
-                                               next_counts, next_slots, width);
+                        verify_numeric_samples(label + " replay", fixture, replayed, context,
+                                               next_positions, next_counts, next_slots, width);
                 failures += scratch.verify_guards(label + " replay scratch");
                 failures += verify_exact("replay counts readonly",
                                          from_device<int>(counts_device, batch), next_counts);

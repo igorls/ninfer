@@ -2442,8 +2442,165 @@ int test_engine_bench() {
     return f;
 }
 
+int test_retired_flag_migration() {
+    using namespace ninfer::supervisor;
+    namespace fs        = std::filesystem;
+    int f               = 0;
+    const auto contains = [](const std::vector<std::string>& args, const std::string& token) {
+        return std::find(args.begin(), args.end(), token) != args.end();
+    };
+
+    // The Flash profile the previous stable launcher wrote at first run.
+    std::vector<std::string> stable{"model.ninfer",
+                                    "--host",
+                                    "127.0.0.1",
+                                    "--port",
+                                    "8010",
+                                    "--model-id",
+                                    "flash",
+                                    "--max-context",
+                                    "16384",
+                                    "--kv-capacity",
+                                    "32768",
+                                    "--max-concurrency",
+                                    "2",
+                                    "--prefill-chunk",
+                                    "2048",
+                                    "--desktop-reserve-gib",
+                                    "3",
+                                    "--kv-dtype",
+                                    "fp8",
+                                    "--spec",
+                                    "mtp",
+                                    "--draft-tokens",
+                                    "3",
+                                    "--request-log-jsonl",
+                                    "requests.jsonl",
+                                    "--gdn-state-dtype",
+                                    "bf16"};
+    f += check(!desktop_reserve_launch_mib(stable, -1).has_value(),
+               "a line the engine rejects has no launch reserve and does not throw");
+    f += check(!desktop_reserve_launch_mib(stable, 4).has_value(),
+               "a saved tray reserve does not rescue a rejected line");
+    const auto changes = migrate_retired_engine_flags(stable);
+    f += check(changes.size() == 3, "each retired flag in the profile is reported");
+    f += check(!contains(stable, "--kv-capacity") && !contains(stable, "32768") &&
+                   !contains(stable, "--desktop-reserve-gib") &&
+                   !contains(stable, "--gdn-state-dtype") && !contains(stable, "bf16"),
+               "retired flags leave together with their values");
+    f += check(contains(stable, "--context-capacity") && contains(stable, "auto"),
+               "token capacity becomes automatic Context capacity");
+    f += check(desktop_reserve_launch_mib(stable, -1) == 3072, "the configured reserve survives");
+    f += check(stable.front() == "model.ninfer" && contains(stable, "--spec") &&
+                   contains(stable, "mtp"),
+               "current flags and the artifact are untouched");
+    const auto unchanged = stable;
+    f += check(migrate_retired_engine_flags(stable).empty() && stable == unchanged,
+               "migration is idempotent");
+
+    std::vector<std::string> explicit_capacity{"model.ninfer", "--context-capacity", "8GiB",
+                                               "--kv-capacity", "auto"};
+    migrate_retired_engine_flags(explicit_capacity);
+    f += check(explicit_capacity ==
+                   std::vector<std::string>{"model.ninfer", "--context-capacity", "8GiB"},
+               "a current capacity wins over the retired one");
+    std::vector<std::string> inline_reserve{"model.ninfer", "--desktop-reserve=2GiB",
+                                            "--desktop-reserve-gib", "3"};
+    migrate_retired_engine_flags(inline_reserve);
+    f += check(inline_reserve == std::vector<std::string>{"model.ninfer", "--desktop-reserve=2GiB"},
+               "an inline current value also wins");
+    std::vector<std::string> both_units{"model.ninfer", "--desktop-reserve-gib", "2",
+                                        "--desktop-reserve-mib", "1700"};
+    migrate_retired_engine_flags(both_units);
+    f += check(both_units == std::vector<std::string>{"model.ninfer", "--desktop-reserve", "2GiB"},
+               "two retired spellings of one setting do not duplicate it");
+    std::vector<std::string> head{"model.ninfer",    "--spec", "dflash2", "--draft-tokens", "7",
+                                  "--lm-head-draft", "--cors"};
+    migrate_retired_engine_flags(head);
+    f += check(head == std::vector<std::string>{"model.ninfer", "--spec", "dflash2",
+                                                "--draft-tokens", "7", "--proposal-head",
+                                                "optimized", "--cors"},
+               "a retired switch does not consume the next flag");
+    std::vector<std::string> unknown{"model.ninfer", "--not-a-flag", "value"};
+    f += check(migrate_retired_engine_flags(unknown).empty() && unknown.size() == 3,
+               "unrecognised flags stay for the engine to report");
+
+    for (const auto& entry : kRetiredEngineFlags) {
+        std::vector<std::string> args{"model.ninfer",   "--spec", "mtp",
+                                      "--draft-tokens", "3",      std::string(entry.flag)};
+        if (entry.takes_value) args.emplace_back("64");
+        f += check(!desktop_reserve_launch_mib(args, -1).has_value(),
+                   "still rejected by the engine parser: " + std::string(entry.flag));
+        migrate_retired_engine_flags(args);
+        f += check(desktop_reserve_launch_mib(args, -1).has_value(),
+                   "replacement accepted by the engine parser: " + std::string(entry.flag));
+    }
+
+    const fs::path dir = fs::temp_directory_path() / "ninfer_supervisor_migration_test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const auto path               = (dir / "supervisor.json").string();
+    const nlohmann::json original = {
+        {"engine",
+         {{"executable", "ninfer-serve.exe"},
+          {"args", {"model.ninfer", "--kv-capacity", "32768", "--desktop-reserve-gib", "3"}}}},
+        {"models",
+         {{{"id", "dense"},
+           {"artifact", "dense.ninfer"},
+           {"args", {"--lm-head-draft", "--spec", "mtp", "--draft-tokens", "3"}}}}},
+        {"active_model", "dense"}};
+    {
+        std::ofstream out(path, std::ios::binary);
+        out << original.dump(2);
+    }
+    const std::string before  = read_file_text(path);
+    auto cfg                  = load_config_json(before);
+    cfg.source_path           = path;
+    cfg.source_stamp          = config_file_stamp(path);
+    const auto config_changes = migrate_retired_flags(cfg);
+    f += check(config_changes.size() == 3, "launch line and catalog are both migrated");
+    f += check(config_changes.back().starts_with("dense: "), "a catalog change names its entry");
+    persist_migrated_config(cfg);
+    f += check(read_file_text(path + ".pre-migration") == before, "the backup holds the old file");
+    auto reloaded = load_config_json(read_file_text(path));
+    f += check(migrate_retired_flags(reloaded).empty(), "the saved file needs no second migration");
+    f += check(contains(reloaded.models.at(0).args, "--proposal-head"), "the catalog was saved");
+    f += check(cfg.source_stamp == config_file_stamp(path), "the file stamp tracks our own write");
+    cfg.engine.args.emplace_back("--cors");
+    persist_migrated_config(cfg);
+    f += check(read_file_text(path + ".pre-migration") == before,
+               "an existing backup is not replaced");
+    fs::remove_all(dir);
+    return f;
+}
+
+// One handler's failure costs its request; the dashboard and the engine it manages stay up.
+int test_handler_exception_answers_error() {
+    int f = 0;
+    httplib::Server server;
+    server.Get("/throw", [](const httplib::Request&, httplib::Response&) {
+        throw std::runtime_error("handler failure");
+    });
+    server.Get("/ok", [](const httplib::Request&, httplib::Response& res) {
+        res.set_content("ok", "text/plain");
+    });
+    const int port = server.bind_to_any_port("127.0.0.1");
+    std::thread thread([&server] { server.listen_after_bind(); });
+    server.wait_until_ready();
+    httplib::Client client("127.0.0.1", port);
+    const auto failed = client.Get("/throw");
+    f += check(failed && failed->status == 500, "a throwing handler answers 500");
+    const auto ok = client.Get("/ok");
+    f += check(ok && ok->status == 200, "the server keeps answering after a throwing handler");
+    server.stop();
+    thread.join();
+    return f;
+}
+
 int main() {
     int failures = 0;
+    failures += test_retired_flag_migration();
+    failures += test_handler_exception_answers_error();
     failures += test_client_activity_causes();
     failures += test_loopback();
     failures += test_engine_probe_destination();

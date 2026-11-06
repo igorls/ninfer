@@ -455,8 +455,9 @@ int batch_update_case(const Case& test_case, const std::vector<int>& state_slots
     Tensor state_slots_tensor(device_state_slots.span(), DType::I64, {batch});
     Tensor out_tensor(out.span(), DType::BF16, {kStateDim, test_case.heads, 1, batch});
 
+    const auto state_view = history.view(state_slots_tensor);
     ops::kimi_delta_attention_batch_update(q, k, v, g, beta, a_log, dt_bias, kLowerBound, kScale,
-                                           history.view(state_slots_tensor), out_tensor,
+                                           state_view, state_view, out_tensor,
                                            ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
@@ -595,6 +596,7 @@ int batch_contract_rejection_cases() {
         try {
             ops::kimi_delta_attention_batch_update(
                 q, k, v, g, beta, a_log, dt_bias, kLowerBound, kScale,
+                dense_record_field(states, 3, state_slots),
                 dense_record_field(states, 3, state_slots), out,
                 ninfer::test::cuda_environment().default_execution);
         } catch (const std::invalid_argument&) { return true; }

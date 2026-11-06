@@ -295,6 +295,27 @@ inline void save_config_json(const std::string& path, const SupervisorConfig& cf
     }
 }
 
+// Applied to the launch line and every catalog entry, which become the launch line on a switch.
+inline std::vector<std::string> migrate_retired_flags(SupervisorConfig& cfg) {
+    auto changes = migrate_retired_engine_flags(cfg.engine.args);
+    for (auto& model : cfg.models) {
+        for (const auto& change : migrate_retired_engine_flags(model.args)) {
+            changes.push_back(model.id + ": " + change);
+        }
+    }
+    return changes;
+}
+
+// The first backup is the one that matters: it holds the settings as the older release wrote them.
+inline void persist_migrated_config(SupervisorConfig& cfg) {
+    const std::filesystem::path source(cfg.source_path);
+    std::filesystem::path backup = source;
+    backup += ".pre-migration";
+    std::filesystem::copy_file(source, backup, std::filesystem::copy_options::skip_existing);
+    save_config_json(cfg.source_path, cfg, cfg.source_stamp);
+    cfg.source_stamp = config_file_stamp(cfg.source_path);
+}
+
 // Same as read_api_key but never throws: used on presentation paths where a
 // missing or unreadable key file is a fact to report, not an error to raise.
 inline std::string read_api_key_quiet(const std::string& path) noexcept {

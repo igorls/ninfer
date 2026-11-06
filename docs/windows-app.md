@@ -247,10 +247,12 @@ runtime dependencies before stopping the installed app, replaces the binaries, r
 binary directory, and relaunches through Explorer. Configuration, logs and tray preferences remain.
 The login preference remains as selected in the tray. `-NoStart` installs without launching.
 
-When moving to unified startup configuration, update retained `engine.args` and
-`models[].args` to the canonical flags before starting the new engine. The installer
-preserves that JSON catalog. The [startup migration table](startup-configuration.md#existing-fork-launches)
-lists the replaced flags; new launcher profiles already use the current forms.
+The first managed start after an update replaces retired flags in `engine.args` and
+`models[].args`, using the [startup migration table](startup-configuration.md#existing-fork-launches).
+A token `--kv-capacity` becomes `--context-capacity auto`. The previous file stays beside the
+configuration as `supervisor.json.pre-migration`, and the engine log lists every change. A
+monitor-only Supervisor never rewrites the file. Flags the table does not know stay in place, and
+the engine reports them when it refuses to start.
 
 Uninstall through **Settings → Apps → Installed apps → NInfer**, or run the installed
 `uninstall.ps1`. Uninstall stops the installed processes and removes the app, shortcuts and its
