@@ -756,6 +756,9 @@ struct PromptSummary {
     // Token frontier right after the new assistant turn's header, before its content; absent for
     // raw-token prompts and assistant continuation.
     std::optional<std::uint32_t> reasoning_frontier;
+    // First token of the supplied final assistant content, after any template-inserted prefix.
+    // Absent outside assistant continuation or when that byte boundary splits a token.
+    std::optional<std::uint32_t> continuation_frontier;
 };
 
 struct PromptPreparationStats {

@@ -62,10 +62,14 @@ Keep these ownership boundaries visible when selecting a design:
 - Core owns physical primitives and raw transfers; artifact owns generic framing and
   materialization; Ops own closed mathematical and state-transition implementations.
 - Models own fixed mathematics, config interpretation, logical parameter binding, frontend
-  semantics and finite execution composition. Immutable Model data owns selected weights and
-  resources; native Parameters supply the actual operands to planning and Program execution.
-  Program owns mutable state, workspace, context stores and CUDA Graphs. Programs share no mutable
-  state or device allocation.
+  semantics and finite execution composition. ModelDefinition owns immutable metadata and Frontend
+  resources; ModelShard owns selected immutable weights and backing. Native Parameters supply the
+  actual operands to planning and RankProgram execution.
+- ModelSession owns logical continuations, checkpoints and the ContextDirectory. RankProgram owns
+  physical storage, execution frames, workspace and CUDA Graphs; programs share no mutable state or
+  device allocation. Executor transfers owning work and completion events between them.
+  Single-device execution uses LocalExecutor on the Engine worker thread, without a network or
+  collective communicator.
 - Converter recipes choose sources, formats, packing and per-input activation permissions. The
   loader validates, uploads and binds the stored representation. Native preparation, resource
   queries and execution enforce actual Op support; there is no whole-artifact capability registry.

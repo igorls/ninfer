@@ -20,8 +20,8 @@ python3 tools/bench/run_serve_ttft_campaign.py \
 ```
 
 The controller chooses the profile, starts and stops Serve for every sample, runs the external
-client, stages the NVFP4 artifact once in `/dev/shm`, stores raw/progress/Serve artifacts below
-`profiles/bench/ttft/`, records structured per-request Serve diagnostics, and writes Markdown,
+client, reads the configured artifact directly, stores raw/progress/Serve artifacts below
+`.agent-tmp/serve-ttft/`, records structured per-request Serve diagnostics, and writes Markdown,
 JSON, and CSV summaries. The case catalog, exact profiles, TTFT boundary, and fixture qualification
 are documented in the dedicated README.
 
@@ -169,7 +169,7 @@ The serial runner writes `run.jsonl`, `summary.csv`, `summary.md`, and per-serve
 category summaries. The output directory is supplied explicitly with `--output`.
 
 Its schema-v9 result records the proposal head; results and flattened summaries retain the KV dtype, actual `prefill_signature`, request Host
-exposure, and decode Host/Device-wait time per round received from the schema-v29 serving records.
+exposure, and decode Host/Device-wait time per round received from the schema-v30 serving records.
 Request exposure is a latency distribution value and is never summed across concurrent requests;
 worker aggregation uses the serving `throughput.host_work` interval deltas. The stochastic route pins its complete
 temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do
@@ -186,6 +186,8 @@ dispatch method, and per-request positions.
 Use `--mode mtp0`, `--mode mtp3`, or `--mode mtp5` for ordinary decode or three/five MTP drafts;
 repeat `--mode` to compare them. The selected model must support that draft width.
 Both serving runners disable prefix reuse and set extra Device state and Host context capacity to zero.
+MTP points include `mtp0`, `mtp3`, and `mtp5`. Use `--proposal-head full` for full-vocabulary
+proposals, including Qwen4Exp; the default `optimized` selects the model's optimized proposal head.
 
 Schema-v4 outputs include `points/*.json`, `server/*.jsonl`, and combined `summary.json`, `summary.csv`, and
 `summary.md`. C=1 corpus runs also write complete responses in `corpus/<point>/results.jsonl` and

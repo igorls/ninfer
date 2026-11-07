@@ -24,12 +24,11 @@ struct TextExecution {
 class TextRun {
 public:
     TextRun(const Parameters&, TextExecution, BatchView, StateUpdate, CudaExecutionView);
-    void prefix(std::optional<VisualEmbeddingView> = {});
     void consume_ple(const Tensor& embedding);
-    void suffix(TextOutputs);
 
     // GPU bodies share the same activation frame in eager execution and graph capture.
     void stem(std::optional<VisualEmbeddingView> = {});
+    [[nodiscard]] bool advance_layer(std::uint32_t layer);
     void mixer(std::uint32_t layer);
     void resident_moe(std::uint32_t layer);
     void gpu_moe(const moe::GpuCall&);
@@ -41,7 +40,6 @@ public:
     void set_visible_tokens(std::uint32_t maximum) { batch_.max_visible_tokens = maximum; }
 
 private:
-    void layer(std::uint32_t);
     const Parameters& parameters_;
     TextExecution execution_;
     BatchView batch_;
@@ -51,6 +49,7 @@ private:
     workspace::Roots roots_;
     std::uint32_t layer_ = 0;
     std::optional<moe::Schedule::Activity> expert_activity_;
+    bool waiting_moe_ = false;
 };
 
 void project_head(const Tensor& sample, const LinearParameters&, Tensor& logits, MemoryArena&,

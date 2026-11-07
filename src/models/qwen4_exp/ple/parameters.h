@@ -4,6 +4,7 @@
 #include "core/weight_view.h"
 
 #include <array>
+#include <span>
 
 namespace ninfer::artifact {
 class Reader;
@@ -45,7 +46,7 @@ struct LookupParameters {
 // Supported representations are complete NF4 paged or U4Z8 split-plane shards of width 160.
 [[nodiscard]] LookupParameters load_lookup_parameters(const artifact::Reader&,
                                                       const artifact::Binding& table,
-                                                      artifact::ObjectHandle controls,
+                                                      std::span<const std::byte> controls,
                                                       HashGeometry);
 
 } // namespace ninfer::models::qwen4_exp::ple

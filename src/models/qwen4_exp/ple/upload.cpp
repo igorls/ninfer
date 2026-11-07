@@ -3,9 +3,12 @@
 #include "models/qwen4_exp/ple/parameters.h"
 #include "core/buffer.h"
 #include "core/transfer.h"
+#include "ninfer/types.h"
 
 #include <exception>
+#include <optional>
 #include <stdexcept>
+#include <string>
 
 namespace ninfer::models::qwen4_exp::ple {
 
@@ -30,8 +33,16 @@ struct UploadSlots::Impl {
         }
 
         void synchronize() const {
-            if (transfer) CUDA_CHECK(cudaStreamSynchronize(transfer));
-            if (consumer && consumer != transfer) CUDA_CHECK(cudaStreamSynchronize(consumer));
+            auto status = cudaSuccess;
+            if (transfer) status = cudaStreamSynchronize(transfer);
+            if (consumer && consumer != transfer) {
+                const auto next = cudaStreamSynchronize(consumer);
+                if (status == cudaSuccess) status = next;
+            }
+            if (status != cudaSuccess)
+                throw std::runtime_error(
+                    std::string("PLE upload/consumer synchronization failed: ") +
+                    cudaGetErrorString(status));
         }
     };
 
@@ -54,12 +65,19 @@ struct UploadSlots::Impl {
     }
 
     ~Impl() {
+        std::optional<CudaDeviceScope> scope;
         try {
-            CudaDeviceScope scope(device);
-            for (const auto& slot : slots) {
-                if (slot.active) slot.synchronize();
+            scope.emplace(device);
+        } catch (const std::logic_error&) { std::terminate(); } catch (...) {
+        }
+        for (const auto& slot : slots) {
+            if (!slot.active) continue;
+            try {
+                slot.synchronize();
+            } catch (...) {
+                // Every stream is attempted even when another slot reported a CUDA failure.
             }
-        } catch (...) { std::terminate(); }
+        }
     }
 
     Slot& current(Ticket ticket) {
@@ -79,7 +97,8 @@ struct UploadSlots::Impl {
     }
 
     std::size_t bytes(std::uint32_t tokens, std::uint32_t batch) const {
-        if (!tokens || !batch || batch > 8 || std::uint64_t(tokens) * batch > max_positions) {
+        if (!tokens || !batch || batch > kMaximumConcurrency ||
+            std::uint64_t(tokens) * batch > max_positions) {
             throw std::invalid_argument("invalid PLE upload shape");
         }
         return std::size_t(tokens) * batch * kEmbeddingBytes;
@@ -90,7 +109,9 @@ struct UploadSlots::Impl {
         // A failed event record can follow a successful copy/consumer submission. Drain the
         // recorded streams before making storage reusable; logical cancellation is the caller's.
         slot.failure = error;
-        slot.synchronize();
+        try {
+            slot.synchronize();
+        } catch (...) { std::rethrow_exception(error); }
         slot.retire();
         std::rethrow_exception(error);
     }
@@ -136,7 +157,7 @@ void UploadSlots::upload(const HostEmbedding& input, CudaExecutionView transfer)
     } catch (...) { p.submission_failed(slot); }
 }
 
-Tensor UploadSlots::embedding(Ticket ticket, CudaExecutionView consumer) {
+DeviceEmbedding UploadSlots::acquire(Ticket ticket, CudaExecutionView consumer) {
     auto& p = *impl_;
     p.validate(consumer);
     auto& slot = p.current(ticket);
@@ -144,23 +165,17 @@ Tensor UploadSlots::embedding(Ticket ticket, CudaExecutionView consumer) {
         throw std::logic_error("invalid PLE consumer ordering");
     }
     slot.consumer = consumer.stream();
-    try {
-        slot.uploaded.wait(consumer.stream());
-    } catch (...) { p.submission_failed(slot); }
-    return device_slot(ticket.slot, slot.tokens, slot.batch);
+    return binding(ticket.slot, slot.tokens, slot.batch);
 }
 
-void UploadSlots::record_consumed(Ticket ticket, CudaExecutionView consumer) {
+void UploadSlots::consumer_submitted(Ticket ticket, CudaExecutionView consumer) {
     auto& p = *impl_;
     p.validate(consumer);
     auto& slot = p.current(ticket);
     if (slot.consumer != consumer.stream() || slot.consumption_recorded) {
         throw std::logic_error("PLE consumer completion has no matching acquisition");
     }
-    try {
-        slot.consumed.record(consumer.stream());
-        slot.consumption_recorded = true;
-    } catch (...) { p.submission_failed(slot); }
+    slot.consumption_recorded = true;
 }
 
 bool UploadSlots::upload_complete(Ticket ticket) const {
@@ -193,6 +208,12 @@ Tensor UploadSlots::device_slot(std::uint32_t slot, std::uint32_t tokens,
     return Tensor(
         p.slots.at(slot).device.span().subspan(0, bytes), DType::BF16,
         {kEmbeddingElements, static_cast<std::int32_t>(tokens), static_cast<std::int32_t>(batch)});
+}
+
+DeviceEmbedding UploadSlots::binding(std::uint32_t slot, std::uint32_t tokens,
+                                     std::uint32_t batch) const {
+    auto& storage = impl_->slots.at(slot);
+    return {device_slot(slot, tokens, batch), storage.uploaded, storage.consumed};
 }
 
 UploadMemory UploadSlots::memory() const noexcept {

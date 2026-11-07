@@ -1,7 +1,7 @@
 #pragma once
 
 #include "models/common/qwen/vision/vision.h"
-#include "models/qwen3_5/program/internal.h"
+#include "models/qwen3_5/planning.h"
 
 #include "core/cyclic_kv_cache.h"
 #include "core/dtype.h"
@@ -9,12 +9,11 @@
 #include "core/layout.h"
 #include "core/tensor.h"
 #include "models/qwen3_5/state/decoder_state.h"
-#include "models/qwen3_5/program/round_buffers.h"
+#include "models/qwen3_5/program/resources.h"
 #include "models/qwen3_5/state/state_image.h"
 #include "models/load_options.h"
 #include "models/qwen3_5/program/planning/moe.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -22,65 +21,7 @@
 
 namespace ninfer::models::qwen3_5::detail {
 
-using TensorLayout                              = TensorRegion;
 inline constexpr std::uint32_t kCausalScoreTile = 1024;
-// Log-probability rows one causal-score column reads: its target and the reference tokens.
-inline constexpr std::uint32_t kCausalScoreReadoutRows = 1U + kMaximumCausalReferenceTokens;
-
-// Floats one lane's device logprob readout needs for the widest speculative round, and for the
-// largest prompt-position readout; each column is (sampled, raw), candidate pairs, and top-K.
-inline constexpr std::size_t kLogprobReadoutColumns =
-    std::max<std::size_t>(kMtpDecodeMaximumWidth, kDFlashDecodeMaximumWidth);
-inline constexpr std::size_t kLogprobReadoutFloats =
-    (2U + 2U * kMaximumLogprobCandidates + 3U * kMaximumTopLogprobs) * kLogprobReadoutColumns;
-inline constexpr std::size_t kLogprobPromptReadoutFloats =
-    (2U + 2U * kMaximumLogprobCandidates) * kMaximumPromptReadouts;
-
-struct DFlashPersistentLayout {
-    std::optional<qwen3_5::PagedKVCacheLayout> full;
-    TensorLayout prefill_features;
-    TensorLayout prefill_positions;
-    TensorLayout pending_features;
-
-    [[nodiscard]] std::size_t kv_payload_bytes() const noexcept {
-        return full ? full->payload_bytes() : 0;
-    }
-};
-
-struct PersistentLayout {
-    qwen3_5::DecoderStateLayout decoder;
-    qwen3_5::StateImageDeviceLayout state_images;
-    std::optional<GdnReplayRecordLayout> replay_records;
-    std::optional<DFlashPersistentLayout> dflash;
-    qwen3_5::RoundStateLayout round;
-    TensorLayout prefill_hidden;
-    std::optional<TensorLayout> score_hidden;
-    std::optional<TensorLayout> token_counts;
-    std::optional<TensorLayout> sampling_config;
-    std::optional<TensorLayout> grammar_masks;
-    // Prompt-membership bitsets [words, lanes] for the repetition penalty.
-    std::optional<TensorLayout> prompt_presence;
-    // Token logprob device readout: candidate ids, per-round columns, and prompt positions.
-    std::optional<TensorLayout> logprob_candidate_ids;
-    std::optional<TensorLayout> logprob_readout;
-    std::optional<TensorLayout> logprob_prompt_next_ids;
-    std::optional<TensorLayout> logprob_prompt_readout;
-    std::size_t bytes            = 0;
-    std::size_t kv_payload_bytes = 0;
-};
-
-struct WorkspacePlan {
-    std::size_t text_prefill     = 0;
-    std::size_t ordinary_round   = 0;
-    std::size_t mtp_prefill      = 0;
-    std::size_t mtp_round        = 0;
-    std::size_t dflash_context   = 0;
-    std::size_t dflash_round     = 0;
-    std::size_t causal_score     = 0;
-    std::size_t general_capacity = 0;
-    std::optional<qwen::VisionWorkspacePlan> vision;
-    std::size_t capacity = 0;
-};
 
 struct SequencePlanningInputs {
     std::shared_ptr<const execution::ModelProfile> profile;
@@ -116,8 +57,8 @@ struct SequencePlanImpl {
     bool causal_scoring               = false;
     std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
-    PersistentLayout persistent;
-    WorkspacePlan workspace;
+    ResourceLayout persistent;
+    WorkspaceSpec workspace;
     bool graph_probe                     = false;
     std::size_t device_reservation_bytes = 0;
 };

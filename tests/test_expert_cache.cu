@@ -4,6 +4,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -13,7 +14,9 @@
 #include <thread>
 
 namespace ninfer::test {
+#ifndef _WIN32
 void expert_cache_cuda_errors(const ExpertBankSource&, const DeviceContext&);
+#endif
 }
 
 namespace {
@@ -573,8 +576,12 @@ int main() {
         complete_bank(device);
         fixed_regions_and_windows(device);
         promote_partial_upload(device);
+#ifndef _WIN32
         Bank failure_source(QType::NVFP4, QType::NVFP4);
         ninfer::test::expert_cache_cuda_errors(failure_source.source(device.device()), device);
+#else
+        std::cout << "CUDA failure injection: SKIP (requires ELF symbol interposition)\n";
+#endif
         std::cout << "expert cache bytes, lifetimes, Graph and resident access passed\n";
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';

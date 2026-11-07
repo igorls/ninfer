@@ -1,7 +1,11 @@
 #include "core/buffer.h"
 #include "ninfer/ops/moe.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <time.h>
+#endif
 #include <emmintrin.h>
 
 #include <algorithm>
@@ -314,11 +318,21 @@ double sequential_read_gbps(const std::vector<std::unique_ptr<Bank>>& banks,
 }
 
 double cpu_us() {
+#ifdef _WIN32
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user))
+        throw std::runtime_error("process CPU clock failed");
+    const auto ticks = [](FILETIME time) {
+        return (std::uint64_t(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    };
+    return (ticks(kernel) + ticks(user)) / 10.0;
+#else
     timespec usage{};
     if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &usage)) {
         throw std::runtime_error("process CPU clock failed");
     }
     return usage.tv_sec * 1e6 + usage.tv_nsec / 1000.0;
+#endif
 }
 
 struct Options {
@@ -605,7 +619,11 @@ int main(int argc, char** argv) {
                   << " expert_bytes=" << expert_bytes << " bank_bytes=" << E * expert_bytes
                   << " keep_active=" << options.keep_active
                   << " plane_layout=native_parent_banks cpu_clock=process_cputime compiler="
+#ifdef _MSC_VER
+                  << "MSVC " << _MSC_VER << '\n';
+#else
                   << __VERSION__ << '\n';
+#endif
         std::cout << "# caller_cpu_ids=";
         for (auto cpu : current_thread_affinity(topology)) { std::cout << cpu << ' '; }
         std::cout << "\nformat,T,cpu_experts_per_token,assignments,unique_experts,workers,cache,"

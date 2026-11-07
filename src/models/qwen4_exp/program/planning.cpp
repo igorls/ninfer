@@ -23,6 +23,10 @@ PersistentLayout persistent(const execution::ModelProfile& p, const EngineOption
                            pages + o.max_concurrency * ((o.speculative.draft_tokens + 63) / 64),
                            o.max_concurrency, o.kv_cache);
     out.buffers = plan_buffers(b, p.config, o, o.prefill_chunk, p.public_tokens);
+    if (o.purpose == EnginePurpose::Generation)
+        out.readout = qwen::plan_distribution_readout(b,
+            static_cast<int>(p.config.mtp ? o.speculative.draft_tokens + 1 : 1),
+            static_cast<int>(o.max_concurrency), dimension(p.config.text.hidden));
     out.bytes   = b.finish(256);
     return out;
 }
@@ -133,10 +137,40 @@ std::size_t ExecutionPlan::device_bytes() const {
            (moe ? moe->description().device_bytes : 0);
 }
 
+std::size_t ExecutionPlan::pinned_context_bytes() const {
+    const auto mapping_elements = [](const QsaCacheLayout& pool) {
+        return std::size_t(pool.tables.spec.logical_page_capacity) * pool.tables.spec.table_rows;
+    };
+    const auto elements = mapping_elements(persistent.main) +
+                          (persistent.mtp ? mapping_elements(*persistent.mtp) : 0);
+    return 2 * elements * sizeof(std::int32_t);
+}
+
+std::size_t ExecutionPlan::pinned_aux_bytes() const {
+    const auto targets = shape.purpose == EnginePurpose::CausalScoring
+        ? std::min(shape.prefill_chunk, 1024U) * (1 + kMaximumCausalReferenceTokens) : 1024U;
+    return std::size_t(std::max(targets, persistent.buffers.batch.max_positions)) * sizeof(TokenId);
+}
+
+std::size_t ExecutionPlan::pinned_score_hidden_bytes() const {
+    return shape.purpose == EnginePurpose::CausalScoring
+        ? std::size_t(std::min(shape.prefill_chunk, 1024U)) * profile->config.text.hidden * 2 : 0;
+}
+
+std::size_t ExecutionPlan::pinned_context_counts_bytes() const {
+    return persistent.buffers.token_counts
+               ? (std::size_t(profile->public_tokens) + (profile->public_tokens + 31) / 32) *
+                     shape.max_concurrency * sizeof(std::int32_t)
+               : 0;
+}
+
 std::size_t ExecutionPlan::device_reservation_bytes() const {
     const auto host = ple_prepare_bytes + ple_upload.ordinary_host_bytes +
                       ple_upload.pinned_host_bytes + pinned_io_bytes + pinned_output_bytes +
-                      pinned_sampling_bytes + pinned_mtp_bytes;
+                      pinned_sampling_bytes + pinned_mtp_bytes + pinned_context_bytes() +
+                      pinned_aux_bytes() + pinned_context_counts_bytes() + pinned_trace_bytes +
+                      pinned_score_hidden_bytes() +
+                      (persistent.readout ? persistent.readout->host_bytes : 0);
     return device_bytes() + ((NINFER_SHARED_PHYSICAL_MEMORY != 0) ? host : 0);
 }
 

@@ -151,6 +151,7 @@ struct PreparedPromptData {
     std::shared_ptr<const frontend::ToolCallOutputContract> tool_call_output;
     bool starts_in_reasoning = false;
     std::optional<std::uint32_t> reasoning_frontier;
+    std::optional<std::uint32_t> continuation_frontier;
     std::string continuation_content;
     PrepareStats prepare;
 

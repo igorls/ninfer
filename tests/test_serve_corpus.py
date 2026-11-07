@@ -167,6 +167,7 @@ def test_arbitrary_artifact_labels_reach_the_requested_backend(tmp_path: Path) -
             concurrency=[1],
             sampling="greedy",
             kv_dtype="fp8",
+            proposal_head="optimized",
         ),
     )
     assert [(point.target, point.speculative_backend) for point in points] == [
@@ -234,7 +235,8 @@ def test_selected_kv_reaches_server_and_is_verified(
     }
     if concurrent:
         args = concurrency.parse_args(
-            common + ["--suite", "decode-saturation", "--concurrency", "1"]
+            common + ["--suite", "decode-saturation", "--concurrency", "1",
+                      "--proposal-head", head]
         )
         point = build_points([("model", artifact)], args)[0]
         command = concurrency.server_command(
@@ -276,6 +278,8 @@ def test_selected_kv_reaches_server_and_is_verified(
     engine["proposal_head"] = head
     assert command[command.index("--device-state-slots") + 1] == "0"
     assert command[command.index("--host-context-mib") + 1] == "0"
+    assert ("--lm-head-draft" in command) == (head == "optimized")
+    assert validate() == ("instance", "bindings")
     for field in ("device_state_slots", "host_capacity_bytes"):
         engine["context_cache"][field] = 1
         with pytest.raises(corpus.CampaignError, match="context cache capacity differs"):

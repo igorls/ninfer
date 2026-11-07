@@ -362,13 +362,15 @@ question takes one of two forms, reported as `form`:
   the first generated token, so a format whose first token is punctuation (a JSON string quote) is
   not useful here.
 - `text`: some candidate spans several tokens. One request per candidate renders it as the
-  continued final assistant turn, opened exactly as generation opens an answer, and reads the
+  continued final assistant turn and reads the
   log-probability of each of its tokens at its prompt position. `candidate_logprobs[].raw_logprob`
   is their sum, the candidate's conditional log-probability; `logprob` renormalises the sums over
   the list; `tokens` lists the per-token entries with their positions, so a client can apply its
   own length normalisation. Token ids cannot be mixed into such a list, `response_format` does not
   apply, and the form needs thinking off. Cost is one prefill of the question and candidate per
-  candidate, all reading the shared prefix.
+  candidate, all reading the shared prefix. Scoring starts at the frontend's exact supplied-content
+  boundary in that continuation; template-inserted content such as an empty thinking block is
+  excluded. A template without an exact token boundary there cannot score that text candidate.
 
 Every result also carries `entropy` (nats) and `margin` (top-two probability ratio) of its
 distribution.

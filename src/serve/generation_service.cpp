@@ -513,24 +513,29 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
     return prepared;
 }
 
-int GenerationService::count_prompt_tokens(const GenerationRequest& request,
-                                           std::function<bool()> is_cancelled) const {
+ninfer::PromptInput GenerationService::acquire_prompt_input(
+    const GenerationRequest& request, Clock::time_point deadline,
+    const std::function<bool()>& is_cancelled) const {
     const bool request_has_media = request.media_item_count() != 0;
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
     }
-    const Clock::time_point deadline =
-        Clock::now() + std::chrono::milliseconds(options_.pending_timeout_ms);
     const ResolvedPromptSemantics semantics =
         resolve_prompt_semantics(request, options_, engine_->prompt_capabilities());
+    std::size_t remaining_media_bytes =
+        std::min(options_.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
+    return to_prompt_input(request, semantics, [&](const ContentPart& part) {
+        return acquire_media(part, deadline, is_cancelled, remaining_media_bytes);
+    });
+}
+
+int GenerationService::count_prompt_tokens(const GenerationRequest& request,
+                                           std::function<bool()> is_cancelled) const {
+    const Clock::time_point deadline =
+        Clock::now() + std::chrono::milliseconds(options_.pending_timeout_ms);
     try {
-        std::size_t remaining_media_bytes =
-            std::min(options_.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
-        ninfer::PromptInput input =
-            to_prompt_input(request, semantics, [&](const ContentPart& part) {
-                return acquire_media(part, deadline, is_cancelled, remaining_media_bytes);
-            });
+        ninfer::PromptInput input = acquire_prompt_input(request, deadline, is_cancelled);
         check_preparation_control(deadline, is_cancelled);
         const PreparationControl control{
             .deadline     = deadline,
@@ -540,6 +545,27 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
             static_cast<int>(engine_->count_tokens(std::move(input), control));
         check_preparation_control(deadline, is_cancelled);
         return prompt_tokens;
+    } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
+        throw_request_error(exception);
+    } catch (const std::invalid_argument& exception) {
+        throw_invalid_input(exception, "invalid_prompt");
+    }
+}
+
+ninfer::PromptSummary GenerationService::describe_prompt(
+    const GenerationRequest& request, std::function<bool()> is_cancelled) const {
+    const Clock::time_point deadline =
+        Clock::now() + std::chrono::milliseconds(options_.pending_timeout_ms);
+    try {
+        ninfer::PromptInput input = acquire_prompt_input(request, deadline, is_cancelled);
+        check_preparation_control(deadline, is_cancelled);
+        const PreparationControl control{
+            .deadline     = deadline,
+            .cancellation = CancellationView(is_cancelled),
+        };
+        const ninfer::PromptSummary summary = engine_->prepare(std::move(input), control).summary();
+        check_preparation_control(deadline, is_cancelled);
+        return summary;
     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
         throw_request_error(exception);
     } catch (const std::invalid_argument& exception) {

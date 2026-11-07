@@ -305,6 +305,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     auto output = compiled_.render(context, execution);
     auto layout = inspect_prompt_layout(output, media);
     std::string continuation_content;
+    std::optional<std::size_t> continuation_boundary;
     if (continuation) {
         const auto content = unique_output_region(output, sources.back().tag);
         if (!content || layout.messages.empty())
@@ -317,6 +318,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
                 "chat template cannot continue the final assistant content unambiguously");
         }
         continuation_content = output.text.substr(content->begin, content->end - content->begin);
+        continuation_boundary = content->begin;
         output.text.resize(content->end);
         std::erase_if(output.regions,
                       [&](const auto& region) { return region.begin > output.text.size(); });
@@ -330,6 +332,7 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     }
     RenderedChat result;
     result.continuation_content         = std::move(continuation_content);
+    result.continuation_boundary        = continuation_boundary;
     result.starts_in_reasoning          = layout.starts_in_reasoning;
     // The generation prompt is the final, open assistant block.
     if (!continuation && options.add_generation_prompt && !layout.messages.empty() &&

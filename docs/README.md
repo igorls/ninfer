@@ -43,6 +43,18 @@ is not qualified for production.
 - [Tools](../tools/README.md)
 - [Capability evaluation](../eval/README.md)
 
+## Designs
+
+- [Distributed execution](distributed-execution-design.md) — selected architecture for centralized
+  scheduling, local/distributed executors, rank ownership, parallel plans and communication;
+  implementation is pending.
+- [Qwen4Exp parallel strategy](qwen4_exp-parallel-design.md) — selected initial dual-Spark
+  TP2/EP2 strategy, state shards, computation/graph composition and implementation dependencies.
+- [GLM5Next model and weights](glm5next-model.md) — GLM-5.3-Flash computation, source weights,
+  selected quantization scope and context-state capacity; converter and model integration are pending.
+- [GLM5Next Spark Op checklist](glm5next-spark-tp2-ep2-op-checklist.md) — initial TP2/EP2
+  projections and local MoE preparation; stateful KDA, MLA, Indexer and mHC are deferred.
+
 ## Maintainer references
 
 The active references under [`maintainer/`](maintainer/) record current architecture, model,

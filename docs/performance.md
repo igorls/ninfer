@@ -1250,3 +1250,168 @@ The issue #37 acceptance gate remains separate from these G4 results.
 For both stage matrices, the reported arena capacities, startup-retained bytes
 and available-after-startup values are identical across all three processes
 within each arm/profile. These are startup boundaries, not peak-GPU measures.
+
+
+## Initial native-session comparison (2026-11-05)
+
+This evaluates the uncommitted adaptation through upstream `71cdd615` against
+accepted `e1ab9af3`. All 48 processes complete and produce 720 measured request
+records. **The original exact-proposal-count acceptance criterion fails** in one
+of the 16 profiles; collecting the remaining profiles does not waive that failure.
+Source integration, physical RTX 5090 acceptance and a stable release remain
+separate decisions. The associated functional checks and repaired source failures
+are recorded in [upstream ports](maintainer/upstream-ports.md#next-candidate-native-sessions-through-71cdd615).
+
+Both arms run on one Colab G4 RTX PRO 6000 Blackwell Server Edition, Linux,
+driver 580.82.07, CUDA 13.3.73, about 176 GiB RAM and absolute process nice 10.
+The dense artifact is `neroued/Qwen3.8-27B-nvfp4-NInfer` at
+`a107ba1b5b0609d9ca90d5ed61439f5f5cc7d64d`; Flash is
+`igorls/Qwen3.8-Flash-Next-mixed-NInfer` at
+`ef61b3c856f91e58a58e41a5a6269b6c8648d266`, canonically reframed without changing
+payload words. Both use the committed 65,536-token benchmark corpus.
+
+Each model uses C1/C4 × ordinary K0/MTP K3 × P512/P2048, BF16 KV, context 4096,
+prefill chunk 1024, explicit KV capacity 4096 × C, the default 8 GiB desktop
+reserve, one warmup and three repetitions per fresh process. There are three
+process pairs per model/concurrency/backend, ordered AB/BA/AB. Each request
+produces 65 tokens, with 64 timed decode tokens. Dense uses the optimized
+proposal head and Flash the full head. Clocks, CPU affinity and filesystem-cache
+state are not locked. No other qualification GPU job overlaps a measured process.
+
+Rates and wave seconds are arithmetic means of process means. Percentage changes
+are medians of the three paired changes with their complete range. Wave is
+submit-to-completion wall time; concurrent request rows are correlated. The
+predeclared investigation flags are >2% median wave slowdown or >5% in any pair,
+plus any exact proposal-count mismatch. Smaller adverse results remain reported;
+being below a timing flag does not establish equivalence or acceptance.
+
+The original run stops at dense C4/K3/P512. After focused diagnostic probes,
+collection resumes with the same frozen production and benchmark source and
+retains every prior process, including the failing pair. Four remaining dense
+and 24 Flash processes complete the original matrix. A setup attempt used an
+unsupported `--kv-capacity` switch and failed before model loading; the benchmark
+already derives and reports the required explicit capacity. A resume-harness
+variable error also occurred before new GPU work and was corrected.
+
+Native dense prefill defers proposal work that the baseline performs before
+publishing its first token. Phase-rate differences can therefore include work
+moving between prefill and decode; they do not establish isolated kernel gains.
+The wave comparison covers the full request. Where proposal counts differ, it
+does not isolate a speed difference at equal speculative work.
+
+| Model | C | K | P | Prefill tok/s A → B | Decode tok/s A → B | Wave s A → B | Wave change %, median (range) |
+|---|---:|---:|---:|---|---|---|---|
+| dense | 1 | 0 | 512 | 13374.1 → 13316.4 | 69.54 → 68.92 | 0.9603 → 0.9673 | +0.804 (+0.559 to +0.821) |
+| dense | 1 | 0 | 2048 | 15950.9 → 15961.4 | 68.56 → 68.58 | 1.0639 → 1.0619 | -0.075 (-0.454 to -0.024) |
+| dense | 1 | 3 | 512 | 12789.4 → 13199.5 | 127.78 → 127.01 | 0.5424 → 0.5429 | +0.073 (-0.059 to +0.251) |
+| dense | 1 | 3 | 2048 | 15583.8 → 15783.4 | 209.43 → 209.13 | 0.4386 → 0.4361 | -0.557 (-0.605 to -0.550) |
+| dense | 4 | 0 | 512 | 13317.8 → 13340.5 | 63.99 → 64.21 | 1.2009 → 1.1950 | -0.511 (-0.515 to -0.439) |
+| dense | 4 | 0 | 2048 | 15848.5 → 15871.7 | 62.85 → 63.07 | 1.5829 → 1.5763 | -0.423 (-0.449 to -0.388) |
+| dense † | 4 | 3 | 512 | 12565.2 → 13071.4 | 112.34 → 113.26 | 0.8252 → 0.8152 | -1.375 (-1.686 to -0.589) |
+| dense | 4 | 3 | 2048 | 15537.1 → 15758.3 | 182.52 → 182.14 | 0.9330 → 0.9249 | -0.876 (-1.096 to -0.633) |
+| flash | 1 | 0 | 512 | 7327.3 → 7329.0 | 136.67 → 133.99 | 0.5396 → 0.5480 | +1.629 (+1.352 to +1.727) |
+| flash | 1 | 0 | 2048 | 9435.6 → 9424.2 | 131.44 → 130.90 | 0.7054 → 0.7068 | +0.144 (-0.168 to +0.658) |
+| flash | 1 | 3 | 512 | 7275.8 → 7269.7 | 129.76 → 131.13 | 0.5649 → 0.5588 | -1.060 (-1.316 to -0.845) |
+| flash | 1 | 3 | 2048 | 9423.7 → 9391.5 | 258.51 → 258.43 | 0.4662 → 0.4660 | -0.125 (-0.131 to +0.154) |
+| flash | 4 | 0 | 512 | 7464.1 → 7482.0 | 91.45 → 91.65 | 1.0008 → 0.9979 | -0.056 (-0.944 to +0.133) |
+| flash | 4 | 0 | 2048 | 9415.9 → 9409.2 | 88.55 → 88.51 | 1.6203 → 1.6207 | +0.100 (-0.181 to +0.142) |
+| flash | 4 | 3 | 512 | 7421.2 → 7424.3 | 66.77 → 66.80 | 1.2819 → 1.2802 | -0.118 (-0.170 to -0.098) |
+| flash | 4 | 3 | 2048 | 9344.8 → 9330.5 | 131.19 → 131.19 | 1.4194 → 1.4197 | +0.013 (-0.050 to +0.103) |
+
+Complete phase-rate change distributions:
+
+| Model | C | K | P | Prefill change %, median (range) | Decode change %, median (range) |
+|---|---:|---:|---:|---|---|
+| dense | 1 | 0 | 512 | -1.437 (-1.483 to +1.706) | -0.938 (-0.950 to -0.801) |
+| dense | 1 | 0 | 2048 | -0.104 (-0.200 to +0.503) | -0.060 (-0.132 to +0.281) |
+| dense | 1 | 3 | 512 | +3.188 (+3.170 to +3.260) | -0.589 (-0.769 to -0.449) |
+| dense | 1 | 3 | 2048 | +1.263 (+1.253 to +1.326) | -0.151 (-0.154 to -0.128) |
+| dense | 4 | 0 | 512 | +0.177 (+0.151 to +0.185) | +0.373 (+0.304 to +0.373) |
+| dense | 4 | 0 | 2048 | +0.113 (+0.058 to +0.268) | +0.337 (+0.327 to +0.391) |
+| dense | 4 | 3 | 512 | +4.879 (+2.198 to +5.008) | +0.834 (+0.474 to +1.168) |
+| dense | 4 | 3 | 2048 | +1.430 (+1.333 to +1.509) | -0.163 (-0.613 to +0.161) |
+| flash | 1 | 0 | 512 | -0.023 (-0.187 to +0.280) | -1.999 (-2.178 to -1.714) |
+| flash | 1 | 0 | 2048 | +0.050 (-0.553 to +0.141) | -0.437 (-0.855 to +0.066) |
+| flash | 1 | 3 | 512 | -0.197 (-0.681 to +0.629) | +1.065 (+0.884 to +1.238) |
+| flash | 1 | 3 | 2048 | -0.186 (-0.749 to -0.091) | -0.021 (-0.084 to +0.013) |
+| flash | 4 | 0 | 512 | -0.107 (-0.232 to +1.070) | +0.033 (-0.176 to +0.822) |
+| flash | 4 | 0 | 2048 | -0.190 (-0.292 to +0.272) | -0.048 (-0.076 to -0.011) |
+| flash | 4 | 3 | 512 | -0.018 (-0.070 to +0.212) | +0.050 (+0.042 to +0.060) |
+| flash | 4 | 3 | 2048 | -0.130 (-0.283 to -0.045) | -0.001 (-0.003 to +0.011) |
+
+† Dense C4/K3/P512 fails exact counts in all three process pairs. Each process's
+three measured repetitions total A → B: 357 → 354 rounds, 1,050 → 1,041 drafts,
+408 → 411 accepted, three fallback steps in both, and accepted-per-position
+[231, 132, 45] → [228, 135, 48]. Row four changes from 29 rounds/35 accepted
+to 28/36 in every repetition; other rows and P2048 match. The other 15 profiles
+match every row's rounds, drafted/accepted/fallback counts and position histogram.
+This fails the original gate and is not reported as an equal-work throughput gain.
+
+A focused P512/C4/K3 single-repetition probe reproduces the difference and finds
+identical generated token IDs in both builds for every prime/warmup/measured row.
+The first changed acceptance is row four at frontier 525, after both builds fully
+accepted the preceding round; it precedes batch shrink. Source composition differs
+in cached/batched versus regenerated one-token proposal work. The precise first
+differing arithmetic remains unresolved. Private full-packed-KV, history-width,
+combined-history and equal-text-RoPE-axis probes do not restore the baseline counts
+and are rejected; none changes the candidate production source or benchmark binary.
+This focused target-token match does not establish arbitrary-prompt equality.
+
+### CPU, startup and memory costs
+
+Whole-process user+system CPU time includes loading, warmup and measurements;
+peak RSS is `ru_maxrss`, not steady-state Host memory. Means are shown with full
+three-process ranges. Filesystem/cache state is uncontrolled; the first Flash
+baseline process has a large CPU/startup sample, so these values do not isolate a
+causal loader improvement. CPU inference, GPU execution and wall time are distinct.
+
+| Model | C | K | CPU s A → B | Peak RSS MiB A → B | Load s A → B |
+|---|---:|---:|---|---|---|
+| dense | 1 | 0 | 2.143 (2.109–2.176) → 10.196 (10.193–10.201) | 2212.2 (2211.9–2212.7) → 2217.7 (2217.5–2218.0) | 3.663 (3.625–3.689) → 3.648 (3.638–3.658) |
+| dense | 1 | 3 | 2.161 (2.147–2.174) → 6.095 (6.065–6.114) | 2216.0 (2215.7–2216.5) → 2226.8 (2226.0–2227.4) | 3.757 (3.742–3.775) → 3.831 (3.800–3.855) |
+| dense | 4 | 0 | 2.286 (2.277–2.300) → 13.321 (13.310–13.342) | 2238.8 (2238.2–2239.4) → 2257.7 (2257.4–2258.2) | 3.800 (3.786–3.818) → 3.915 (3.898–3.934) |
+| dense | 4 | 3 | 2.381 (2.371–2.388) → 9.377 (9.330–9.446) | 2255.0 (2254.7–2255.5) → 2296.6 (2296.1–2297.2) | 3.901 (3.897–3.906) → 4.287 (4.279–4.298) |
+| flash | 1 | 0 | 13.725 (8.344–24.452) → 8.390 (8.305–8.437) | 2327.3 (2326.8–2327.5) → 2348.3 (2347.9–2348.7) | 8.819 (8.784–8.858) → 8.926 (8.902–8.950) |
+| flash | 1 | 3 | 7.977 (7.566–8.675) → 7.639 (7.594–7.672) | 2340.6 (2340.1–2340.9) → 2362.3 (2362.2–2362.5) | 9.161 (9.078–9.247) → 9.312 (9.273–9.368) |
+| flash | 4 | 0 | 14.005 (13.924–14.082) → 14.041 (14.011–14.078) | 2364.5 (2364.1–2364.8) → 2426.0 (2425.4–2426.5) | 9.173 (9.115–9.257) → 9.515 (9.475–9.538) |
+| flash | 4 | 3 | 14.577 (14.507–14.658) → 14.696 (14.679–14.708) | 2419.2 (2418.7–2419.7) → 2481.2 (2481.1–2481.3) | 9.755 (9.698–9.832) → 10.181 (10.163–10.210) |
+
+These are planned Device arena capacities in MiB, not independent whole-device
+peak VRAM measurements. Weights and workspace capacities match per profile;
+sequence capacities change with the native frame/state layout.
+
+| Model | C | K | Weights MiB (both) | Sequence MiB A → B | Workspace MiB (both) |
+|---|---:|---:|---:|---:|---|---:|
+| dense | 1 | 0 | 19431.71 | 416.92 → 414.34 | 125.89 |
+| dense | 1 | 3 | 20202.57 | 442.09 → 449.22 | 125.89 |
+| dense | 4 | 0 | 19431.71 | 1636.27 → 1627.28 | 125.89 |
+| dense | 4 | 3 | 20202.57 | 1736.88 → 1736.73 | 125.89 |
+| flash | 1 | 0 | 71690.51 | 215.83 → 215.84 | 159.62 |
+| flash | 1 | 3 | 73213.26 | 252.16 → 252.20 | 159.62 |
+| flash | 4 | 0 | 71690.51 | 848.26 → 848.31 | 159.62 |
+| flash | 4 | 3 | 73213.26 | 933.41 → 933.55 | 159.62 |
+
+No profile crosses the predeclared wave-time flags, but adverse results include
+Flash ordinary C1/P512 wave +1.629% median and decode −1.999% median, dense
+ordinary C1/P512 wave +0.804%, plus the smaller losses in the tables. Dense process
+CPU time rises materially. Counts, startup, RSS and layout costs remain part of
+the disposition. The original count gate remains failed and this is not a stable-release
+or physical RTX 5090 performance qualification.
+
+### Ordinary Flash whole-inference profile
+
+Nsight Systems 2026.1.3 profiles baseline and candidate at C1/K0/P512 with the same
+artifact, corpus, BF16 KV, context/chunk/reserve and one measured repetition after
+warmup. Graph-level captures omit measured graph device activity, even in a
+process-start retry, and cannot establish GPU idle time. A final node-level
+capture records 52,289 kernels in each arm with identical names/counts, 256 graph
+launches, 523 asynchronous copies and 66 stream waits. The instrumented GPU kernel
+sums are 510.500/510.498 ms; event records rise from 199 to 268. Graph nodes have
+separate CUPTI stream IDs, so a primary-stream-only gap calculation is invalid.
+
+The node capture's generation wall times are 552.238/551.171 ms and its union of
+all GPU activity is 510.854/510.838 ms. That instrumented pair does not reproduce
+the uninstrumented slowdown and does not replace the matched matrix. It finds no
+changed kernel inventory, but does not establish a quantitative cause for the
+1.629% wave regression. Profiling stops here; the adverse timing and unresolved
+attribution remain in the disposition.

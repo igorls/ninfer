@@ -201,6 +201,9 @@ public:
                                           ContextCacheHints context_cache = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
+    // Frontend-only preparation: inspect template boundaries without submitting generation.
+    [[nodiscard]] ninfer::PromptSummary
+    describe_prompt(const GenerationRequest& req, std::function<bool()> is_cancelled = {}) const;
 
     // Consumes prepared.generation. A PreparedRequest is single-use.
     GenerationOutcome run(PreparedRequest& prepared, const StreamSink* sink,
@@ -209,6 +212,10 @@ public:
     void warmup();
 
 private:
+    [[nodiscard]] ninfer::PromptInput acquire_prompt_input(
+        const GenerationRequest& req, std::chrono::steady_clock::time_point deadline,
+        const std::function<bool()>& is_cancelled) const;
+
     enum class CacheParticipation : std::uint8_t {
         Disabled,
         ReadWrite,

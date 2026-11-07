@@ -6,6 +6,7 @@
 
 #include "core/tensor.h"
 #include "ninfer/types.h"
+#include "models/qwen4_exp/route_trace.h"
 
 #include <cuda_runtime.h>
 
@@ -17,21 +18,6 @@
 namespace ninfer::models::qwen4_exp::execution {
 
 inline constexpr std::int32_t kRouteTraceTopK = 10;
-
-// One logical column and its source column in the mirrored physical forward.
-struct RouteTraceColumn {
-    std::uint32_t lane     = 0;
-    std::uint32_t position = 0;
-    std::uint32_t source_column = 0;
-};
-
-struct RouteTraceRecord {
-    ExpertRouteKind kind      = ExpertRouteKind::Decode;
-    std::uint16_t first_layer = 0;
-    std::uint16_t layer_count = 0;
-    std::vector<RouteTraceColumn> columns;
-    std::vector<std::uint16_t> experts; // [column][layer][rank]
-};
 
 // Pinned host ids the trace needs: every device slice, plus one MTP slice per proposal step.
 [[nodiscard]] std::size_t route_trace_host_ids(std::int32_t columns, std::uint32_t slices,
