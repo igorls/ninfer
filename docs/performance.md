@@ -60,6 +60,104 @@ Model pages are the detailed result authority. Model-card performance tables are
 to those pages; update them together when replacing an applicable measurement. The README links
 to the result records and their qualification scope.
 
+## YaRN long context: Qwen3.8-27B
+
+Measured November 7, 2026 on one Colab G4: RTX PRO 6000 Blackwell **Server Edition** (97,887 MiB),
+driver 580.82.07, CUDA 13.3, GCC 13.3, Release `sm_120a`, source `4fc972a0` of the
+`--yarn-factor` change (the later commits only touch tests and documentation). The artifact is
+`neroued/Qwen3.8-27B-nvfp4-NInfer@a107ba1b` (23,719,715,844 bytes; native 262,144 positions).
+All runs use FP8 KV, CUDA Graphs, one execution lane, MTP K=3 with the full proposal head for the
+server runs, an automatic context capacity (74.8 GB device pool) and a 2-GiB desktop reserve.
+Arms ran one at a time on an otherwise idle GPU; each figure is a single run unless stated. These
+results do not establish Windows, RTX PRO 6000 Workstation Edition or RTX 5090 behaviour, and the
+OrcaRouter checkpoint and the 35B MoE route were not run.
+
+**Op qualification.** `ninfer_rope_test` passes its FP64-oracle YaRN cases at the 27B and 35B
+shapes: decode and 128- to 2,048-token prefill, Text 1-D and MRoPE with distinct axes, positions
+from 0 across the native boundary to 1,048,575, single-tensor MTP forms, padded and BF16-unaligned
+strides and Graph replay, all within the unchanged pair-relative BF16 profile scaled by the
+attention factor. The oracle's correction range for the published parameters is pairs 14..22, as
+derived by hand. With `NINFER_LONG_CONTEXT_TESTS=1`, the BF16 (136 cases, 129.5 s) and FP8 (159
+cases, 197.2 s) causal-attention suites pass, including decode and 129-column prefill tails at
+the full 1,048,576-key envelope against the FP64 oracle. A first attempt that ran them beside a
+served 1M-context engine failed those two cases with `cudaMalloc: insufficient Device memory`;
+they were rerun on an idle GPU.
+
+### Short-context quality
+
+`ninfer-perplexity` on the quick `ninfer-ppl-1m-v1` set (four streams, 261,167 scored tokens):
+
+| Window / stride | YaRN | PPL | Mean NLL | NLL change | Score rate (tok/s) |
+|---|---|---:|---:|---:|---:|
+| 4,096 / 2,048 | off | 4.316363 | 1.462413 | — | 7,084.8 |
+| 4,096 / 2,048 | 2 | 4.318466 | 1.462900 | +0.000487 | 7,022.1 |
+| 4,096 / 2,048 | 4 | 4.325740 | 1.464583 | +0.002170 | 6,997.3 |
+| 65,536 / 32,768 | off | 4.063292 | 1.401994 | — | 9,299.4 |
+| 65,536 / 32,768 | 2 | 4.065197 | 1.402462 | +0.000468 | 9,291.8 |
+| 65,536 / 32,768 | 4 | 4.068942 | 1.403383 | +0.001389 | 9,288.7 |
+
+Static YaRN costs a little at every length, as Qwen's cards warn, and the cost grows with the
+factor: +0.05% PPL at factor 2 and +0.22% at factor 4 with a 4K window, +0.05% and +0.14% with a
+64K window. Per domain at 4K and factor 4 the NLL rises by 0.0039 (Chinese reference), 0.0029
+(English long form), 0.0016 (code) and 0.0002 (English reference); at 64K English reference
+improves by 0.0036 while the other three rise by 0.0025–0.0038.
+Scoring is deterministic: two more runs of the 4K native and factor-4 arms reproduced every NLL
+exactly. Their score rates were 7,084.8, 6,987.7 and 6,966.8 tok/s native against 6,997.3,
+6,969.6 and 6,978.5 tok/s with factor 4 (means 7,013 and 6,982, -0.4%), inside the native arm's own
+1.7% spread, so the YaRN RoPE route has no measurable throughput cost here.
+
+### Retrieval, speed and memory
+
+A synthetic RULER-style multi-query haystack: deterministic pseudo-English filler, eight asked
+key/value facts at depths 3, 15, 30, 45, 60, 75, 88 and 97%, eight distractor facts with other
+keys, and one request for all eight values as JSON (thinking off, greedy). The same seed gives the
+same keys and values at every length. The 512K and 1M requests also ask for a 300-word summary so
+that decode runs past the JSON.
+
+| Server setting | Prompt tokens | Correct | TTFT (s) | Prompt rate (tok/s) | Decode (tok/s) | Output tokens | MTP accepted / drafted | Pool peak (GB) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| native, 262,144 | 32,012 | 8/8 | 2.47 | 12,960 | 199.4 | 137 | 102/105 | 1.90 |
+| native, 262,144 | 255,014 | 8/8 | 45.37 | 5,621 | 158.2 | 137 | 102/102 | 15.78 |
+| YaRN 4, 262,144 | 32,012 | 8/8 | 2.49 | 12,836 | 199.6 | 137 | 102/105 | 1.90 |
+| YaRN 4, 262,144 | 255,014 | 8/8 | 45.69 | 5,582 | 158.2 | 137 | 102/102 | 15.78 |
+| YaRN 2, 524,288 | 515,010 | 7/8 | 153.57 | 3,354 | 90.1 | 539 | 353/561 | 27.94 |
+| YaRN 2, 524,288 (repeat) | 515,010 | 7/8 | 153.52 | 3,355 | 90.1 | 539 | 353/561 | 27.94 |
+| YaRN 4, 1,048,576 | 515,010 | 8/8 | 153.04 | 3,365 | 92.8 | 567 | 377/573 | 27.94 |
+| YaRN 4, 1,048,576 | 1,040,006 | 7/8 | 560.32 | 1,856 | 62.2 | 542 | 352/573 | 56.22 |
+| YaRN 4, 1,048,576 (after the 1M request) | 32,012 | 8/8 | 2.51 | 12,756 | 199.6 | 137 | 102/105 | 58.12 |
+
+TTFT is client-measured to the first content token, so it includes tokenization and the whole
+prefill. Decode is client-measured after the first token; the 137-token rows are only the JSON
+answer, which MTP drafts almost perfectly, so they are not comparable with the 539- and 542-token
+rows. Pool peak is the context pool's peak occupancy from `/admin/vram`: FP8 KV (about 33 KB per
+token for the 16 attention layers), MTP history and the retained prefix checkpoints. The pool is
+reserved at startup, so device memory in use stays at about 94 GB in every arm.
+
+Both misses are key confusions with a similarly named distractor rather than lost needles: at
+515K with factor 2 `cobalt-ibex` (45% depth) received the code of the distractor `cobalt-heron`,
+in both runs, and at 1M `emerald-puffin` (75%) received `saffron-puffin`'s. Factor 4 retrieved
+all eight on the same 515K prompt, and the 256K rows, native or with factor 4, retrieve all eight.
+This is one seed and one haystack type, not a benchmark score, so it does not rank factor 2
+against factor 4.
+
+Prefill follows the attention-dominated quadratic profile: the published RTX 5090 NVFP4 context
+profile (linear plus quadratic term), scaled to this card by the 255K native row, predicts about
+152 s at 515K and 563 s at 1.04M, against 153.6 s and 560.3 s measured. The last 8,192-token
+chunks of the 1M prompt took about 7.9 s each. The ceiling itself costs nothing measurable: the
+same 515K prompt took 153.0 s under the 1M setting (factor 4) and 153.6 and 153.5 s in two runs of
+the 512K setting (factor 2). Factor 4 at 255K changes TTFT by +0.7% in single runs and leaves
+decode unchanged.
+
+MTP is scaled with the Text RoPE and keeps drafting past the native length: with the summary,
+acceptance was 62.9% at 515K with factor 2, 65.8% at 515K with factor 4 and 61.4% at 1M, with
+per-position counts 151/119/83, 155/128/94 and 152/119/81. No same-task run below 256K was made,
+so these rates have no short-context baseline; the JSON-only rows draft nearly perfectly at
+every length and do not discriminate.
+
+DFlash2 drafts are refused past their own 262,144 positions at startup: `--yarn-factor 2
+--max-context 524288 --spec dflash2` stops with "max_context exceeds the draft model's position
+capacity of 262144 tokens; use MTP or no speculation for longer contexts".
+
 ## Flash-Next v3 on Colab G4 (2026-10-04)
 
 Current measurements include the MTP batch-arithmetic corrections. Earlier candidates and
