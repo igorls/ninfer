@@ -68,6 +68,7 @@ const char* param_kind_name(ParamKind kind) noexcept {
 nlohmann::json DashboardServer::config_json() const {
     const ParsedEngineArgs parsed = parse_engine_args(cfg_.engine.args);
     const std::string identity = artifact_model_identity(parsed.artifact);
+    const ArtifactPositionLimits positions = artifact_position_limits(parsed.artifact);
 
     // The form's field list comes from the engine parameter table, so a knob added
     // in C++ appears in the page with its own label, help text and bounds, and no
@@ -90,7 +91,11 @@ nlohmann::json DashboardServer::config_json() const {
                           {"label", std::string(spec.label)},
                           {"help", std::string(spec.help)},
                           {"min", spec.min_value},
-                          {"max", spec.max_value},
+                          // The model's own limit under the configured YaRN factor.
+                          {"max", spec.key == "max_context" && positions.text != 0
+                                      ? static_cast<long long>(
+                                            model_context_limit(positions.text, parsed.params))
+                                      : spec.max_value},
                           {"choices", choices}});
     }
 
@@ -100,6 +105,11 @@ nlohmann::json DashboardServer::config_json() const {
     return {
         {"config_path", cfg_.source_path},
         {"model_identity", identity},
+        // The page recomputes the context ceiling as the YaRN choice changes.
+        {"context_limits",
+         {{"native", positions.text},
+          {"draft", positions.draft},
+          {"yarn_supported", positions.text != 0 && identity != "qwen3.8-flash-next"}}},
         {"writable", !cfg_.source_path.empty()},
         {"manages_engine", manages_engine_process(cfg_)},
         {"engine",
@@ -195,7 +205,8 @@ DashboardServer::ConfigResult DashboardServer::apply_config(const std::string& r
             if (!remove) { merged.push_back(param); }
         }
         for (const auto& message : validate_engine_param_combination(
-                 merged, artifact_model_identity(parsed.artifact))) {
+                 merged, artifact_model_identity(parsed.artifact),
+                 artifact_position_limits(parsed.artifact))) {
             errors.push_back(message);
         }
         parsed.params            = std::move(merged);
@@ -441,7 +452,8 @@ DashboardServer::ConfigResult DashboardServer::select_model(const std::string& r
     const auto parsed = parse_engine_args(model_engine_args(*model));
     auto errors = validate_engine_params(parsed.params);
     const auto combinations = validate_engine_param_combination(
-        parsed.params, artifact_model_identity(model->artifact));
+        parsed.params, artifact_model_identity(model->artifact),
+        artifact_position_limits(model->artifact));
     errors.insert(errors.end(), combinations.begin(), combinations.end());
     if (!errors.empty()) {
         return {400, {{"error", "invalid launch preset"}, {"details", errors}}};

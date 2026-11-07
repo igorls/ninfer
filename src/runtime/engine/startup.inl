@@ -324,6 +324,8 @@ BuiltModel<typename Setup::Types> build_local_model(const artifact::Reader& read
     const auto& stats         = instance->model->storage_stats();
     summary.architecture      = models::architecture_name(setup.architecture());
     summary.model_name        = setup.definition()->info().name;
+    summary.native_context    = setup.definition()->info().native_context;
+    summary.position_capacity = setup.definition()->info().position_capacity;
     summary.prefill_signature = signature;
     std::set<std::string> formats;
     for (const auto& weight : setup.definition()->weight_data()) {

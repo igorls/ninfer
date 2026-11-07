@@ -116,6 +116,8 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
     out->prepared_resources = std::move(binder).finish();
     out->info.name          = reader.directory().metadata.value(
         "name", std::string(architecture_name(text.architecture)));
+    out->info.native_context    = text.max_position_embeddings;
+    out->info.position_capacity = text.position_capacity();
     out->parents.resize(reader.directory().objects.size());
     out->references.reserve(pending.size());
     out->descriptions.reserve(pending.size());

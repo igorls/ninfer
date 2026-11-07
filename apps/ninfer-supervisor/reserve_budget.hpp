@@ -73,6 +73,10 @@ inline nlohmann::json context_plan_from_server_start(const std::string& line) {
                 {"device_capacity_bytes", capacity},
                 {"block_bytes", block},
                 {"max_context", engine.at("max_context").get<std::uint64_t>()},
+                {"native_context", engine.value("native_context", std::uint64_t{0})},
+                {"position_capacity", engine.value("position_capacity", std::uint64_t{0})},
+                {"yarn_factor", engine.contains("yarn_factor") ? engine.at("yarn_factor")
+                                                               : nlohmann::json(nullptr)},
                 {"max_concurrency", engine.at("max_concurrency").get<std::uint64_t>()},
                 {"prefill_chunk", engine.value("prefill_chunk", std::uint64_t{0})},
                 {"kv_cache", engine.value("kv_cache", std::string{})},

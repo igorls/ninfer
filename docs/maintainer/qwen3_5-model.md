@@ -83,6 +83,28 @@ Ops: the current fused input projections have explicit Dense/MoE shapes, GDN use
 The current multimodal RoPE entry requires the implemented interleaved axis mapping. These checks
 belong to the relevant consumers; parsing a config is not a promise to execute every size.
 
+### Static YaRN extension
+
+`--yarn-factor F` (`EngineOptions::yarn_factor`) selects Qwen's static YaRN extension at startup.
+The artifact keeps its native `rope_parameters`, so one file serves both modes and the default route
+is unchanged; the converter rejects a YaRN source config instead of storing it. With F in (1,4],
+the Text RoPE of every full-attention and MTP layer uses the YaRN frequencies and magnitude of
+[`ops::rope`](../../include/ninfer/ops/rope.h) with the artifact's `max_position_embeddings` as the
+original length L, `beta_fast=32`, `beta_slow=1` and attention factor `0.1*ln(F)+1`, the parameters
+of the Qwen3.5-family model cards and of the vLLM, SGLang and Transformers implementations. For
+R=64, theta=1e7 and L=262,144, pairs 0..14 keep their frequency, pairs 22..31 divide it by F and
+pairs 15..21 blend linearly; the 64 rotated dimensions are scaled by the attention factor and the
+other 192 are not. The position capacity, and thus the `max_context` ceiling, becomes
+`floor(F*L)`: 1,048,576 at F=4.
+
+Scaling applies to every position, short prompts included; Qwen's cards note that static YaRN may
+lower short-text quality and recommend the smallest factor that covers the workload. The YaRN Op
+forms the phase in FP64, so angles stay accurate at 1M positions, where FP32 phase products would
+be off by up to about 0.03 rad. MTP shares the Text RoPE configuration and is scaled with it.
+DFlash and DFlash2 drafts keep their own unscaled RoPE and position capacity, so startup rejects a
+`max_context` above the draft's capacity; MTP or no speculation serves longer contexts.
+Measurements are in the [performance record](../performance.md#yarn-long-context-qwen38-27b).
+
 ## Logical parameters and physical bindings
 
 [`load/`](../../src/models/qwen3_5/load/) expands the selected config into parameter names, shapes

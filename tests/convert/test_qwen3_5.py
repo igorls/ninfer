@@ -381,6 +381,25 @@ def test_rope_aliases_preserve_supported_parameters_and_reject_changed_mathemati
     draft["rope_scaling"] = {"rope_type": "linear", "factor": 2, "rope_theta": 500_000}
     with pytest.raises(ValueError, match="rope_type"):
         draft_config(draft, target, "dflash")
+    draft["rope_scaling"] = {"rope_type": "yarn", "factor": 4, "rope_theta": 500_000}
+    with pytest.raises(ValueError, match="draft models have no YaRN"):
+        draft_config(draft, target, "dflash")
+
+
+def test_yarn_source_config_points_to_the_startup_option():
+    # The Qwen model card's 1M recipe edits config.json; the artifact keeps the native RoPE.
+    for field in ("rope_scaling", "rope_parameters"):
+        raw = _config()
+        rope = raw["text_config"].pop("rope_parameters")
+        raw["text_config"][field] = {
+            **rope,
+            "mrope_interleaved": True,
+            "rope_type": "yarn",
+            "factor": 4.0,
+            "original_max_position_embeddings": 128,
+        }
+        with pytest.raises(ValueError, match="--yarn-factor"):
+            text_config(raw, mtp=False)
 
 
 def test_selected_vision_processor_geometry_is_checked_before_conversion(tmp_path):

@@ -12,6 +12,9 @@ namespace ninfer::models::qwen4_exp {
 
 struct InstanceInfo {
     std::string name;
+    // Trained Text positions; Qwen4Exp has no RoPE scaling, so this is also the ceiling.
+    std::uint32_t native_context    = 0;
+    std::uint32_t position_capacity = 0;
 };
 
 // Immutable selected model semantics and representation descriptions. Resource bytes and

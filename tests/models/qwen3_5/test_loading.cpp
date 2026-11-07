@@ -5,7 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <iostream>
+#include <limits>
+#include <optional>
 
 namespace {
 
@@ -336,6 +339,41 @@ void invalid_model_data() {
     bad([](Json& root) { root["components"]["text"]["config"]["vocab_size"] = 264; });
 }
 
+// YaRN is a startup choice over the artifact's native RoPE: the same file serves both modes,
+// the position capacity follows the factor, and invalid factors are refused at config time.
+void yarn_scaling_options() {
+    ModelFixture fixture;
+    fixture.file.write();
+    const auto load = [&](std::optional<float> factor) {
+        artifact::Reader reader(fixture.file.entry);
+        return q35::read_definition(reader, LoadOptions{.yarn_factor = factor});
+    };
+    const auto native = load(std::nullopt);
+    require(!native->config().text.rope_parameters->yarn &&
+                native->config().text.position_capacity() == 128 &&
+                native->info().native_context == 128 && native->info().position_capacity == 128,
+            "native RoPE changed its position capacity");
+    for (const float factor : {2.0F, 3.5F, kMaximumYarnFactor}) {
+        const auto scaled = load(factor);
+        const auto& yarn  = scaled->config().text.rope_parameters->yarn;
+        const auto expected =
+            static_cast<std::uint32_t>(std::floor(128.0 * static_cast<double>(factor)));
+        require(yarn && yarn->factor == factor && yarn->original_max_position_embeddings == 128 &&
+                    std::abs(double(yarn->attention_factor) -
+                             (0.1 * std::log(double(factor)) + 1.0)) < 1e-6,
+                "YaRN parameters do not follow the selected factor");
+        require(scaled->config().text.position_capacity() == expected &&
+                    scaled->info().native_context == 128 &&
+                    scaled->info().position_capacity == expected &&
+                    scaled->config().text.max_position_embeddings == 128,
+                "YaRN position capacity is not factor x native");
+    }
+    for (const float factor : {1.0F, 0.5F, 4.5F, std::numeric_limits<float>::infinity(),
+                               std::numeric_limits<float>::quiet_NaN()}) {
+        rejects([&] { (void)load(factor); }, "an invalid YaRN factor was accepted");
+    }
+}
+
 void cold_matrix_profile() {
     const auto geometry = weight_geometry(QType::NVFP4, QuantLayout::BatchedBlockScaleK16M128x4,
                                           std::array<std::uint64_t, 3>{2, 256, 128});
@@ -357,6 +395,7 @@ int main() {
         native_uses();
         cold_matrix_profile();
         invalid_model_data();
+        yarn_scaling_options();
         std::cout << "model config, binding, resources and Use checks passed\n";
         return 0;
     } catch (const std::exception& error) {

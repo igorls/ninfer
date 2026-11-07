@@ -61,6 +61,18 @@ def _rope_source(raw: dict, label: str) -> dict:
         if not isinstance(value, dict):
             raise ValueError(f"{label}.{field}: expected an object")
         for alias in ("type", "rope_type"):
+            if value.get(alias) == "yarn":
+                # Static YaRN is an Engine startup choice over the native RoPE, so one
+                # artifact serves both modes. Draft models keep their trained RoPE.
+                raise ValueError(
+                    f"{label}.{field}: YaRN is not stored in artifacts; convert the native "
+                    "rope_parameters"
+                    + (
+                        " and start the Engine with --yarn-factor"
+                        if label == "text"
+                        else "; draft models have no YaRN support"
+                    )
+                )
             _fixed(value, alias, "default", label + "." + field)
         if "factor" in value and _f32(value["factor"], label + ".factor") != 1.0:
             raise ValueError(f"{label}: scaled RoPE is not implemented")

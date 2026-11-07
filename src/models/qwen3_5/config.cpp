@@ -284,6 +284,12 @@ DraftConfig draft(const Json& value, const TextConfig& target, bool dflash2) {
 
 } // namespace
 
+std::uint32_t TextConfig::position_capacity() const noexcept {
+    if (rope_parameters && rope_parameters->yarn)
+        return yarn_position_capacity(max_position_embeddings, rope_parameters->yarn->factor);
+    return max_position_embeddings;
+}
+
 std::uint64_t GdnConfig::conv_channels() const {
     return artifact::checked_add(artifact::checked_mul(2, key_width(), "GDN key width"),
                                  value_width(), "GDN convolution channels");
@@ -310,6 +316,20 @@ Config parse_config(const artifact::Directory& directory, const LoadOptions& opt
         Config out;
         out.mtp  = options.speculative == SpeculativeBackend::Mtp;
         out.text = text(directory.component("text").config, out.mtp);
+        if (options.yarn_factor) {
+            const float factor = *options.yarn_factor;
+            if (!std::isfinite(factor) || !(factor > 1.0F) || factor > kMaximumYarnFactor) {
+                throw ArtifactError("YaRN factor must be in (1," +
+                                    std::to_string(static_cast<int>(kMaximumYarnFactor)) + "]");
+            }
+            if (!out.text.rope_parameters) {
+                throw ArtifactError("YaRN scaling requires Text RoPE attention");
+            }
+            out.text.rope_parameters->yarn = YarnConfig{
+                .factor                           = factor,
+                .original_max_position_embeddings = out.text.max_position_embeddings,
+                .attention_factor = static_cast<float>(0.1 * std::log(double(factor)) + 1.0)};
+        }
         if (options.vision) { out.vision = vision(companion(directory, "vision").config); }
         if (out.mtp) {
             const auto& config = companion(directory, "mtp").config;

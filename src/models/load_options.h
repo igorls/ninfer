@@ -2,6 +2,7 @@
 
 #include "ninfer/types.h"
 
+#include <optional>
 #include <string_view>
 
 namespace ninfer::models {
@@ -11,6 +12,8 @@ struct LoadOptions {
     bool vision                    = false;
     SpeculativeBackend speculative = SpeculativeBackend::None;
     ProposalHead proposal_head     = ProposalHead::Full;
+    // Startup-selected static YaRN RoPE factor; it changes the model's rotary mathematics.
+    std::optional<float> yarn_factor;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -52,7 +55,8 @@ struct LoadOptions {
     return {.purpose       = options.purpose,
             .vision        = options.enable_vision,
             .speculative   = options.speculative.backend,
-            .proposal_head = options.speculative.proposal_head};
+            .proposal_head = options.speculative.proposal_head,
+            .yarn_factor   = options.yarn_factor};
 }
 
 } // namespace ninfer::models

@@ -1779,7 +1779,75 @@ int test_artifact_headers() {
     f += check(artifact_model_identity(v2).empty(), "a v2 artifact has no identity");
     entry.artifact = other;
     f += check(!check_model_available(entry).available, "a foreign file is unavailable");
+    const std::string positioned = write(
+        "positions.ninfer", kNinferV3Magic,
+        R"({"metadata":{"name":"qwen3.8-27b"},"components":{"text":{"config":)"
+        R"({"max_position_embeddings":262144}},"dflash2":{"config":)"
+        R"({"max_position_embeddings":131072}}},"files":[]})");
+    const auto limits = artifact_position_limits(positioned);
+    f += check(limits.text == 262144 && limits.draft == 131072,
+               "position limits come from the artifact's component configs");
+    const auto none = artifact_position_limits(v3_unnamed);
+    f += check(none.text == 0 && none.draft == 0 && artifact_position_limits(v2).text == 0,
+               "an artifact without declared positions has no limit");
     std::filesystem::remove_all(dir);
+    return f;
+}
+
+// The context ceiling is the model's native length, extended only by the YaRN choice; drafts and
+// models without YaRN keep their own limits.
+int test_context_limits() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    const ArtifactPositionLimits dense{262144, 262144};
+    f += check(model_context_limit(262144, {}) == 262144, "native limit without YaRN");
+    f += check(model_context_limit(262144, {{"yarn_factor", "2"}}) == 524288 &&
+                   model_context_limit(262144, {{"yarn_factor", "4"}}) == 1048576,
+               "YaRN multiplies the native limit");
+    f += check(model_context_limit(0, {{"yarn_factor", "4"}}) == 0,
+               "an unknown artifact has no model limit");
+    f += check(validate_engine_param_combination({{"max_context", "262144"}}, "qwen3.8-27b", dense)
+                   .empty(),
+               "the native length is accepted");
+    const auto native =
+        validate_engine_param_combination({{"max_context", "524288"}}, "qwen3.8-27b", dense);
+    f += check(native.size() == 1 && native[0].find("YaRN") != std::string::npos,
+               "beyond the native length suggests YaRN");
+    f += check(validate_engine_param_combination(
+                   {{"max_context", "1048576"}, {"yarn_factor", "4"}, {"spec", "mtp"},
+                    {"draft_tokens", "3"}},
+                   "qwen3.8-27b", dense)
+                   .empty(),
+               "1M tokens with YaRN 4 and MTP is accepted");
+    f += check(!validate_engine_param_combination({{"max_context", "1048577"}, {"yarn_factor", "4"}},
+                                                  "qwen3.8-27b", dense)
+                    .empty(),
+               "the YaRN limit is enforced");
+    f += check(!validate_engine_param_combination(
+                    {{"max_context", "524288"}, {"yarn_factor", "2"}, {"spec", "dflash2"},
+                     {"draft_tokens", "7"}},
+                    "qwen3.8-27b", dense)
+                    .empty(),
+               "DFlash2 is refused past its own positions");
+    f += check(validate_engine_param_combination(
+                   {{"max_context", "131072"}, {"yarn_factor", "2"}, {"spec", "dflash2"},
+                    {"draft_tokens", "7"}},
+                   "qwen3.8-27b", dense)
+                   .empty(),
+               "DFlash2 stays available within its own positions");
+    f += check(!validate_engine_param_combination({{"yarn_factor", "2"}}, "qwen3.8-flash-next",
+                                                  {262144, 0})
+                    .empty(),
+               "Flash-Next refuses YaRN");
+    f += check(validate_engine_params({{"yarn_factor", "4"}}).empty() &&
+                   !validate_engine_params({{"yarn_factor", "1.5"}}).empty() &&
+                   !validate_engine_params({{"yarn_factor", "8"}}).empty(),
+               "the page offers the documented factors only");
+    const auto args = parse_engine_args({"model.ninfer", "--yarn-factor", "4"});
+    f += check(args.passthrough.empty() && find_param_value(args.params, "yarn_factor") &&
+                   render_engine_args(args) ==
+                       std::vector<std::string>{"model.ninfer", "--yarn-factor", "4"},
+               "the YaRN factor round-trips as an editable parameter");
     return f;
 }
 
@@ -2724,6 +2792,7 @@ int main() {
     failures += test_engine_param_round_trip();
     failures += test_artifact_headers();
     failures += test_engine_param_validation();
+    failures += test_context_limits();
     failures += test_redact_engine_args();
     failures += test_engine_endpoint_sync();
     failures += test_with_request_log();

@@ -67,6 +67,23 @@ scope, state handling and resource limits.
 Exactly one of `--prompt` and `--messages` is required. Context capacity defaults to `auto`;
 `--max-context` limits each request, while KV and State share the resolved byte capacity.
 
+`--max-context` cannot exceed the model's position capacity, 262,144 tokens for the Qwen3.5-family
+checkpoints. `--yarn-factor F` (F in (1,4]) enables Qwen's static YaRN RoPE scaling for the
+Qwen3.5-family Text models and raises that ceiling to F times the native length, about 1M tokens
+at F=4. It applies to every request and may lower quality on short texts, so pick the smallest
+factor that covers the work (2 for 512K). Above the native length use MTP or no speculation; DFlash
+and DFlash2 drafts stop at their own 262,144 positions. A 1M-token request with FP8 KV holds about
+34 GiB of KV and MTP history beside the weights, so it needs a 96-GB card:
+
+```bash
+./build/rtx5090-release/apps/ninfer-serve models/qwen3_8_27b_nvfp4.ninfer \
+  --yarn-factor 4 --max-context 1048576 --kv-dtype fp8 --prefill-chunk 8192 \
+  --spec mtp --draft-tokens 3 --proposal-head optimized
+```
+
+See the [model reference](maintainer/qwen3_5-model.md#static-yarn-extension) for the mathematics and
+the [performance record](performance.md#yarn-long-context-qwen38-27b) for measured cost and quality.
+
 Answer content is streamed to stdout. Tool calls supplied through `--messages` also stream to stdout
 as `{"name":"...","arguments":...}` records, with argument bytes appearing as they are generated.
 An interrupted record retains its partial JSON and reports the interruption on stderr; it is not

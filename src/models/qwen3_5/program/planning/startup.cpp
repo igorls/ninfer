@@ -529,12 +529,25 @@ void validate_target_options(const execution::ModelProfile& profile, DeviceConte
         throw std::invalid_argument(
             "loaded components do not match the requested execution options");
     }
+    // A masked draft keeps its own unscaled RoPE, so YaRN never extends it: beyond the draft's
+    // native positions its proposals would be extrapolated, and startup refuses the pairing.
     if (profile.draft && options.max_context > profile.config.draft->max_position_embeddings) {
-        throw std::invalid_argument("max_context exceeds the selected draft position capacity");
+        throw std::invalid_argument(
+            "max_context exceeds the draft model's position capacity of " +
+            std::to_string(profile.config.draft->max_position_embeddings) +
+            " tokens; use MTP or no speculation for longer contexts");
     }
-    if (options.max_context == 0 ||
-        options.max_context > profile.config.text.max_position_embeddings) {
-        throw std::invalid_argument("max_context exceeds the configured position capacity");
+    const auto positions = profile.config.text.position_capacity();
+    if (options.max_context == 0 || options.max_context > positions) {
+        throw std::invalid_argument(
+            "max_context exceeds the model's position capacity of " + std::to_string(positions) +
+            " tokens" +
+            (profile.config.text.rope_parameters && !profile.config.text.rope_parameters->yarn &&
+                     options.max_context <= yarn_position_capacity(
+                                                profile.config.text.max_position_embeddings,
+                                                kMaximumYarnFactor)
+                 ? "; YaRN scaling (--yarn-factor) extends it"
+                 : ""));
     }
     if (options.prefill_chunk % kPrefillChunkAlignment != 0) {
         throw std::invalid_argument("prefill_chunk must be a nonzero multiple of 128");
