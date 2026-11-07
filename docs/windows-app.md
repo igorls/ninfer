@@ -38,7 +38,7 @@ paths for any other auxiliary resources in custom arguments.
 | Active configuration | `%LOCALAPPDATA%\NInfer\supervisor.json` |
 | Tray preferences | `%LOCALAPPDATA%\NInfer\supervisor.tray.json` |
 | Engine and request logs | `%LOCALAPPDATA%\NInfer\logs` |
-| Application shortcuts | Start menu → NInfer |
+| Application shortcuts | Start menu → NInfer Workstation |
 
 The dashboard's request figures and its Diagnose findings come from the request log. The
 log is never trimmed, so the Supervisor reads an existing one once, in the background, when it

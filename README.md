@@ -1,9 +1,9 @@
-# NInfer
+# NInfer Workstation
 
-A C++/CUDA inference engine for local, single-GPU text and vision workloads. This is
-[igorls/ninfer](https://github.com/igorls/ninfer), the workstation fork of
-[Neroued/ninfer](https://github.com/Neroued/ninfer), with native Windows support, a Supervisor app,
-and application-serving extensions.
+NInfer Workstation is [igorls/ninfer](https://github.com/igorls/ninfer), the workstation fork of
+the [NInfer](https://github.com/Neroued/ninfer) C++/CUDA inference engine for local, single-GPU text
+and vision workloads. It adds native Windows support, a Supervisor app, and application-serving
+extensions. The engine keeps the NInfer name; NInfer Workstation names this fork and its Windows app.
 
 The engine targets **`sm_120a` only**. The fork supports **RTX 5090** and
 **RTX PRO 6000 Blackwell, 96 GB**, with native Windows and Linux builds.

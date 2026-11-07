@@ -476,7 +476,7 @@ std::wstring TrayIcon::header_line(const EngineStatus& st) const {
     const TrayStatus status = st.crash_loop_halted || st.state == EngineState::Halted
                                   ? TrayStatus::Failed
                                   : status_from(st);
-    std::wstring head = L"NInfer is ";
+    std::wstring head = L"NInfer Workstation is ";
     head += status_word(status);
     if (!manages_engine_) { head += L" (observing)"; }
     if (status == TrayStatus::Failed && !st.last_error_line.empty()) {
@@ -504,7 +504,7 @@ void TrayIcon::on_reserve_chosen(int gib) {
     // is greyed, and this is the guard for the path that greying does not cover.
     if (reserve_pinned_by_config()) { return; }
     if (!child_.save_desktop_reserve_gib(gib)) {
-        MessageBoxW(nullptr, L"Could not save the reserve. It must fit the ready model's current memory budget. Check the dashboard for the available limit and retry.", L"NInfer", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, L"Could not save the reserve. It must fit the ready model's current memory budget. Check the dashboard for the available limit and retry.", L"NInfer Workstation", MB_OK | MB_ICONERROR);
         return;
     }
 
@@ -519,7 +519,7 @@ void TrayIcon::on_reserve_chosen(int gib) {
                      L"Reserve set to %s.\n\nThis applies when the engine next starts. "
                      L"Restart now? The model reloads, which takes about a minute.",
                      reserve_label(gib).c_str());
-        if (MessageBoxW(nullptr, msg, L"NInfer", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+        if (MessageBoxW(nullptr, msg, L"NInfer Workstation", MB_YESNO | MB_ICONQUESTION) == IDYES) {
             child_.restart();
         }
     }
@@ -543,7 +543,7 @@ void TrayIcon::on_start_at_login_toggled() {
         }
         install_run_at_login(cmd);
     } catch (const std::exception& ex) {
-        MessageBoxW(nullptr, widen(ex.what()).c_str(), L"NInfer", MB_OK | MB_ICONWARNING);
+        MessageBoxW(nullptr, widen(ex.what()).c_str(), L"NInfer Workstation", MB_OK | MB_ICONWARNING);
     }
 }
 
@@ -660,7 +660,7 @@ TrayStatus TrayIcon::status_from(const EngineStatus& status) const {
 // trimmed. Balloons are suppressed by Focus Assist; the tooltip is the surface
 // that always survives, so the "why" has to be here too.
 std::wstring TrayIcon::tooltip(TrayStatus status, const EngineStatus& st) const {
-    std::wstring tip = L"NInfer - ";
+    std::wstring tip = L"NInfer Workstation - ";
     tip += status_word(status);
     if (!manages_engine_) { tip += L" (monitor-only)"; }
     if (status == TrayStatus::Failed && !st.last_error_line.empty()) {
@@ -724,12 +724,12 @@ void TrayIcon::refresh_icon() {
     // greyed menu line carries it.
     if (!listen_announced_ && dashboard_unavailable()) {
         listen_announced_ = true;
-        notify(L"NInfer dashboard unavailable",
+        notify(L"NInfer Workstation dashboard unavailable",
                L"Another program is already using the dashboard port. The engine is unaffected.",
                NIIF_WARNING | NIIF_RESPECT_QUIET_TIME);
     }
     if (login_install_pending_ &&
-        notify(L"NInfer starts at login",
+        notify(L"NInfer Workstation starts at login",
                L"This configuration asked for it (\"run_at_login\"). Turn it off with "
                L"\"Start at login\" in this menu.",
                NIIF_INFO | NIIF_RESPECT_QUIET_TIME)) {
@@ -814,7 +814,7 @@ void TrayIcon::run() {
     // on screen; WS_EX_TOOLWINDOW keeps it out of Alt-Tab and the taskbar.
     // WS_EX_NOACTIVATE is deliberately NOT set: SetForegroundWindow(hwnd) before
     // TrackPopupMenu is what lets the menu dismiss on an outside click.
-    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kClass, L"NInfer supervisor", WS_OVERLAPPED, 0, 0,
+    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, kClass, L"NInfer Workstation Supervisor", WS_OVERLAPPED, 0, 0,
                                 0, 0, nullptr, nullptr, wc.hInstance, this);
     hwnd_     = hwnd;
 

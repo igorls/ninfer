@@ -13,13 +13,15 @@
 
 [Setup]
 AppId=NInfer
-AppName=NInfer
+AppName=NInfer Workstation
 AppVersion={#ReleaseVersion}
-AppPublisher=NInfer workstation fork
+AppPublisher=NInfer Workstation
 AppPublisherURL=https://github.com/igorls/ninfer
 AppSupportURL=https://github.com/igorls/ninfer/issues
 DefaultDirName={localappdata}\Programs\NInfer
-DefaultGroupName=NInfer
+DefaultGroupName=NInfer Workstation
+; Earlier releases used the group "NInfer"; [InstallDelete] retires it, so upgrades move to the new name.
+UsePreviousGroup=no
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -50,13 +52,19 @@ Source: "{#PayloadDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\INSTALL-NOTES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#PayloadDir}\release-manifest.json"; DestDir: "{app}"; Flags: ignoreversion
 
+[InstallDelete]
+Type: files; Name: "{userprograms}\NInfer\NInfer.lnk"
+Type: files; Name: "{userprograms}\NInfer\NInfer documentation.url"
+Type: files; Name: "{userprograms}\NInfer\Uninstall NInfer.lnk"
+Type: dirifempty; Name: "{userprograms}\NInfer"
+
 [Icons]
-Name: "{group}\NInfer"; Filename: "{app}\bin\ninfer-launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\bin\ninfer-launcher.exe"
-Name: "{group}\NInfer documentation"; Filename: "https://github.com/igorls/ninfer#readme"
-Name: "{group}\Uninstall NInfer"; Filename: "{uninstallexe}"
+Name: "{group}\NInfer Workstation"; Filename: "{app}\bin\ninfer-launcher.exe"; WorkingDir: "{app}"; IconFilename: "{app}\bin\ninfer-launcher.exe"
+Name: "{group}\NInfer Workstation documentation"; Filename: "https://github.com/igorls/ninfer#readme"
+Name: "{group}\Uninstall NInfer Workstation"; Filename: "{uninstallexe}"
 
 [Run]
-Filename: "{app}\bin\ninfer-launcher.exe"; Description: "Open NInfer and choose a model"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\bin\ninfer-launcher.exe"; Description: "Open NInfer Workstation and choose a model"; Flags: nowait postinstall skipifsilent
 
 [Code]
 function AppIsRunning(): Boolean;
@@ -88,9 +96,9 @@ begin
   Result := '';
   try
     if AppIsRunning() then
-      Result := 'Quit NInfer from its tray menu, then retry. Your models and settings will be preserved.';
+      Result := 'Quit NInfer Workstation from its tray menu, then retry. Your models and settings will be preserved.';
   except
-    Result := 'Could not check whether NInfer is running. Close NInfer and retry.';
+    Result := 'Could not check whether NInfer Workstation is running. Close it and retry.';
   end;
 end;
 
@@ -111,12 +119,12 @@ begin
   Result := False;
   try
     if AppIsRunning() then begin
-      MsgBox('Quit NInfer from its tray menu before uninstalling. Models and settings will be kept.', mbInformation, MB_OK);
+      MsgBox('Quit NInfer Workstation from its tray menu before uninstalling. Models and settings will be kept.', mbInformation, MB_OK);
       Exit;
     end;
     Result := True;
   except
-    MsgBox('Could not check whether NInfer is running. Close NInfer and retry.', mbError, MB_OK);
+    MsgBox('Could not check whether NInfer Workstation is running. Close it and retry.', mbError, MB_OK);
   end;
 end;
 
