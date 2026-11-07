@@ -121,6 +121,8 @@ On Linux:
 
 This gives each request a 32,768-token limit, two execution lanes, and a shared byte budget for KV and recurrent state selected at startup, while reserving 6 GiB for the desktop. These are example settings; longer contexts and
 retained prefixes need more capacity. See [server options](docs/serving.md#server-options).
+Past the native 262,144 positions, `--yarn-factor 2` or `4` selects Qwen's static YaRN scaling
+for up to about 512K or 1M tokens on a 96-GB card ([limits and costs](docs/cli.md)).
 Add `--vision` at startup for image/video input; speculative and Vision residency are fixed
 for the process lifetime.
 

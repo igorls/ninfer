@@ -418,6 +418,7 @@ void add_long_context_cases(OpSuite& suite, KvCacheStorage storage) {
         return;
     constexpr std::uint32_t kKeys = ops::kCausalAttentionMaximumVisibleKeys;
     const std::array<int, 3> queries{0, 64, 128};
+    std::cout << "long-context cases enabled for " << cache_name(storage) << '\n';
     add_cached_case(suite, kGeometries[0], storage, {1, kKeys - 1, kKeys, 1901u},
                     MappingPattern::Fragmented);
     add_cached_case(suite, kGeometries[0], storage, {129, kKeys - 129, kKeys, 1902u},
