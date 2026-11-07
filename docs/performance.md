@@ -150,9 +150,26 @@ decode unchanged.
 
 MTP is scaled with the Text RoPE and keeps drafting past the native length: with the summary,
 acceptance was 62.9% at 515K with factor 2, 65.8% at 515K with factor 4 and 61.4% at 1M, with
-per-position counts 151/119/83, 155/128/94 and 152/119/81. No same-task run below 256K was made,
-so these rates have no short-context baseline; the JSON-only rows draft nearly perfectly at
-every length and do not discriminate.
+per-position counts 151/119/83, 155/128/94 and 152/119/81. A second G4 allocation (same binaries,
+artifact and settings) checked whether speculation should stay on above 262,144 tokens with the
+same summary task:
+
+| Setting | Prompt tokens | Speculation | Correct | Decode (tok/s) | Output tokens | MTP accepted / drafted |
+|---|---:|---|---:|---:|---:|---:|
+| YaRN 2, 524,288 | 515,010 | MTP K=3 (above) | 7/8 | 90.1 | 539 | 353/561 (62.9%) |
+| YaRN 2, 524,288 | 515,010 | none | 7/8 | 38.9 | 559 | — |
+| native, 262,144 | 32,007 | MTP K=3 | 8/8 | 140.0 | 505 | 321/555 (57.8%) |
+| native, 262,144 | 32,007 | none | 8/8 | 66.0 | 600 | — |
+| YaRN 2, 524,288 | 32,007 | MTP K=3 | 8/8 | 182.0 | 600 | 430/507 (84.8%) |
+
+MTP decodes 2.3 times faster than no speculation at 515K and 2.1 times faster at 32K, and its
+acceptance past the native length stays inside the 58–85% range of the same task at 32K, so
+speculation stays on there. The MTP and non-speculative texts differ in length (539 against 559
+tokens at 515K) because batched verification and single-token decode round differently; greedy
+outputs are not bit-identical across them. The JSON-only rows draft nearly perfectly at every
+length and do not discriminate. An outside contributor's Flash-Next 1M YaRN experiment reported
+about 73% acceptance on long structured code at 300K and net losses at MTP K=5 on high-entropy
+agent output; this K=3 measurement does not cover larger windows or that workload.
 
 DFlash2 drafts are refused past their own 262,144 positions at startup: `--yarn-factor 2
 --max-context 524288 --spec dflash2` stops with "max_context exceeds the draft model's position
