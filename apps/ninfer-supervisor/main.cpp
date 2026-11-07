@@ -236,14 +236,15 @@ int main(int argc, char** argv) {
             ninfer::supervisor::load_tray_prefs(prefs_path).desktop_reserve_gib);
         child.note_config_migration(migrated_flags, migration_error);
         ninfer::supervisor::Collector collector(cfg.engine, cfg.logs_dir);
-        child.set_reserve_budget_provider([&collector, &child, probe = cfg.engine] {
+        child.set_reserve_budget_provider([&collector, &child, probe = cfg.engine](
+                                              std::optional<ninfer::supervisor::PlannedContext> planned) {
             const auto snapshot = collector.snapshot();
             const auto current = child.config().engine;
             if (!child.reserve_plan_matches_config() || snapshot.health_status != 200 ||
                 probe.device != current.device || probe.engine_host != current.engine_host || probe.engine_port != current.engine_port) {
                 return nlohmann::json{{"ok", false}, {"reason", "A ready engine with the saved model settings is needed to calculate the reserve limit."}};
             }
-            return ninfer::supervisor::model_reserve_budget(snapshot.admin_vram);
+            return ninfer::supervisor::model_reserve_budget(snapshot.admin_vram, planned);
         });
         // Wired BEFORE start_series: the 1 Hz observe thread reads them, and
         // this is what makes health and engine-state observation independent of

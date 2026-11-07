@@ -1,503 +1,563 @@
 ---
 name: NInfer Supervisor
-description: An avionics glass cockpit for one local inference engine.
+description: A quiet monochrome control surface for one local inference engine, where every costly choice sits beside a live proof of what it buys.
 colors:
-  panel-gray: "#343a3f"
-  glareshield-gray: "#1d2124"
-  panel-seam: "#121517"
-  bezel-ring: "#262b2f"
-  bezel-ring-top: "#2e3439"
-  bezel-ring-low: "#1f2326"
-  key-face: "#1e2225"
-  key-top-edge: "#4a5157"
-  key-face-hover: "#262b2f"
-  key-legend: "#e9edef"
-  key-legend-dim: "#aab4ba"
-  display-glass: "#040708"
-  display-glass-inset: "#0a0f12"
-  glass-rule: "rgba(233,240,244,.15)"
-  glass-rule-faint: "rgba(233,240,244,.075)"
-  measured-white: "#f1f4f5"
-  secondary-gray: "#a8b2b8"
-  legend-gray: "#8592a0"
-  inactive-gray: "#76828a"
-  engaged-green: "#4fd98d"
-  selectable-cyan: "#41cdea"
-  target-magenta: "#ee78de"
-  caution-amber: "#f5b53d"
-  warning-red: "#ff6257"
-  warning-red-text: "#ffb2ab"
-  reading-ice: "#98bfe0"
-  caution-glass: "#1c1406"
-  warning-glass: "#200807"
-  log-text: "#c9d3d8"
-  bezel-glint: "#4a5157"
-  pole-dark: "#2a0a08"
-  day-panel-gray: "#cdd2d6"
-  day-glareshield-gray: "#b7bec3"
-  day-panel-seam: "#98a1a8"
-  day-bezel-ring: "#aeb6bc"
-  day-bezel-ring-top: "#bcc3c8"
-  day-bezel-ring-low: "#a1aab0"
-  day-bezel-glint: "#e4e8eb"
-  day-display-glass: "#fbfbfa"
-  day-display-glass-inset: "#eef1f2"
-  day-glass-rule: "rgba(18,24,28,.17)"
-  day-glass-rule-faint: "rgba(18,24,28,.085)"
-  day-measured-ink: "#11171a"
-  day-secondary-gray: "#44515a"
-  day-legend-gray: "#56636c"
-  day-inactive-gray: "#86919a"
-  day-engaged-green: "#0a7a43"
-  day-selectable-cyan: "#006f99"
-  day-target-magenta: "#9e2189"
-  day-caution-amber: "#8f5400"
-  day-warning-red: "#b3241c"
-  day-warning-red-text: "#a01d16"
-  day-reading-ice: "#2b5fa3"
-  day-caution-glass: "#fff1d4"
-  day-warning-glass: "#fde6e3"
-  day-log-text: "#1f282d"
-  day-pole-light: "#ffffff"
+  s-bg: "#111111"
+  s-surface: "#191919"
+  s-soft: "#202020"
+  s-line: "#2b2b2b"
+  s-line-strong: "#3b3b3b"
+  s-ink: "#f2f2f2"
+  s-ink-2: "#c8c8c8"
+  s-gray: "#a1a1a1"
+  s-gray-2: "#7c7c7c"
+  s-gray-3: "#3e3e3e"
+  s-accent: "#9b91ff"
+  s-accent-ink: "#111111"
+  s-ring: "rgba(155,145,255,.35)"
+  s-bad: "#ff8378"
+  s-wash: "rgba(242,242,242,.035)"
+  backdrop: "rgba(0,0,0,.6)"
+  day-s-bg: "#fafafa"
+  day-s-surface: "#ffffff"
+  day-s-soft: "#f2f2f3"
+  day-s-line: "#e5e5e7"
+  day-s-line-strong: "#c9c9ce"
+  day-s-ink: "#111111"
+  day-s-ink-2: "#3a3a3c"
+  day-s-gray: "#6e6e73"
+  day-s-gray-2: "#8e8e93"
+  day-s-gray-3: "#d2d2d6"
+  day-s-accent: "#5b4cdb"
+  day-s-accent-ink: "#ffffff"
+  day-s-ring: "rgba(91,76,219,.25)"
+  day-s-bad: "#c4322b"
+  day-s-wash: "rgba(17,17,17,.03)"
+  day-backdrop: "rgba(40,40,40,.35)"
 typography:
-  display:
-    fontFamily: "Bahnschrift, 'DIN Alternate', 'Barlow Semi Condensed', 'Arial Narrow', sans-serif"
-    fontSize: "24px"
+  s-page-title:
+    fontFamily: "'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "28px"
+    fontWeight: 600
+    lineHeight: 1.15
+    letterSpacing: "-0.02em"
+  s-sheet-title:
+    fontFamily: "'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "22px"
+    fontWeight: 600
+    lineHeight: 1.2
+    letterSpacing: "-0.015em"
+  s-major-reading:
+    fontFamily: "'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "25px"
     fontWeight: 600
     lineHeight: 1.1
-    letterSpacing: "-0.01em"
-    fontVariation: "'wdth' 87.5"
-  headline:
-    fontFamily: "Bahnschrift, 'DIN Alternate', 'Barlow Semi Condensed', 'Arial Narrow', sans-serif"
+    letterSpacing: "-0.02em"
+    fontFeature: "'tnum' 1"
+  s-brand-mark:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "24px"
+    fontWeight: 700
+    lineHeight: 1
+    letterSpacing: "-0.04em"
+  s-brand:
+    fontFamily: "'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif"
     fontSize: "18px"
-    fontWeight: 400
-    lineHeight: 1.2
-    letterSpacing: "0.04em"
-    fontVariation: "'wdth' 87.5"
-  title:
-    fontFamily: "Bahnschrift, 'DIN Alternate', 'Barlow Semi Condensed', 'Arial Narrow', sans-serif"
+    fontWeight: 600
+    letterSpacing: "-0.01em"
+  s-figure-input:
+    fontFamily: "'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif"
     fontSize: "17px"
     fontWeight: 600
-    lineHeight: 1.2
-    letterSpacing: "0.06em"
-    fontVariation: "'wdth' 87.5"
-  value:
-    fontFamily: "Bahnschrift, 'DIN Alternate', 'Barlow Semi Condensed', 'Arial Narrow', sans-serif"
+    letterSpacing: "-0.01em"
+    fontFeature: "'tnum' 1"
+  s-claim:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
     fontSize: "16px"
     fontWeight: 400
-    lineHeight: 1.2
-    letterSpacing: "0.03em"
-    fontVariation: "'wdth' 87.5"
-  readout:
-    fontFamily: "Bahnschrift, 'DIN Alternate', 'Barlow Semi Condensed', 'Arial Narrow', sans-serif"
-    fontSize: "17px"
-    fontWeight: 600
-    lineHeight: 1.2
+    lineHeight: 1.45
     fontFeature: "'tnum' 1"
-    fontVariation: "'wdth' 87.5"
-  key:
-    fontFamily: "Bahnschrift, 'DIN Alternate', 'Barlow Semi Condensed', 'Arial Narrow', sans-serif"
-    fontSize: "12.5px"
+  s-claim-figure:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "18px"
     fontWeight: 600
-    letterSpacing: "0.06em"
-    fontVariation: "'wdth' 87.5"
-  label:
-    fontFamily: "Bahnschrift, 'DIN Alternate', 'Barlow Semi Condensed', 'Arial Narrow', sans-serif"
-    fontSize: "11px"
+    fontFeature: "'tnum' 1"
+  s-label:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "15px"
+    fontWeight: 600
+  s-lede:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "15px"
     fontWeight: 400
-    letterSpacing: "0.06em"
-    fontVariation: "'wdth' 87.5"
-  body:
+  s-body:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "14px"
+    fontWeight: 400
+    lineHeight: 1.45
+    fontFeature: "'tnum' 1"
+  s-message:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "14px"
+    fontWeight: 400
+    lineHeight: 1.6
+  s-control:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "14px"
+    fontWeight: 500
+  s-button:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "13.5px"
+    fontWeight: 600
+  s-key:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "13px"
+    fontWeight: 600
+  s-help:
     fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
     fontSize: "13px"
     fontWeight: 400
     lineHeight: 1.5
-  body-small:
+  s-caption:
     fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
     fontSize: "12.5px"
     fontWeight: 400
-    lineHeight: 1.55
-  mono:
+    lineHeight: 1.4
+  s-chart-label:
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
+    fontSize: "11.5px"
+    fontWeight: 600
+  s-flag:
+    fontFamily: "'Cascadia Mono', 'Cascadia Code', Consolas, monospace"
+    fontSize: "12px"
+    fontWeight: 400
+  s-well:
     fontFamily: "'Cascadia Mono', 'Cascadia Code', Consolas, monospace"
     fontSize: "11.5px"
     fontWeight: 400
     lineHeight: 1.7
 rounded:
-  hairline: "1px"
-  lamp: "2px"
-  tag: "3px"
-  key: "4px"
-  pad: "5px"
-  glass: "7px"
-  bezel: "10px"
+  s-mark: "2px"
+  s-bar: "3px"
+  s-reading: "5px"
+  s-control: "8px"
+  s-tag: "10px"
+  s-pill: "11px"
+  s-panel: "12px"
 spacing:
-  key-gap: "6px"
-  gap: "8px"
-  display-pad-x: "11px"
-  glareshield-gap: "14px"
-  cdu-pad-x: "18px"
-  column-gap: "28px"
+  s-hair: "2px"
+  s-inline: "8px"
+  s-gap: "12px"
+  s-index-pad: "14px"
+  s-workspace-y: "16px"
+  s-proof-pad-x: "18px"
+  s-chrome-x: "20px"
+  s-sheet-pad-x: "22px"
+  s-column-gap: "28px"
+  s-page-x: "40px"
+  s-page-x-narrow: "16px"
 components:
-  function-key:
-    backgroundColor: "{colors.key-face}"
-    textColor: "{colors.key-legend}"
-    typography: "{typography.key}"
-    rounded: "{rounded.key}"
+  s-button:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-button}"
+    rounded: "{rounded.s-control}"
+    padding: "0 16px"
+    height: "36px"
+  s-button-disabled:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-gray-2}"
+  s-button-small:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    rounded: "{rounded.s-control}"
+    padding: "0 12px"
+    height: "30px"
+  s-button-primary:
+    backgroundColor: "{colors.s-accent}"
+    textColor: "{colors.s-accent-ink}"
+    typography: "{typography.s-button}"
+    rounded: "{rounded.s-control}"
+    padding: "0 16px"
+    height: "36px"
+  s-button-primary-disabled:
+    backgroundColor: "{colors.s-soft}"
+    textColor: "{colors.s-gray-2}"
+  s-key:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-key}"
+    rounded: "{rounded.s-control}"
     padding: "0 13px"
     height: "32px"
-  function-key-hover:
-    backgroundColor: "{colors.key-face-hover}"
-    textColor: "{colors.measured-white}"
-  key-disabled:
-    backgroundColor: "{colors.key-face}"
-    textColor: "{colors.inactive-gray}"
-  key-go:
-    backgroundColor: "{colors.key-face}"
-    textColor: "{colors.engaged-green}"
-  key-stop:
-    backgroundColor: "{colors.key-face}"
-    textColor: "{colors.warning-red-text}"
-  key-insert:
-    backgroundColor: "{colors.key-face}"
-    textColor: "{colors.selectable-cyan}"
-  display-mode-key:
-    backgroundColor: "{colors.key-face}"
-    textColor: "{colors.key-legend}"
-    typography: "{typography.key}"
-    rounded: "{rounded.key}"
-    padding: "0 10px"
-    height: "28px"
-  prompt:
-    textColor: "{colors.selectable-cyan}"
-    typography: "{typography.key}"
-  master-caution-dark:
-    backgroundColor: "#241b0b"
-    textColor: "#6e5726"
-    rounded: "{rounded.key}"
-    padding: "2px 8px"
+  s-key-stop:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-bad}"
+  s-key-commit:
+    backgroundColor: "{colors.s-accent}"
+    textColor: "{colors.s-accent-ink}"
+    typography: "{typography.s-key}"
+    rounded: "{rounded.s-control}"
+    padding: "0 13px"
     height: "32px"
-  master-caution-lit:
-    backgroundColor: "{colors.caution-amber}"
-    textColor: "#1b1305"
-  master-warning-lit:
-    backgroundColor: "{colors.warning-red}"
-    textColor: "{colors.warning-glass}"
-  display-unit:
-    backgroundColor: "{colors.display-glass}"
-    textColor: "{colors.measured-white}"
-    rounded: "{rounded.bezel}"
-    padding: "7px 11px 9px"
-  display-unit-day:
-    backgroundColor: "{colors.day-display-glass}"
-    textColor: "{colors.day-measured-ink}"
-    rounded: "{rounded.bezel}"
-    padding: "7px 11px 9px"
-  cdu-page:
-    backgroundColor: "{colors.display-glass}"
-    textColor: "{colors.measured-white}"
-    rounded: "{rounded.bezel}"
-    padding: "12px 18px 18px"
-  cdu-temporary-tag:
-    textColor: "{colors.caution-amber}"
-    typography: "{typography.label}"
-    rounded: "{rounded.tag}"
-    padding: "1px 7px"
-  input-field:
-    backgroundColor: "{colors.display-glass-inset}"
-    textColor: "{colors.selectable-cyan}"
-    typography: "{typography.value}"
-    rounded: "{rounded.key}"
-    padding: "6px 10px"
+  s-alerts-button:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-gray}"
+    rounded: "{rounded.s-control}"
+    padding: "0 12px"
+    height: "32px"
+  s-alerts-button-lit:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+  s-alerts-button-problem:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-bad}"
+  s-input:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-body}"
+    rounded: "{rounded.s-control}"
+    padding: "6px 11px"
+    height: "36px"
+  s-input-readonly:
+    backgroundColor: "{colors.s-soft}"
+    textColor: "{colors.s-ink-2}"
+  s-input-disabled:
+    backgroundColor: "{colors.s-soft}"
+    textColor: "{colors.s-gray-2}"
+  s-search:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    rounded: "{rounded.s-control}"
+    padding: "7px 12px 7px 34px"
+    height: "38px"
+  s-composer:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-message}"
+    rounded: "{rounded.s-tag}"
+    padding: "10px 12px"
+    height: "62px"
+  s-segment:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-gray}"
+    typography: "{typography.s-control}"
+    rounded: "{rounded.s-control}"
+    padding: "0 15px"
     height: "34px"
-  input-field-day:
-    backgroundColor: "{colors.day-display-glass-inset}"
-    textColor: "{colors.day-selectable-cyan}"
-  input-field-staged:
-    backgroundColor: "{colors.caution-glass}"
-    textColor: "{colors.caution-amber}"
-  input-field-readonly:
-    textColor: "{colors.secondary-gray}"
-  scratchpad-caution:
-    backgroundColor: "{colors.caution-glass}"
-    textColor: "{colors.caution-amber}"
-    rounded: "{rounded.pad}"
-    padding: "6px 12px"
-  scratchpad-warning:
-    backgroundColor: "{colors.warning-glass}"
-    textColor: "{colors.warning-red-text}"
-    rounded: "{rounded.pad}"
-    padding: "6px 12px"
-  log-pane:
-    backgroundColor: "{colors.display-glass-inset}"
-    textColor: "{colors.log-text}"
-    typography: "{typography.mono}"
-    rounded: "{rounded.key}"
-    padding: "8px 10px"
-  bench-method:
-    textColor: "{colors.measured-white}"
-    typography: "{typography.key}"
-    rounded: "{rounded.key}"
-    padding: "6px 8px"
-    width: "62px"
-  bench-endpoint:
-    textColor: "{colors.selectable-cyan}"
-    typography: "{typography.mono}"
-    rounded: "{rounded.tag}"
-    padding: "4px 6px"
-  bench-response:
-    backgroundColor: "{colors.display-glass-inset}"
-    textColor: "{colors.log-text}"
-    typography: "{typography.mono}"
-    rounded: "{rounded.key}"
-    padding: "8px 10px"
-  chat-sender-user:
-    textColor: "{colors.reading-ice}"
-  chat-sender-model:
-    textColor: "{colors.engaged-green}"
-  chat-message-body:
-    textColor: "{colors.measured-white}"
-    typography: "{typography.body}"
-  chat-code-block:
-    backgroundColor: "{colors.display-glass-inset}"
-    textColor: "{colors.log-text}"
-    typography: "{typography.mono}"
-    rounded: "{rounded.key}"
-    padding: "6px 10px 8px"
-  chat-sent-line:
-    textColor: "{colors.target-magenta}"
-    typography: "{typography.mono}"
-  chat-parameter-set:
-    backgroundColor: "{colors.display-glass-inset}"
-    textColor: "{colors.target-magenta}"
-    rounded: "{rounded.key}"
-    padding: "4px 8px"
-    height: "30px"
-  chat-budget-readout:
-    textColor: "{colors.target-magenta}"
-    typography: "{typography.value}"
-  chat-budget-readout-default:
-    textColor: "{colors.measured-white}"
-  token-unsure-low:
-    backgroundColor: "{colors.caution-glass}"
-    textColor: "{colors.caution-amber}"
-    typography: "{typography.mono}"
-    rounded: "{rounded.lamp}"
-  token-forced:
-    textColor: "{colors.target-magenta}"
-    typography: "{typography.mono}"
-    rounded: "{rounded.lamp}"
+  s-segment-selected:
+    backgroundColor: "{colors.s-ink}"
+    textColor: "{colors.s-bg}"
+  s-segment-selected-unsaved:
+    backgroundColor: "{colors.s-accent}"
+    textColor: "{colors.s-accent-ink}"
+  s-tab:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-gray}"
+    rounded: "{rounded.s-control}"
+    padding: "0 13px"
+    height: "32px"
+  s-tab-selected:
+    backgroundColor: "{colors.s-ink}"
+    textColor: "{colors.s-bg}"
+  s-tag:
+    textColor: "{colors.s-ink-2}"
+    rounded: "{rounded.s-tag}"
+    padding: "0 8px"
+  s-switch-on:
+    backgroundColor: "{colors.s-ink}"
+    rounded: "{rounded.s-pill}"
+    width: "38px"
+    height: "22px"
+  s-switch-off:
+    backgroundColor: "{colors.s-gray-3}"
+  s-switch-on-unsaved:
+    backgroundColor: "{colors.s-accent}"
+  s-page-tab:
+    textColor: "{colors.s-gray}"
+    typography: "{typography.s-control}"
+    padding: "0 12px"
+    height: "52px"
+  s-page-tab-current:
+    textColor: "{colors.s-ink}"
+  s-engine-line:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    padding: "5px 20px"
+    height: "44px"
+  s-live-band:
+    backgroundColor: "{colors.s-bg}"
+    textColor: "{colors.s-gray}"
+    typography: "{typography.s-caption}"
+    padding: "8px 20px"
+  s-pad-line:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-help}"
+    rounded: "{rounded.s-control}"
+    padding: "9px 12px"
+  s-pad-line-notice:
+    backgroundColor: "{colors.s-soft}"
+    textColor: "{colors.s-ink}"
+  s-pad-line-bad:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-bad}"
+  s-card:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    rounded: "{rounded.s-panel}"
+    padding: "12px 16px 14px"
+  s-sheet:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    rounded: "{rounded.s-panel}"
+    padding: "16px 22px 22px"
+  s-reading-label:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-caption}"
+    rounded: "{rounded.s-reading}"
+    height: "20px"
+  s-index-link:
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-label}"
+    rounded: "{rounded.s-control}"
+    padding: "9px 12px 10px"
+  s-index-link-current:
+    backgroundColor: "{colors.s-soft}"
+    textColor: "{colors.s-ink}"
+  s-proof-panel:
+    backgroundColor: "{colors.s-soft}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-claim}"
+    rounded: "{rounded.s-panel}"
+    padding: "14px 18px 13px"
+  s-proof-bar:
+    backgroundColor: "{colors.s-ink-2}"
+    textColor: "{colors.s-soft}"
+    typography: "{typography.s-chart-label}"
+    rounded: "{rounded.s-bar}"
+    height: "18px"
+  s-proof-bar-rest:
+    backgroundColor: "{colors.s-gray-3}"
+    textColor: "{colors.s-ink}"
+  s-save-bar:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-gray}"
+    typography: "{typography.s-help}"
+    padding: "12px 40px"
+  s-alert:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-help}"
+    rounded: "{rounded.s-control}"
+    padding: "9px 12px"
+  s-alert-bad:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-bad}"
+  s-well:
+    backgroundColor: "{colors.s-soft}"
+    textColor: "{colors.s-ink-2}"
+    typography: "{typography.s-well}"
+    rounded: "{rounded.s-control}"
+    padding: "10px 12px"
+  s-user-message:
+    backgroundColor: "{colors.s-soft}"
+    textColor: "{colors.s-ink}"
+    typography: "{typography.s-message}"
+    rounded: "{rounded.s-tag}"
+    padding: "9px 13px 11px"
+  s-dialog:
+    backgroundColor: "{colors.s-surface}"
+    textColor: "{colors.s-ink}"
+    rounded: "{rounded.s-panel}"
+    padding: "16px 18px"
+    width: "440px"
 ---
 
 # Design System: NInfer Supervisor
 
 ## Overview
 
-**Creative North Star: "The Glass Cockpit"**
+**Creative North Star: "Claim and Proof"**
 
-The Supervisor is a flight deck of electronic displays, not a web dashboard and not glassmorphism. A panel-gray instrument panel carries black display glass set in raised bezel rings; every label, key legend and annunciation is lettered in condensed DIN capitals; colour is a code with fixed meanings, never decoration. The layout copies the cockpit split: a primary display band that is always in view for the glance, and one paged control-display unit (CDU) for everything else: talking to the served model, connecting, testing the API, diagnosing, changing settings.
+The Supervisor is one quiet monochrome world on every page: Monitor, Chat, Connect, API, Diagnose, Settings and the chrome above them. A page is a neutral sheet of hairlines and sentences; every control that costs something sits beside a live proof of what it buys, so the cost of a choice is read before saving, never learned by restarting. Colour is almost absent: one neutral scale carries all structure, one violet accent marks the user's hand (what they changed, what they are about to commit, where focus is, and their own configured limits), and red appears only when something would fail or is failing.
 
-The panel has two lighting modes. Night is black glass in a dark-gray bezel; Day is white glass in a cool light-gray bezel, the way cockpit displays read in daylight. Auto, the default, follows the operating system's colour scheme. Only the displays and the panel change between modes; the keys are hardware and stay dark-capped with their night legends.
+Readings are drawn the same way: charts are ink and gray on a hairline scale, the current value sits in a small rounded label at the scale, and the desktop reserve is always the same diagonal hatch, on the memory bar, in a proof chart or across the memory history. Display modes are Auto (follows the OS, resolved before first paint), Day and Night; every token has both values.
 
-It is dense on purpose. A narrow side window has to show readiness, memory, throughput and the calling apps with no scrolling. Plain-language explanation still exists but is called up on demand (the Explain key) instead of taking space by default. The pull is toward the real-avionics reading: tapes, readout windows, bugs, barber poles, function keys and line-select keys. The pull is never toward frosted blur, gradients on panels, or a card grid.
+It is calm on purpose. Lettering is Segoe UI Variable in sentence case, never condensed and never in capitals; numbers are tabular; approximate figures carry a `~`. Density comes from short rows, one-line bands and index lines that already show the current values, not from small type.
 
 **Key Characteristics:**
-- Night: panel-gray bezel, black display glass, a faint cover-glass sheen on the glass only. Day: white glass in a light-gray bezel, no sheen. Auto follows the OS.
-- Bahnschrift at 87.5% width in caps for all panel lettering; Segoe UI Variable Text for sentences; Cascadia Mono for machine text.
-- Semantic avionics colour: white measured, green engaged, cyan selectable, magenta target, amber caution or staged, red warning, ice blue prompt channel.
-- A glareshield row and a mode-annunciator row on every page; Monitor is four displays; every other page (Chat, Connect, API, Diagnose, Settings) is a CDU page.
-- Changes are announced, not decorated: a white box for ten seconds, an amber TEMPORARY revision, a Master Caution light. Pointers and figures slew to a new reading the way instruments do, and at rest always show the measured value.
+- One neutral scale, near-white to near-black, mirrored between Day and Night; one violet accent; red only for failure. No amber, green or blue anywhere.
+- Segoe UI Variable in sentence case at 400 and 600 (500 for unselected segments, tabs and page tabs); Cascadia Mono only for flags, paths, addresses, logs and request bodies.
+- Hairline borders, 8px control radii, 12px cards, sheets and proof panels, 3px bar segments; flat except focus rings, the switch knob and the one floating dialog.
+- Claim and proof: a control on the left, a soft panel on the right with one sentence and one small bar chart that redraws as the control moves.
+- Unsaved changes are marked in violet at every level: the field, the row dot, the index line, the page tab, the save bar, the reserve marker on Monitor.
 
 ## Colors
 
-Two neutral materials (panel and glass) and seven signal colours, each with exactly one meaning, in two lighting modes that share one code. Every colour is a custom property on the root; Day overrides the same properties, and the canvases read their palette from them, so a mode change repaints the instruments too.
+A neutral scale in two mirrored modes with one violet accent and one red. Every value is a `--s-*` custom property on the root; Day overrides the same names, so a mode change repaints everything, including canvases, which read the same properties.
 
 ### Primary
-- **Engaged Green** (engaged-green): the engine is ready, a mode is as configured, the generation channel (its trace, tape scale and readout, and decode expert heat), the current page lamp on a function key, the supervisor's own process in the GPU app list, a saved status. In Chat it is the reply: the model's direction mark and sender label.
-- **Selectable Cyan** (selectable-cyan): anything the user can act on or edit. `<PROMPT` and `PROMPT>` lines, links, editable input values, toggled keys, INSERT, the armed line under the engine mode, and the focus ring.
-
-### Secondary
-- **Target Magenta** (target-magenta): configured targets, never measurements. The desktop-reserve bug on the memory tape, the reserve readout, and the capacity sliders' accent. In Chat: the Sent line under a reply (the parameters that request carried), every value typed or chosen in Parameters, the parameter count on the Parameters key, the output budget readout when the page sets the budget, and tokens forced by the thinking budget. In Diagnose, the expert VRAM budget (its slider, values and cut marks).
-- **Caution Amber** (caution-amber): caution findings and anything staged but not saved. The TEMPORARY tag, the amber CDU title and ring, staged fields, the UNSAVED tag on the Settings key, the alert count, a lit Master Caution, a supervisor-reduced plan, a chat context meter near its limit, and tokens the model was unsure of (an amber underline; the least likely also amber on caution glass). Caution Glass (caution-glass) is its background tint for caution rows and lines.
-- **Warning Red** (warning-red): warnings and the desktop-reserve limit, drawn as a red-and-dark barber pole on the memory tape and in the reserve preview. Warning Red Text (warning-red-text) is the readable tint for red copy on Warning Glass (warning-glass) and for the Stop key legend.
-
-### Tertiary
-- **Reading Ice** (reading-ice): the prompt channel only: the prompt-reading rate (its trace, its right-hand scale and its readout, the prompt-reading progress bar in Chat, and prefill expert heat) and the prompt the user writes (the user's direction mark and sender label in Chat). It exists so two channels can share a display or a log without being confused (amended 2026-10-11).
+- **Violet** (s-accent; day-s-accent): the user's hand, and nothing else. It may mean: keyboard focus (2px outline, or the accent border plus the Violet Ring on fields; a focused or dragged Monitor seam); a value the user changed but has not saved (the field's 1px inner accent border, the 7px dot after a row's label, the selected segment or switch turning violet, the context pool segment of the memory bar, `N unsaved` on an index line, `Unsaved` beside the Settings page tab, the 2px line along the top of the save bar, the `Unsaved settings` line beside the engine state, the next-start reserve marker on the Monitor memory scale); the filled part of a slider track; the commit action (Save, Load and restart, Send, Confirm); a model preset selected but not yet loaded; the user's own budget cuts on the Experts map; a token's hover outline; and the dot of the `n.` brand mark. Violet Ink (s-accent-ink) is the text on a violet fill.
+- **Violet Ring** (s-ring; day-s-ring): the translucent violet around a focused field (3px), behind a focused slider thumb (4px), around the chat composer while a file is dragged over it, behind search hits, and as the text-selection colour.
 
 ### Neutral
-- **Measured White** (measured-white): measured values and primary text. Memory used, card total, readout figures, the memory trace, chat message text and a reply's telemetry line, and the output budget readout when the engine default applies.
-- **Secondary Gray** (secondary-gray), **Legend Gray** (legend-gray), **Inactive Gray** (inactive-gray): sources and units; field legends and axis labels; disabled keys and unavailable presets, in that order.
-- **Panel Gray** (panel-gray) and **Glareshield Gray** (glareshield-gray): the instrument panel the displays sit in, and the darker strip that carries the function keys. Panel Seam (panel-seam) is the 1px cut between panel parts.
-- **Bezel Ring** (bezel-ring, bezel-ring-top, bezel-ring-low): the 4px ring around each display, lit from above. Bezel Glint (bezel-glint) is the 1px lower highlight that cuts the ring from the panel.
-- **Display Glass** (display-glass) and **Glass Inset** (display-glass-inset): the black screen, and the slightly lifted wells for inputs, code and logs. Glass Rule and Glass Rule Faint separate columns and lines on the glass.
-- **Key Face**, **Key Top Edge**, **Key Legend** (key-face, key-top-edge, key-legend): physical keys on the panel.
+- **Ground** (s-bg): the page, the top bar, the live band and the scratchpad area.
+- **Surface** (s-surface): Monitor cards, page sheets, fields, buttons, segmented groups and tabs, the engine line, scratchpad lines, the save bar, alerts and the dialog.
+- **Soft** (s-soft): proof panels, the current index line and hovered list rows, read-only and disabled fields, wells (code, logs, responses, launch commands), user chat messages, notice scratchpad lines, highlighted traffic rows, and the low end of the Experts ramp.
+- **Line** (s-line) and **Line Strong** (s-line-strong): hairlines between rows, sections, cards and panes; the stroke of fields, buttons, tabs and segments; the chart value axis (Line Strong) and dotted grid.
+- **Ink** (s-ink): text; the selected segment, tab or toggle fill; a switch that is on; the slider thumb ring; the context pool on the memory bar; the reserve hatch; the live dot; generation and memory lines on charts; the band and chat meters; the high end of the Experts ramp.
+- **Ink 2** (s-ink-2): secondary text in wells and file names, the engine segment, proof bars, the saved next-start reserve marker.
+- **Gray** (s-gray), **Gray 2** (s-gray-2), **Gray 3** (s-gray-3): help, captions, labels and the prompt-reading line on charts; disabled text, the weights segment and memory-range ticks; the off switch, the other-apps segment and the rest of a proof bar, in that order.
+- **Wash** (s-wash): the faint fill under the generation line and the memory line.
+- **Backdrop** (backdrop): the dimmed page behind the open dialog.
 
-### Day mode
-The Day set (`day-` tokens) replaces the panel and glass materials and darkens every signal colour so it holds contrast on white glass; the meanings do not move.
-- **Day Display Glass** (day-display-glass) and **Day Glass Inset** (day-display-glass-inset): the near-white screen and its cool wells. Day Glass Rule and Day Glass Rule Faint are dark hairlines at the same two weights as at night.
-- **Day Panel Gray**, **Day Glareshield Gray**, **Day Bezel Ring** (day-panel-gray, day-glareshield-gray, day-bezel-ring with its top and low tones): a cool panel-gray bezel around the white glass, with a light glint (day-bezel-glint) under the ring and a mid-gray seam (day-panel-seam).
-- **Day Measured Ink** (day-measured-ink) takes Measured White's role; Day Secondary, Legend and Inactive Gray keep the same three-step order.
-- **Day signal colours** (day-engaged-green, day-selectable-cyan, day-target-magenta, day-caution-amber, day-warning-red, day-reading-ice): the night hues, darkened for white glass. Day Warning Red Text, Day Caution Glass and Day Warning Glass are the readable red copy and the pale caution and warning tints. Day Log Text (day-log-text) is the ink of wells and logs.
-- **Barber pole:** red and dark (pole-dark) at night, red and white (day-pole-light) by day.
-- **Physical keys** (function keys, panel keys, the Master lights) keep the night key face, legends and signal legends in Day, magenta included.
+### Failure
+- **Red** (s-bad; day-s-bad): something will fail or is wrong. A plan that would not start (the memory bar status, a proof claim, the red reserve hatch and the free-memory outline); the engine inside the desktop reserve (the scale hatch, dashed line, band label and reading label on Monitor turn red); an invalid field or request body; the error list above the save bar; a red alert or scratchpad line; the alerts button when a finding is a problem; an offline live dot; a Problem finding; error log lines; the Stop button. Never decoration and never a warning-in-advance tint.
 
 ### Named Rules
-**The One Meaning Rule.** Each signal colour carries one meaning across every page. A colour is never chosen because it looks good next to another; if an element's meaning has no colour in the code, it is white or gray.
+**The One Hand Rule.** Violet marks only what the user is doing or has set: focus, an unsaved change, the chosen slider value, the commit action, the user's own budget cut. A resting reading is ink and gray. If an element is not focusable, not changed, not a commit and not the user's own setting, it is not violet.
 
-**The Configured Is Not Running Rule.** Configured targets are magenta; measured state is white or green. A setting and the engine's running value are never drawn in the same colour.
+**The Ink Is Chosen Rule.** A saved choice is solid ink (the selected segment, tab or toggle, the switch that is on); the same choice turns violet only while it is unsaved. The two never mean the same thing.
 
-**The Amber Revision Rule.** Anything staged but not inserted is amber, from the field to the page title to the function key, until INSERT or ERASE.
+**The Red Means It Fails Rule.** Red is spent only on a state that would fail, is failing or has failed. There is no amber and no caution tint; severity below a problem is a word in ink or gray.
 
-**The One Code In Daylight Rule.** Day and Night are the same colour code under different light. A mode changes a signal colour's lightness, never its meaning, and no colour exists in only one mode.
+**The No Signal Hues Rule.** There is no amber, green or blue in the system. Script state classes still carry historical names (green, amber, cyan, magenta, ice); they resolve to Ink, Ink, Violet, Violet and Gray, and red to Red. A new state uses those four values, never a new hue.
 
-**The Keys Are Hardware Rule.** Keys do not change with the display. Function keys, panel keys and the Master lights keep their dark caps and night legends in every mode, and every signal legend on a cap keeps its night value (night magenta for the Parameters key's count, amended 2026-10-11); only glass and panel follow the display mode.
+**The Mirror Rule.** Day and Night are the same scale reversed, not two palettes; every `--s-*` token has both values, and nothing exists in only one mode.
 
 ## Typography
 
-**Display Font:** Bahnschrift (Windows' built-in DIN), condensed to 87.5% width, with DIN Alternate, Barlow Semi Condensed and Arial Narrow as fallbacks
+**Display Font:** Segoe UI Variable Display (with Segoe UI, system-ui)
 **Body Font:** Segoe UI Variable Text (with Segoe UI, system-ui)
 **Label/Mono Font:** Cascadia Mono (with Cascadia Code, Consolas)
 
-**Character:** DIN is the lettering of panels and placards, so it does all the instrument talking. Segoe is the voice for sentences, so it sounds like a person explaining. The build sets the width with `font-stretch: 87.5%`; the `wdth` variation in the tokens is the same thing.
+**Character:** One family speaking in sentences. The Display optical size takes only titles, the brand name, the major Monitor readings and the large figure inputs; everything else is Text. Numbers use tabular figures across the whole page.
 
 ### Hierarchy
-- **Display** (600, 24px, 1.1): the major readout, memory used.
-- **Headline** (400, 18px, 1.2, caps, 0.04em): the engine mode (READY, STOPPED).
-- **Title** (600, 17px, 1.2, caps, 0.06em): the centred CDU page title.
-- **Value** (400, 16px, 1.2, caps, 0.03em): annunciator values (model, plan) and the bench's HTTP status (600); 14px for facts, inputs and table client names.
-- **Readout** (600, 17px, tabular figures): display readouts beside the traces; 15px in the calling-apps table and for memory's secondary lines.
-- **Key** (600, 12.5px, caps, 0.06em): function keys, keys, prompts (prompts are 11.5-14px).
-- **Label** (400-600, 11px, caps, 0.06em, legend gray): field legends above values, table headers, bench group legends, display titles at 12px.
-- **Body** (400, 13px/1.5 Segoe): prose; help text at 12-12.5px, kept to 88-95ch. Chat message text is 14px/1.6, kept to 100ch.
-- **Mono** (11.5px/1.7 Cascadia): logs, the launch command, file names, flags and addresses; 12-13px for API paths, request bodies and responses, chat code blocks, the Sent line and the token view.
+- **Page title** (600, 28px, 1.15, -0.02em, Display): Settings section headings (Model, Memory, Requests); 26px when the content column is 760px or narrower.
+- **Sheet title** (600, 22px, 1.2, -0.015em, Display): the title of the Chat, Connect, API and Diagnose sheets; 20px at 560px and narrower. The empty chat greeting uses 20px Display.
+- **Major reading** (600, 25px, 1.1, -0.02em, Display): Used memory and the two rates on Monitor; 22px at 560px wide, 20px or 17px when the card is short.
+- **Brand mark** (700, 24px, -0.04em) `n.` with its violet dot, beside **Brand** (600, 18px, Display) `NInfer`; the name hides at 820px and narrower.
+- **Figure input** (600, 17px, Display, tabular): the context capacity field and number fields in a Settings control row.
+- **Claim** (400, 16px, 1.45): the sentence in a proof panel; its figures 600 at 18px, its connecting words in Gray.
+- **Label** (600, 15px): a setting's name, an index section name, a preset name, a Monitor card heading, a subhead on a sheet, the engine model name. **Lede** (400, 15px, Gray, 72ch): one line under a page title.
+- **Body** (400, 14px, 1.45): fields, segments and tabs (500), page tabs (500), finding titles (600). **Message** (400, 14px, 1.6): chat messages and the composer, up to 100ch.
+- **Button** (600, 13.5px): Settings buttons; 12.5px on small buttons. **Key** (600, 13px): chrome and sheet buttons.
+- **Help** (400, 13px, 1.5, Gray, 72-90ch): help under a control, finding bodies, notes, scratchpad lines, alerts. The page base is 13px/1.5.
+- **Caption** (400, 12.5px, Gray): index summaries, readout labels, band labels, table heads, slider ends; chart captions at 12px; chart axis figures at 11px 500.
+- **Chart label** (600, 11.5px): the token count printed inside a proof bar when it fits.
+- **Flag** (Cascadia Mono 12px, Gray): the `--flag` after a label, file names, preset paths, the model badge; 13px in path fields and the API address. **Well** (Cascadia Mono 11.5-12.5px, 1.5-1.75): logs, launch commands, request and response bodies, code blocks.
 
 ### Named Rules
-**The Lettering Rule.** Panel lettering is DIN in caps; sentences are Segoe in sentence case. A sentence is never set in caps, and a label is never set in Segoe.
+**The Sentence Case Rule.** Every word on the page is in sentence case at normal width. No capitals, no condensed faces, no letter-spacing on labels; the only tracking is the slight negative tightening on Display sizes.
 
-**The Machine Text Rule.** Monospace is only for text a machine reads or writes: logs, commands, paths, flags, addresses, request and response bodies. Numbers use DIN with tabular figures, not mono.
+**The Machine Text Rule.** Monospace is only for what a machine reads: flags, file names, paths, addresses, logs, launch commands, request and response bodies, code. Figures stay in Segoe with tabular numerals.
 
 ## Layout
 
-The page is a fixed-height column (`100dvh`, body never scrolls): the glareshield strip, the mode-annunciator row, an optional scratchpad line, then the workspace. The glareshield and annunciator rows appear on every page.
-
-- **Monitor** is a grid of four display units on an 8px gap. At 1180px and wider: memory over rates on the left (memory column 1.55fr), and one flex column on the right (at least 380px) where calling apps size to their rows and alerts take the remaining height with their full text wrapped. Narrower, the four stack. At 1180px and wider both splits are adjustable (see Seams under Display units); the chosen column and row fractions are kept per browser.
-- **Memory and rates bodies** are size containers in the fixed-height layout (821px and wider, Explain off), so the readout column compacts as a display gets short (steps at 190px and 150px body height) instead of clipping. Both traces keep a 40px right gutter that holds the prompt-reading scale, clear of the plot.
-- **CDU pages** centre one unit (max 980px; 1240px wide variant) with 34px side margins, except **Chat**, which spans the full width of the workspace so it aligns flush with the mode-annunciator row and live band above it.
-- **Chat** fills the full workspace width and CDU height: the chat bar (`CHAT` title, served model badge, context meter, thinking choice, output budget readout, and New chat; plus the Parameters key at 980px and narrower), then a two-pane split above 980px: the conversation pane on the left (message log scrolling inside the glass over the composer) and a permanent right-hand sidebar (`clamp(350px, 30vw, 430px)`) carrying the **Reply inspector** over **Parameters**. At 980px and narrower the panes collapse and the Parameters key opens the sidebar over the page with a `<CHAT` prompt back.
-- **API test bench** fills the CDU height with two panes: the endpoint index (220-280px) behind a faint rule, and the request over the response. At 880px and narrower the panes stack, the index list caps at 30vh and the page scrolls.
-- **No page scroll** on Monitor or any CDU page at 1440x900, 960x1000 and 1280x720. Tables, logs and finding lists scroll inside their glass. Explain mode deliberately grows the page and scrolls.
-- **Short screens** (max-height 780px, wider than 820px) tighten readouts and drop readout sub-lines.
-- **820px and narrower:** function keys wrap to a full-width row, the annunciator row becomes two columns with the engine block full width, readouts move above the trace, two-column CDU grids collapse, and line-select keys leave the bezel.
-- **560px and narrower (phones):** displays size to their content and the page scrolls; the calling-apps table turns into stacked rows with inline labels.
-- Rhythm: 8px between units, 6px between keys, 10-12px inside display columns, 28px between CDU columns, 7-10px line padding with a faint rule under each line.
+- **Chrome.** A 52px top bar on Ground with 20px sides: the brand, text page tabs (Monitor, Chat, Connect, API, Diagnose, Settings), then at the right the alerts button (`No alerts`, `N alerts`, or `N problems` in red), the display-mode button, the Explain button and the live dot with its word. Under it the **engine line** on Surface with a hairline below, split into columns by hairlines: engine state with Up time and its buttons (Start or Restart and Stop), the model with Presets, the running plan in plain words (`Running: pool 12.00 GiB · 256K context · 4 at once · KV fp8 · dflash2, 7 drafts`, hidden while the launch arguments are unknown), and the API address with a copy icon pushed right. Scratchpad messages follow as bordered lines.
+- **Live band.** On Chat, Connect, API and Diagnose a one-line band on Ground with a hairline below shows Memory (used of total, an 84 by 6px ink meter, free), Generating, Reading and Running, with a `Monitor` link at the right. It is hidden on Monitor and Settings.
+- **Workspace.** The area under the chrome scrolls on its own with 16px by 20px padding (none on Settings). Monitor and the one-screen sheets (Chat, API, Diagnose log and Experts) do not page-scroll at desktop sizes; their logs, lists and maps scroll inside.
+- **Monitor.** Four Surface cards with a 12px gap: GPU memory, Rates, Calling apps and Alerts. Below 1180px they stack. From 1180px memory and rates fill a left column (1.55fr) beside a right column of calling apps over alerts (at least 380px); the gaps between cards are draggable seams that show a short gray grip on hover and a 2px violet line while focused or dragged, and the split is remembered. A memory or rates card is a three-column body: a 66px value scale, the history, and a 172px readout column behind a hairline. Explain mode lets the cards grow and drops the seams. At 820px and narrower the readouts move above the chart in four columns, two at 560px.
+- **Sheets.** Chat, Connect, API and Diagnose are a single Surface sheet, up to 1040px wide (1240px for wide sheets; full width for Chat), centered, with a title line over a hairline. Chat is the message log beside a 350-430px Reply and Parameters column behind a hairline (one pane with a Parameters toggle at 980px and narrower). API is an endpoint index (220-280px) beside the request and response (stacked at 880px). Diagnose findings run in two columns from 1280px.
+- **Settings.** Two columns: the section index (232-288px, a hairline to its right) and the work column, a scrolling body with 40px sides over a fixed save bar. The index has a search field, then one link per section (Model, Memory, Requests, Access, Web frontends, Logs and launch), each a name over a one-line summary of the current draft values, and the config file name at the foot in mono. Sections stack on hairlines: title and lede, then rows. A **row** is a two-column grid (control up to 520px, proof the rest) with 12px row gap, 28px column gap and a hairline above; at a 760px work column (container query) the proof drops under its control. At 880px the page stacks, the body flows with 16px sides and the save bar sticks to the bottom of the window.
+- **Search** filters Settings rows by label, flag, help, keywords and current value; a status line counts matches, index summaries become match counts, unmatched index lines fade to 45%, and matched words are marked with the Violet Ring. `/` focuses search; Escape clears it.
+- **Responsive chrome.** At 1240px and narrower the running plan takes its own row of the engine line under a hairline. At 820px the top bar wraps: page tabs take a full-width row at 40px and 13px, engine-line columns shrink to 40px, and the engine column takes the full width.
+- **Rhythm.** 2px between bar segments and index links, 8px inline, 12px between rows, cards and blocks, 20px chrome sides, 22px sheet sides, 28px between control and proof, 40px Settings sides (16px narrow).
 
 ## Elevation & Depth
 
-Depth is physical, not floating. The panel is flat; each display is recessed glass inside a raised bezel ring. The ring is lit from above (lighter top edge, darker bottom), cut from the panel by a 1px seam and given a 1px lower highlight; the glass inside carries a deep inset shadow. Keys get a lighter top edge and press down 1px. A cover-glass sheen, a faint diagonal highlight, sits only on display glass, and only at night; Day glass has no sheen and a much lighter inset. The bezel shadow is one token per mode, so every display unit changes together. Nothing hovers over the panel except the confirmation dialog.
+Flat. Depth is a fill step, not a shadow: Ground, then Surface for cards, sheets and things you touch, then Soft for things you read about (proof panels, wells, the current index line, user messages). Borders are 1px hairlines. The shadows that exist are functional: focus rings, unsaved and invalid inner borders, the save bar's top line, a hollow ring for the paused live dot, the switch knob, and the dialog, the only floating surface.
 
 ### Shadow Vocabulary
-- **Bezel ring** (`box-shadow: 0 0 0 1px #121517, 0 1px 0 1px #4a5157, inset 0 0 0 1px #000, inset 0 2px 9px rgba(0,0,0,.9)` with a 4px bezel border): every display unit, the annunciator row, the live band, the CDU.
-- **Day bezel ring** (`box-shadow: 0 0 0 1px #98a1a8, 0 1px 0 1px #e4e8eb, inset 0 0 0 1px rgba(40,48,54,.3), inset 0 2px 6px rgba(40,48,54,.16)`): the same ring by day.
-- **Cover-glass sheen** (`linear-gradient(162deg, rgba(255,255,255,.045) 0, rgba(255,255,255,.012) 28%, rgba(255,255,255,0) 46%)` overlay): display glass only, Night only.
-- **Temporary ring** (`box-shadow: 0 0 0 1px #f5b53d, 0 1px 0 1px #3a4045`): replaces the bezel ring on a CDU holding a staged revision.
-- **Dialog** (`box-shadow: 0 0 0 1px rgba(233,240,244,.15), 0 18px 50px #000000aa`; Day `0 0 0 1px rgba(18,24,28,.17), 0 18px 50px #2a333a55`): the confirmation dialog, the only floating surface.
+- **Focus ring** (`box-shadow: 0 0 0 3px var(--s-ring)` with an accent border): fields, search, the composer while a file is dragged over it; `0 0 0 4px` on a slider thumb. Other focusable elements take a 2px accent outline offset 2px.
+- **Unsaved field** (`box-shadow: inset 0 0 0 1px var(--s-accent)`): a changed field. Invalid uses the same with Red.
+- **Unsaved bar** (`box-shadow: inset 0 2px 0 var(--s-accent)`): the save bar while anything is unsaved.
+- **Current list row** (`box-shadow: inset 0 0 0 1px var(--s-line)`; Line Strong in the API index): the current index line or endpoint on Soft.
+- **Paused dot** (`box-shadow: inset 0 0 0 1.5px var(--s-gray)` on a transparent dot).
+- **Switch knob** (`box-shadow: 0 1px 2px rgba(0,0,0,.25)`).
+- **Dialog** (`box-shadow: 0 0 0 1px var(--s-line-strong), 0 18px 50px var(--dialog-shadow)`, with `--dialog-shadow` at 50% black by Night and 18% by Day) over the Backdrop.
 
 ### Named Rules
-**The Cover Glass Rule.** The sheen and inset shadow belong to display glass, and the sheen only at night. Panels, keys and the glareshield never get gradients, blur or glow.
+**The Fill Step Rule.** Depth is Ground, Surface, Soft. A new layer gets a fill step and a hairline, never a drop shadow; the confirmation dialog is the single exception.
 
 ## Shapes
 
-Hard-edged hardware with softened corners. Display units have 10px outer corners on a 4px bezel; keys and inputs 4px; tags and the cursor readout 3px; lamps 2px; bars, slot strips and tape bodies 1px. Instrument marks are drawn, not iconified: the readout window is a box with a pointer notch and a taller drum slot for the last digit, the reserve bug is a magenta pentagon on the tape edge, and the reserve limit is a 45-degree barber pole. The few icons (copy, open, explain, display mode) are 14px inline SVG strokes at 1.4px. The chat's uplink and downlink marks (▲ before the user's message, ▼ before the reply) are typographic direction marks in the datalink manner, 8px in the message head; they mark message direction only and are not an icon set.
+Gently rounded and thin-lined. Fields, buttons, tabs, segmented groups, index links, alerts, scratchpad lines and wells take 8px corners; Monitor cards, sheets, proof panels and the dialog 12px; user messages and the chat composer 10px; tags (client, preset and sheet tags) are 10px outlined pills; the switch is a full pill (38 by 22px); bar segments and meters 3px; legend swatches, slider ticks and the reserve hatch 2px; the reading label on a chart scale has 5px corners. The reserve is drawn, not iconified: a 135-degree hatch of 2px ink lines on 5px repeats, outlined in ink on bars, and a 1px ink hatch on chart scales and across the memory history; the same hatch in red means the plan is short or the engine is inside it. Icons are few and stroked: a 16px magnifier in Settings search and 14px inline line icons (1.4px stroke) for display mode, Explain and copy.
 
 ## Components
 
-### Buttons (keys)
-Physical panel keys, never flat web buttons.
-- **Shape:** 4px corners, 1px near-black border with a lighter top edge, 32px tall (30px engine keys, 28px small, 24px tiny).
-- **Function keys:** Monitor, Chat, Connect, API, Diagnose, Settings on the glareshield, in that order (API and Chat amended 2026-10-11). A 2px lamp bar at the top lights green on the current page. A count chip (amber) or UNSAVED tag (amber outline) can sit inside.
-- **Hover / Focus:** face darkens one step and the legend goes white (0.15s ease-out); pressed keys drop 1px; focus is the 2px cyan ring offset 2px.
-- **Variants:** Start in green, Stop in red text, INSERT and SEND in cyan, toggles pressed show a cyan legend and cyan top edge, disabled keys go inactive gray.
-- **Display-mode key:** a small glareshield key (28px) beside Master Caution that cycles Auto, Day, Night and annunciates the resolved mode (`AUTO · NIGHT`, `DAY`). The choice is stored per browser and resolved before first paint, so the page never flashes the other mode (amended 2026-10-11).
+### Buttons
+Quiet outlined buttons; one filled violet button per action group.
+- **Shape:** 8px corners, 1px Line Strong stroke; 36px tall in Settings (30px small), 32px in the chrome and sheets (30px in the engine line, 26px tiny).
+- **Default:** Surface fill, Ink text at 600. **Commit:** Violet fill and stroke, Violet Ink text: Save, Load and restart, Send, Confirm. Nothing else is a violet fill.
+- **Hover / Active:** the stroke darkens to Gray 2; pressed moves 1px down. **Disabled:** Gray 2 text, Line stroke, weight 500; a disabled commit falls back to Soft.
+- **Stop:** an outlined button with red text at rest, because it ends every running request.
+- **Chrome:** display mode and Explain are 32px outlined buttons with an icon (Explain takes an Ink stroke while on). The alerts button is a 70px-minimum outlined box in Gray at 500 reading `No alerts`; with new findings it reads `N alerts` with an Ink stroke at 600, or `N problems` with a red stroke and text; pressing it acknowledges them and opens Diagnose.
+- **Text links** (Presets, Evidence, Set, Monitor): Ink at 600 with a Line Strong underline that darkens to Ink on hover.
 
-### Prompts
-CDU prompt lines in cyan DIN caps, `<INDEX` pointing back and `PRESETS>` pointing on. The angle is part of the legend and hidden from screen readers. Hover underlines.
-
-### Mode-annunciator row
-Four columns on glass, present on every page: engine (mode, uptime, armed line, with Start/Restart/Stop beside the mode), model (with `PRESETS>`), running plan (As configured in green, Reduced by supervisor in amber, plus a one-line brief), API address (cyan, click to copy). Engine keys sit beside the engine mode at the row's left end: controls go next to the state they change, and the right end holds the API address (amended 2026-10-11 at finish review). The cyan armed line under the engine mode reads `Loading preset`, `Restart to apply` or `Settings staged`.
-
-### Display units
-- **Corner Style:** 10px over a 4px bezel ring.
-- **Background:** display glass with the cover-glass sheen (Night), plain white glass (Day).
-- **Head:** caps title in white, source in gray, range at the right in legend gray.
-- **Memory and rates:** a vertical scale tape (66px) at left, a trace in the middle, readouts at right (156px). The rates display carries generation (green, left scale) and prompt reading (ice, scale in the trace's right gutter) on separate scales. Memory's secondary readouts are single label-value lines under the major readout. An empty rates trace says `Collecting rate samples…` while the engine is busy and `No rate samples in this window` otherwise.
-- **Seams:** at 1180px and wider (Explain off), the gap between memory and the right column and the gap between memory and rates are draggable separators. At rest a seam shows a faint 2px by 32px grip (dim panel ink at 35%); hover shows the grip at full strength; focus or a drag lights the whole seam as a 2px cyan line. Drag, the arrow keys (Shift for larger steps), and Enter or double-click to restore the default split; each side keeps its floor (380px for the right column).
-- **Calling apps:** above phone widths an app name stays on one line with an ellipsis, while its counts and sub-lines wrap.
+### Tabs, choices and segments
+Sheet tabs and choices (Diagnose sections, Thinking, API examples and response views, log filters) are outlined 8px buttons, 30-32px tall, Gray at 500; the chosen one is solid Ink with Ground text at 600, with any count in the same colour at 72%. Settings' segmented control is one 8px outlined group, 34px tall; its selected option is solid Ink, Violet while the row holds an unsaved change. Concurrent requests is a fixed 1-8 strip of 40px cells.
 
 ### Inputs / Fields
-- **Style:** inset glass well, 1px `#2a343a` stroke, 4px corners, 34px tall, cyan DIN value; path fields use 13px mono.
-- **Focus:** cyan ring. **Staged:** amber stroke, amber value, caution-glass well. **Read-only:** gray value on transparent, dashed stroke. **Invalid:** red stroke. **Disabled:** inactive gray.
-- **Sliders:** native range with magenta accent (configured targets), a DIN tick scale under them.
+- **Style:** Surface fill, 1px Line Strong stroke, 8px corners, 36px tall, 14px Ink text with tabular figures; selects carry a drawn chevron in Gray. Every page uses this field.
+- **Hover:** stroke Gray 2. **Focus:** accent stroke plus the 3px Violet Ring. **Unsaved:** accent stroke plus a 1px inner accent line. **Invalid:** the same in Red. **Read-only / Disabled:** Soft fill, Ink 2 / Gray 2 text.
+- **Sliders:** a 4px track filled Violet up to the value and Line beyond; an 18px Surface thumb with a 2px Ink ring; a 2px by 12px Gray tick marks the running value.
+- **Switch:** 38 by 22px pill, Gray 3 off, Ink on, Violet on while unsaved; a 16px knob slides 150ms.
+- **Composer:** the chat input is a 10px-cornered field at 14px/1.5, 62px tall and resizable up to 30vh.
 
 ### Navigation
-Function keys are the top level. Settings opens a CDU index of line-select prompts in two columns, left prompts `<NAME` and right prompts `NAME>`, each with a one-line summary; at 821px and wider, small blank line-select keys sit in the bezel beside each line and light a cyan top edge on hover or focus. Diagnose uses outlined CDU tabs (cyan; current tab white).
+- **Page tabs:** text tabs 52px tall, Gray at 500, Ink on hover; the current page is Ink at 600 over a 2px Ink underline. The Diagnose count is an Ink pill with Ground text; `Unsaved` beside Settings is plain Violet text.
+- **Live dot:** a 9px Ink dot beside `Live`; Red while offline; a hollow Gray ring while paused.
+- **Section index and endpoint index:** a name over a summary; hover and current on Soft, current with an inner hairline.
 
-### Chat
-A full-width two-pane CDU page for a plain conversation with the served model, drawn as a datalink message log on the left and a permanent inspector + parameters sidebar on the right (amended 2026-10-14).
-- **Messages:** Each message has a DIN caps head (11.5px, legend gray) carrying its direction mark and sender label in the channel colour (▲ YOU in ice, ▼ NINFER in green), its time and live state; the model name appears in the unified Chat bar and is repeated on a message head only when an earlier turn came from a different model. User prompts sit in a recessed glass-inset well (1px well edge with a 1px Reading Ice left edge, 4px corners, and a Copy key at the right of the header), while model replies sit open on the main display glass. A question and its reply sit 8px apart as one turn pair; a 18px gap and a faint glass rule separate turns. Text is Segoe on the glass; code blocks sit in mono glass wells under a caps language legend.
-- **Markdown** (amended 2026-10-12): a reply, its reasoning and the user's own message (which keeps its line breaks and indentation as typed) render a safe CommonMark and GFM subset: paragraphs, headings, nested lists, task lists, quotes, fenced code, rules, tables and inline code, strong, emphasis, strike and links. Model text is escaped and never becomes HTML; only http, https and mailto addresses become links, and images are never fetched. Blocks are separated by one small gap, never by blank lines; the rhythm is set in em so the 14px reply and the 13px reasoning share it.
-  - **Gaps:** 0.5em between blocks (7px at 14px), 0.2em between list items, 0.3em between blocks inside an item, a rule 0.8em above and below. A heading has 0.85em above and 0.3em below (0.5em when another heading follows), and none above the first block. The first and last block of a message add nothing.
-  - **Headings:** Segoe at weight 650, never caps, never DIN, no rules and no hue: h1 1.4em, h2 1.2em, h3 1.07em, h4 1em, h5 and h6 0.93em (h6 in Secondary Gray). Size and weight carry the hierarchy so no colour is spent on it.
-  - **Lists:** 1.45em indent, discs, then circles, then squares; ordered lists keep their start number and tabular figures; markers in Legend Gray. A task item is a drawn 0.95em box, ticked in the ink colour when done, static.
-  - **Code:** inline code in mono at 0.89em on a glass-inset chip with a 1px well edge; a block is a glass-inset well, 4px corners, mono 12.5px/1.5 with 6px 10px 8px padding, a 10.5px caps language legend in Legend Gray, a Copy key at the right of the same header row (Selectable Cyan DIN caps, a fixed 46px so COPIED for 1.5s and FAILED in Caution Amber never shift it) that copies the block's code exactly as written, and its own horizontal scroll so the well always follows the message column.
-  - **Quotes:** a 2px Legend Gray rule with 11px padding and Secondary Gray text (gray, so no signal colour is spent). Links are Selectable Cyan and underlined.
-  - **Tables:** 13px/1.45 Segoe with tabular figures, a Glass Rule under the header and Glass Rule Faint between rows, no fills and no vertical rules, alignment from the delimiter row; a wide table scrolls inside the message and never widens the page.
-- **Under a reply and in the Reply inspector:** a two-tier hierarchy keeps the conversation scannable while keeping every reading in view. Under each reply, the compact footer row shows a single-line vitals strip of tabular figures (`tok/s` in green, `TTFT`/`resp`, output tokens with reasoning split, prompt-cache reuse %, speculative draft acceptance %, mean token confidence %, and any non-`stop` finish warning in amber), an `Inspect · N sent` prompt (with the active parameter count in magenta), and right-aligned action keys (`Copy`, `Token view`, `Regenerate`). Above 980px, the right-hand **Reply inspector** permanently displays the selected (or latest) reply's full 2-column labeled telemetry breakdown and magenta `Sent` line in mono (updating live as a reply streams, and switching turns when clicking any reply or its `Inspect` prompt); at 980px and narrower, `Inspect` toggles the breakdown inline below the footer. Reasoning folds behind a cyan caps summary with a dotted left rule.
-- **Token view:** with token probabilities on, reasoning tokens stay separated inside the Reasoning disclosure above the answer tokens, special boundary tokens (`<|im_end|>`, `</think>`) are dimmed and excluded from mean confidence, unsure tokens get a 2px amber underline (under 50%) or amber text on caution glass (under 20%), tokens forced by the thinking budget get a 1px magenta underline and magenta text, and an instant readout bar below the tokens shows the hovered or focused token's literal, probability and top alternatives.
-- **Chat bar:** carries the `CHAT` title and served model badge on the left, followed by the context meter (white fill, amber near the limit), the thinking choice as small outlined tabs, the Output budget readout (magenta when the page sets the budget, white when the engine default applies; the page default is No limit, sent as `max_tokens: -1`), and New chat (plus the Parameters key at 980px and narrower).
-- **Parameters:** permanently visible in the lower half of the right-hand sidebar above 980px, with grouped 2-column CDU fieldsets (`Output`, `Sampling`, `Reasoning`, `NInfer`, `Extra request JSON`); a field the user filled, or a select set away from its default, shows its value in magenta, the configured-target colour. Turning Thinking off in the chat bar disables Reasoning effort and Thinking budget so the request never sends conflicting thinking options.
-- **Streaming:** a reply is formatted as it arrives: only the last two blocks are parsed again for each paint, so the cost does not grow with the reply, and an unclosed code fence shows as a code block that fills in. Prompt reading shows an ice progress bar until the first token.
+### Cards and sheets
+- **Monitor card:** Surface, 1px Line, 12px corners, 12px 16px 14px padding; a heading line of a 15px title, a Gray source and a Gray range at the right.
+- **Sheet:** Surface, 1px Line, 12px corners, 16px 22px 22px padding; a 22px Display title over a hairline with the page name in Gray at the right.
+- **Wells:** Soft, 1px Line, 8px corners, Ink 2 mono text; logs, launch commands, responses, code blocks and message details.
 
-### API test bench
-A CDU page for calling every exposed route by hand (amended 2026-10-11).
-- **Endpoint index:** a filter field, then caps group legends (Status, OpenAI, Anthropic, NInfer, Admin, Supervisor) over rows of method (DIN caps, gray) and path (cyan mono, wrapping after each `/`) with a one-line title. The current endpoint gets a hover-glass fill and a 1px cyan inset ring; disruptive routes add an amber `· disruptive`. A Recent list under a faint rule replays past requests.
-- **Composer:** an outlined method box (amber for a disruptive route), the mono path field, SEND (cyan) and STOP (red) keys; example presets as outlined CDU tabs; a Stream check, Format and Copy as curl keys; the JSON body in a mono glass well whose stroke turns red when invalid, with a one-line validation status under it.
-- **Response:** the HTTP status annunciated in DIN caps (green 2xx, amber 4xx, red 5xx or no answer), a timings line, and Text / Body / Events / Headers tabs over a mono glass well. JSON keys are legend gray and strings white. Events read as narrow time and name columns with the payload wrapped at its separators.
-- **Confirmation:** a disruptive route confirms in the dialog, with the path in case-preserving mono.
+### Scratchpad
+One bordered line per message under the engine line: Surface, 1px Line, 8px corners, 13px Ink text, an optional small clear button. A notice (disconnected, memory guidance) takes Soft; an error takes a red stroke and red text.
 
-### Expert use
-A Diagnose page (a fifth CDU tab, Experts) for how busy the model's routed experts have been (amended 2026-10-12). It is a diagnostic read from the engine's `/admin/experts`, polled every 2 seconds only while the page is visible, and it fills the CDU height with no page scroll.
-- **Map:** one canvas on display glass, a row per text layer and a column per expert, the speculative layer set apart below. Heat is scaled inside each row, on a square-root scale of that row's peak, from the glass-inset well to the channel colour: Engaged Green for decode (the generation channel), Reading Ice for prefill (the prompt channel). The scale is drawn from the root tokens, so Day and Night repaint it; a small key shows the ramp. Where there are more experts than pixels a pixel shows the busiest expert under it. By expert and Sorted are outlined toggle tabs, as in the API bench.
-- **Reading:** pointing, or the arrow keys (Home, End and Escape as on the Monitor histories, Up and Down for layers, Shift for larger steps), boxes the cell in white and reads layer, expert, rank, heat, share of the layer, cumulative share and the 80% count in a fixed readout above the map, so the pointer never hides data.
-- **Skew:** a bar column beside the map (white, measured) gives the experts needed for 80% of each layer's activity, and one line gives the minimum, median and maximum.
-- **Budget:** a magenta slider with number fields in experts and GiB (configured target, the same code as the desktop reserve). Its two results, the hottest experts anywhere and an even split per layer, are white measured-derived figures labelled as upper bounds for a static set, never as hit rates. In Sorted order the cuts are drawn in magenta: a tick per layer for the global pick, a dashed line for the even one.
-- **States:** counters off (a calm explanation of the flag, with a `Launch details>` prompt), an engine without the route, no request yet, a refused request and an unreachable engine each replace the map with a title and a sentence. A short outage keeps the last reading, dimmed and tagged in amber. Unavailable figures are dashes; dropped trace records are amber.
+### Signature: the monochrome chart
+Memory and rates draw on one grammar. A hairline value axis stands at the right of a 66px scale column with Gray figures; the current reading sits in a small rounded label (Surface, 1px stroke, 5px corners, 600 12.5px) joined to the axis. The history runs on a dotted Line Strong grid over a relative time axis (`−10m 0s` to `now`). Memory is a 1.5px Ink line over the Wash, with Gray 2 ticks for the range inside each pixel and an Ink trend stroke on the scale when it is moving. Generation is the heavier Ink line (1.75px) over the Wash, read off the left scale; prompt reading is a thin Gray line (1.25px) read off Gray figures at the right; the legend names each scale (`left scale`, `right scale`) beside a matching swatch. Engine events are dashed Ink verticals with a small triangle. The desktop reserve is an Ink hatch on the scale and a faint hatched band above a dashed Gray line labelled `Desktop reserve` across the memory history; all of it, and the reading label, turns red only while the engine is inside the reserve. The next start's reserve is a small Ink 2 marker on the scale, Violet while Settings holds an unsaved value. Figures and bars travel 380ms on an ease-out cubic.
 
-### Signature behaviours
-- **Annunciation box:** an annunciator value that changes is outlined in white for 10 seconds, so a glance catches the change rather than the state.
-- **Temporary revision:** a staged edit turns the CDU amber: TEMPORARY tag at the title's left, amber title and ring, amber status line in the sticky INSERT/ERASE bar, UNSAVED on the Settings key, `Settings staged` under the engine mode. INSERT saves, ERASE discards.
-- **Shared time cursor:** one cursor reads both traces at once, with a small readout box listing the time and every value.
-- **Rolling drum:** the memory readout window's last digit rolls on a drum over 250ms (ease-out cubic) and always rests on a whole digit. Reduced motion jumps straight to the value.
-- **Slew:** pointers on the tape and traces, the rate scale when it re-ranges, and readout figures written as text travel 380ms on an ease-out cubic (1-(1-p)^3) to each new reading; bars use the same travel in CSS (.38s cubic-bezier(.33,1,.68,1)). At rest every figure is the measured value; reduced motion and a hidden page jump straight to it.
-- **Master Caution / Warning:** dark amber at rest; lights amber for unacknowledged caution findings and red for warnings. Pressing it acknowledges, and acknowledgement is stored per browser.
-- **Scratchpad:** one-line messages under the annunciator row (amber caution, red-tinted error) cleared with CLR.
+### Signature: claim and proof row
+Each memory control (Context capacity, Max context with KV format, Concurrent requests, Desktop reserve) sits beside a proof panel on Soft with 12px corners: one claim sentence with its figures in 600 at 18px, one small horizontal bar chart (18px; 28px column cells for requests), and a two-ended caption. Dragging any control redraws every proof and the memory bar in the same frame; bars ease 150ms, and reduced motion jumps. If the plan would not start the claim turns Red, other charts dim to 40% and claims prefix `If it fit:`. With no running engine every proof says `Start the engine to see what this buys.`
+
+### Signature: the whole-card memory bar
+At the top of Settings Memory: a head line with the fit verdict at the right, a 14px bar of the whole card split by 2px gaps into model weights (Gray 2), engine (Ink 2), context pool (Ink; Violet while capacity is unsaved), other apps (Gray 3) and free (an outlined Surface box holding the desktop reserve hatch at its right end), a legend of 10px swatches with values, and a basis note listing what is approximate until restart.
+
+### Findings and severity
+Diagnose findings are rows on hairlines: a 96px severity word, a 14px title at 600, a Gray body and an Ink action, with `Evidence` as a text link. Severity is a word, not a hue: **Problem** in Red, **Review** and **Note** in Ink, **Info** in Gray. Log lines follow the same code: errors Red, warnings Ink at 600, requests Ink, info Ink 2, detail Gray.
+
+### Experts map
+One row per text layer and one column per expert, drawn as a single ramp from Soft to Ink for both decode and prefill; the bars at its right are Ink. The user's budget cuts are Violet (solid per layer, dashed for the even split), because they are the user's own setting. A stale map fades to 40%.
+
+### Save bar
+A Surface strip under the Settings body with a hairline on top: Discard, a status in help type, Save (commit) and Save and restart (outlined, shown only when the Supervisor manages the engine). While anything is unsaved a 2px Violet line runs along its top. Validation errors gather in a Red outlined box above it.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** put every display inside the bezel ring with the 4px ring border and 10px corners, on display glass (#040708 at night, #fbfbfa by day).
-- **Do** take every colour from the root tokens, in markup and in canvases, so Day and Night stay one system.
-- **Do** keep keys dark-capped with night legends in every display mode.
-- **Do** letter every label, key and annunciation in Bahnschrift caps at 87.5% width, and keep sentences in Segoe UI Variable Text.
-- **Do** colour by meaning: white measured, green engaged or generated, cyan selectable, magenta configured target, amber caution or staged, red warning, ice blue prompt.
-- **Do** put controls beside the state they change, as the engine keys sit beside the engine mode.
-- **Do** stage settings as an amber temporary revision that ends only in INSERT or ERASE.
-- **Do** keep Monitor and every CDU page free of page scroll at 1440x900, 960x1000 and 1280x720; scroll inside the glass instead.
-- **Do** show unavailable readings as a dash, never as zero.
-- **Do** let a pointer or figure slew to a new reading (380ms, ease-out) and rest on the measured value; jump under reduced motion.
+- **Do** build every surface from the `--s-*` tokens, in Day and Night, and read canvas colours from the same properties.
+- **Do** put a live proof beside any control whose cost the user cannot otherwise see, with one sentence and one small bar chart from the same reading.
+- **Do** mark an unsaved change in Violet at the field, the row, the index line, the page tab, the save bar and any marker that shows it, and return it to Ink once saved.
+- **Do** keep the current value visible: in the index summary, beside each control (`Running 12.00 GiB`), and as the running plan on the engine line.
+- **Do** draw charts in Ink and Gray on a hairline scale, name each scale in the legend, and show the current reading in the rounded label.
+- **Do** draw the desktop reserve as the hatch everywhere it appears.
+- **Do** state severity as a word: Problem, Review, Note, Info.
+- **Do** mark approximate figures with `~` and say why a figure is unavailable instead of showing zero.
+- **Do** separate with hairlines and fill steps; use 8px corners on controls and wells and 12px on cards, sheets and proof panels.
+- **Do** let bars ease 150ms and readings travel 380ms, and jump under reduced motion.
 
 ### Don't:
-- **Don't** read "glass" as glassmorphism: no frosted blur, translucent panels or glow.
-- **Don't** put the cover-glass sheen, gradients or inset shadows on the panel, keys or glareshield.
-- **Don't** use cyan for anything that cannot be selected or edited, or magenta for a measured value.
-- **Don't** set prose in caps or in DIN, or set numbers in monospace.
-- **Don't** add a colour outside the signal set to tell elements apart; use position, rules and gray levels.
-- **Don't** hide measured numbers behind a click; explanation may be on demand, readings may not.
+- **Don't** use Violet for a resting reading, a heading, a status or decoration; the only violet fills are Save, Load and restart, Send and Confirm.
+- **Don't** set anything in capitals, condensed type or letter-spaced labels.
+- **Don't** add amber, green, blue or any second hue; red is only for a plan, input or state that fails.
+- **Don't** give a state class a new colour; historical class names resolve to Ink, Gray, Violet or Red.
+- **Don't** use monospace for numbers or sentences.
+- **Don't** add drop shadows, gradients, bezels, sheen or blur to cards and panels; the dialog is the only floating surface and the reserve hatch is the only pattern.
+- **Don't** hide a cost behind a restart: if a choice changes memory, its proof updates before Save.

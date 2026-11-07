@@ -1,11 +1,13 @@
 #pragma once
 
 #include "config.hpp"
+#include "reserve_budget.hpp"
 
 #include <atomic>
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -75,9 +77,9 @@ public:
     // kReserveUnset leaves the config's own arguments untouched.
     void set_desktop_reserve_gib(int gib);
     void note_config_migration(const std::vector<std::string>& changes, const std::string& error);
-    bool save_desktop_reserve_gib(int gib);
-    void set_reserve_budget_provider(std::function<nlohmann::json()> provider) { reserve_budget_provider_ = std::move(provider); }
-    nlohmann::json reserve_budget() const { return reserve_budget_provider_ ? reserve_budget_provider_() : nlohmann::json{{"ok", false}}; }
+    bool save_desktop_reserve_gib(int gib, std::optional<PlannedContext> planned = std::nullopt);
+    void set_reserve_budget_provider(std::function<nlohmann::json(std::optional<PlannedContext>)> provider) { reserve_budget_provider_ = std::move(provider); }
+    nlohmann::json reserve_budget(std::optional<PlannedContext> planned = std::nullopt) const { return reserve_budget_provider_ ? reserve_budget_provider_(planned) : nlohmann::json{{"ok", false}}; }
     bool reserve_plan_matches_config() const;
 
     // Replaces the configuration the NEXT spawn will use. The dashboard's config
@@ -128,7 +130,7 @@ private:
     std::atomic<std::int64_t> last_activity_ms_{0};
     int desktop_reserve_gib_ = kReserveUnset; // under mu_
     EngineSpec launched_spec_;
-    std::function<nlohmann::json()> reserve_budget_provider_;
+    std::function<nlohmann::json(std::optional<PlannedContext>)> reserve_budget_provider_;
     std::string line_buf_;                    // under mu_; partial stderr line
     // Under mu_. The last reservation failure the engine reported, consumed by the next
     // spawn; and the shrunken KV plan that spawn chose, kept across automatic restarts and

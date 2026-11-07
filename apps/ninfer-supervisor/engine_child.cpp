@@ -97,8 +97,8 @@ void EngineChild::set_desktop_reserve_gib(int gib) {
     desktop_reserve_gib_ = gib;
 }
 
-bool EngineChild::save_desktop_reserve_gib(int gib) {
-    const auto budget = reserve_budget();
+bool EngineChild::save_desktop_reserve_gib(int gib, std::optional<PlannedContext> planned) {
+    const auto budget = reserve_budget(planned);
     if (!budget.value("ok", false) || (gib == 0 ? 8 : gib) > budget.value("max_gib", 0)) return false;
     std::lock_guard lock(mu_);
     if (gib < 0 || gib > 64 || desktop_reserve_pinned(cfg_.engine.args) || cfg_.source_path.empty()) return false;

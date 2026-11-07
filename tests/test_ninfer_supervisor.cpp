@@ -89,6 +89,86 @@ int test_model_reserve_budget() {
     return f;
 }
 
+// A reserve saved together with a new Context capacity is judged against that capacity: shrinking
+// the pool is what makes room for a larger reserve, so the running pool must not decide the limit.
+int test_reserve_budget_with_planned_capacity() {
+    using namespace ninfer::supervisor;
+    constexpr double gib = 1073741824.0;
+    nlohmann::json report{{"plan",
+                           {{"runtime_reservation_bytes", 22 * gib},
+                            {"minimum_runtime_reservation_bytes", 12 * gib},
+                            {"context_capacity_bytes", 20 * gib},
+                            {"available_after_weights_bytes", 36 * gib},
+                            {"cuda_graph_rebuild_estimate_bytes", 0.0},
+                            {"context_capacity_automatic", false}, {"headroom_bytes", gib}}},
+                          {"resources", {{"allocations", {{"device_weights_bytes", 23 * gib}}}}},
+                          {"desktop_reserve", {{"configured_bytes", 6 * gib}}},
+                          {"device", {{"free_bytes", 18 * gib}}}};
+    int f = 0;
+    f += check(model_reserve_budget(report)["max_gib"] == 13, "running pool sets the limit");
+    f += check(model_reserve_budget(report, PlannedContext{false, 12 * gib})["max_gib"] == 21,
+               "a smaller planned pool frees its difference for the reserve");
+    f += check(model_reserve_budget(report, PlannedContext{false, 30 * gib})["max_gib"] == 3,
+               "a larger planned pool takes its difference from the reserve");
+    f += check(model_reserve_budget(report, PlannedContext{false, 40 * gib})["max_gib"] == 0,
+               "a pool beyond the budget leaves no reserve");
+    f += check(model_reserve_budget(report, PlannedContext{true, 0})["max_gib"] == 23,
+               "a planned auto pool keeps only the minimum runtime");
+    return f;
+}
+
+// The Settings page's token figures come from the Engine's own estimate at its last start.
+int test_context_plan_from_server_start() {
+    using namespace ninfer::supervisor;
+    const nlohmann::json start{
+        {"event", "server_start"},
+        {"engine",
+         {{"max_context", 262144}, {"max_concurrency", 8}, {"prefill_chunk", 2048},
+          {"kv_cache", "fp8"}, {"speculative_backend", "dflash2"}, {"speculative_draft_window", 7},
+          {"proposal_head", "optimized"}, {"vision", true}, {"prefix_reuse", true},
+          {"context_token_capacity_estimate", 607950},
+          {"context_pools",
+           {{{"domain", "device"}, {"rank", 0}, {"capacity_bytes", 21474836480ULL}, {"block_bytes", 195897344}},
+            {{"domain", "host"}, {"rank", 0}, {"capacity_bytes", 10157113344ULL}, {"block_bytes", 195897344}}}}}}};
+    const auto plan = context_plan_from_server_start(start.dump());
+    int f = 0;
+    f += check(plan.is_object() && plan["token_estimate"] == 607950, "estimate is carried");
+    f += check(plan["device_capacity_bytes"] == 21474836480ULL, "only the device pool is counted");
+    f += check(plan["block_bytes"] == 195897344 && plan["max_context"] == 262144 &&
+                   plan["max_concurrency"] == 8 && plan["draft_tokens"] == 7 &&
+                   plan["speculative_backend"] == "dflash2" && plan["kv_cache"] == "fp8",
+               "the plan's shape is carried for comparison with a draft");
+    f += check(context_plan_from_server_start("").is_null(), "no start record, no plan");
+    f += check(context_plan_from_server_start("{\"event\":\"server_start\",\"engine\":{}}").is_null(),
+               "a start record without the estimate is not a plan");
+    f += check(context_plan_from_server_start("not json").is_null(), "a torn line is not a plan");
+    return f;
+}
+
+// Every flag the Settings page can write must be one the engine accepts; a stale flag name in the
+// table produces a configuration that never starts.
+int test_settings_flags_are_engine_flags() {
+    using namespace ninfer::supervisor;
+    int f = 0;
+    for (const auto& spec : engine_param_specs()) {
+        std::vector<std::string> args{"model.ninfer", std::string(spec.flag)};
+        switch (spec.kind) {
+        case ParamKind::Flag: args.pop_back(); args.emplace_back(spec.flag); break;
+        case ParamKind::Int: args.push_back(std::to_string(spec.min_value)); break;
+        case ParamKind::Text: args.emplace_back("served-name"); break;
+        case ParamKind::Enum: args.emplace_back(spec.choices[0]); break;
+        case ParamKind::CapacityOrAuto: args.emplace_back("auto"); break;
+        case ParamKind::Capacity: args.emplace_back("1GiB"); break;
+        case ParamKind::Duration: args.emplace_back("1s"); break;
+        case ParamKind::IntOrNone: args.emplace_back("none"); break;
+        }
+        bool parsed = true;
+        try { (void)child_startup_options(args); } catch (const std::exception&) { parsed = false; }
+        f += check(parsed, (std::string(spec.flag) + " is accepted by the engine").c_str());
+    }
+    return f;
+}
+
 int test_engine_probe_destination() {
     using namespace ninfer::supervisor;
     EngineSpec spec;
@@ -2521,6 +2601,15 @@ int test_retired_flag_migration() {
                                                 "--draft-tokens", "7", "--proposal-head",
                                                 "optimized", "--cors"},
                "a retired switch does not consume the next flag");
+    // An older 27B preset carried the pre-unified context counts and a Host KV budget in MiB.
+    std::vector<std::string> context_counts{"model.ninfer", "--max-private-continuations", "8",
+                                            "--max-shared-prefixes", "16", "--host-state-slots",
+                                            "8", "--host-kv-mib", "4096", "--cors"};
+    f += check(migrate_retired_engine_flags(context_counts).size() == 4,
+               "each retired context count is reported");
+    f += check(context_counts == std::vector<std::string>{"model.ninfer", "--host-cache-capacity",
+                                                          "4096MiB", "--cors"},
+               "context counts leave with their values and Host KV becomes Host cache capacity");
     std::vector<std::string> unknown{"model.ninfer", "--not-a-flag", "value"};
     f += check(migrate_retired_engine_flags(unknown).empty() && unknown.size() == 3,
                "unrecognised flags stay for the engine to report");
@@ -2600,6 +2689,9 @@ int test_handler_exception_answers_error() {
 int main() {
     int failures = 0;
     failures += test_retired_flag_migration();
+    failures += test_reserve_budget_with_planned_capacity();
+    failures += test_context_plan_from_server_start();
+    failures += test_settings_flags_are_engine_flags();
     failures += test_handler_exception_answers_error();
     failures += test_client_activity_causes();
     failures += test_loopback();
