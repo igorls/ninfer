@@ -1,6 +1,7 @@
 #include "server.hpp"
 #include "engine_proxy.hpp"
 #include "insights.hpp"
+#include "product/config/quantity.h"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -602,6 +603,7 @@ nlohmann::json DashboardServer::state_json() {
             {"desktop_reserve", {{"next_gib", next_reserve_mib ? nlohmann::json(double(*next_reserve_mib) / 1024.0) : nlohmann::json()},
                                   {"pinned", desktop_reserve_pinned(child_.config().engine.args)}}},
             {"engine_capacity_line", cap},
+            {"engine_start", snap.engine_start},
             {"admin_vram", snap.admin_vram},
             {"admin_vram_note", snap.admin_vram_note},
             {"vram_control", collector_.vram_control_json()},
@@ -707,11 +709,25 @@ void DashboardServer::run() {
             error(400, "Choose engine default (0), or a whole number from 1 to 64 GiB."); return;
         }
         if (desktop_reserve_pinned(child_.config().engine.args)) { error(409, "Reserve is pinned by a quantity finer than whole GiB in the launch configuration."); return; }
-        const auto budget = child_.reserve_budget();
+        // The page saves the reserve and the Context capacity together, so the limit follows the
+        // capacity being saved rather than the one still running.
+        std::optional<PlannedContext> planned;
+        if (body.contains("context_capacity")) {
+            if (!body["context_capacity"].is_string()) { error(400, "context_capacity must be a quantity such as 20GiB, or auto."); return; }
+            const auto text = body["context_capacity"].get<std::string>();
+            if (text.empty() || text == "auto") {
+                planned = PlannedContext{true, 0};
+            } else {
+                try {
+                    planned = PlannedContext{false, static_cast<double>(product::parse_capacity_quantity(text))};
+                } catch (const std::invalid_argument&) { error(400, "context_capacity must be a quantity such as 20GiB, or auto."); return; }
+            }
+        }
+        const auto budget = child_.reserve_budget(planned);
         if (!budget.value("ok", false)) { error(409, "Wait for a ready engine with the saved model settings before changing the reserve."); return; }
         const int gib = body["gib"].get<int>();
         if ((gib == 0 ? 8 : gib) > budget.value("max_gib", 0)) { error(409, "That reserve would leave too little memory for this model and its configured capacity. Choose a value within the current slider limit."); return; }
-        if (!child_.save_desktop_reserve_gib(gib)) { error(409, "Could not save: the available model budget changed or the preferences folder is not writable. Refresh and try again."); return; }
+        if (!child_.save_desktop_reserve_gib(gib, planned)) { error(409, "Could not save: the available model budget changed or the preferences folder is not writable. Refresh and try again."); return; }
         res.set_content(state_json().dump(), "application/json");
     });
 

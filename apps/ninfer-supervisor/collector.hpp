@@ -64,6 +64,7 @@ struct Collected {
     RequestMix requests;
     std::string health_body;
     std::string engine_capacity_line;
+    nlohmann::json engine_start = nullptr; // context_plan_from_server_start of the latest start
     int health_status = 0;
 };
 
@@ -180,6 +181,7 @@ private:
     std::uint64_t recent_version_ = 0;
     RequestMix recent_mix_cache_;
     std::string recent_capacity_cache_;
+    nlohmann::json recent_start_cache_ = nullptr;
     std::uint64_t recent_cache_version_ = ~std::uint64_t{0};
     std::int64_t detector_last_ran_ms_ = 0;
     int last_health_status_          = -1;

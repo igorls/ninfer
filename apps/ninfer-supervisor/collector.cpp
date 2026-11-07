@@ -1,6 +1,7 @@
 #include "collector.hpp"
 #include "gpu_processes.hpp"
 #include "insights.hpp"
+#include "reserve_budget.hpp"
 #include "run_at_login.hpp"
 
 #ifdef _WIN32
@@ -303,14 +304,16 @@ void Collector::poll_request_log(Collected& out) {
             for (const auto& line : recent_dones_) { lines.emplace_back(line); }
             recent_mix_cache_ = RequestMix{};
             fill_recent_mix(lines, recent_mix_cache_);
-            recent_capacity_cache_ = capacity_line_from_server_start(
-                !recent_server_start_.empty() ? recent_server_start_
-                : log_history_ready_          ? older_server_start_
-                                              : std::string{});
-            recent_cache_version_ = recent_version_;
+            const std::string start = !recent_server_start_.empty() ? recent_server_start_
+                                      : log_history_ready_          ? older_server_start_
+                                                                    : std::string{};
+            recent_capacity_cache_ = capacity_line_from_server_start(start);
+            recent_start_cache_    = context_plan_from_server_start(start);
+            recent_cache_version_  = recent_version_;
         }
         out.requests             = recent_mix_cache_;
         out.engine_capacity_line = recent_capacity_cache_;
+        out.engine_start         = recent_start_cache_;
     }
     out.requests.log_available = true;
     // The aggregate comes from the engine's throughput reports, which request_log_thread_

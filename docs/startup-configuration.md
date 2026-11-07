@@ -345,13 +345,15 @@ MIT 许可证。`third_party/tomlplusplus/` 保存未修改的上游单头文件
 
 Update saved commands when adopting this parser. The replaced flags are removed; they are not
 aliases. The Supervisor applies this table to its own `engine.args` and `models[].args` when it
-starts, as described in the [Windows app guide](windows-app.md#request-capacity).
+starts, as described in the [Windows app guide](windows-app.md#memory-settings).
 
 | Previous flag | Current form |
 |---|---|
 | `--desktop-reserve-gib N` | `--desktop-reserve NGiB` |
 | `--desktop-reserve-mib N` | `--desktop-reserve NMiB` |
-| `--device-state-slots N`, `--extra-state-slots N` | State and KV share `--context-capacity SIZE\|auto`; there is no separate slot quota |
+| `--device-state-slots N`, `--extra-state-slots N`, `--host-state-slots N` | State and KV share `--context-capacity SIZE\|auto`; there is no separate slot quota |
+| `--max-private-continuations N`, `--max-shared-prefixes N` | Continuations and shared prefixes live in the same Context capacity; there is no separate count |
+| `--host-kv-mib N` | `--host-cache-capacity NMiB` |
 | `--kv-capacity N\|auto` | `--context-capacity SIZE\|auto`; token counts are not byte quantities |
 | `--kv-slack-floor SIZE` | `--memory-headroom SIZE` |
 | `--expert-trace-max-gib N` | `--expert-trace-max-size NGiB` |
