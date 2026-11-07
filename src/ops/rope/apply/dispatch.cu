@@ -1,6 +1,7 @@
 #include "ops/rope/apply/dispatch.h"
 #include "ops/common/host/operands.h"
 #include "ops/rope/apply/launch.cuh"
+#include "ops/rope/kernels/yarn.cuh"
 #include "core/platform.h"
 
 #include <algorithm>
@@ -120,6 +121,35 @@ void rope_dispatch(const Tensor& positions, int rotary_dim, float theta, Tensor&
 void rope_dispatch(const Tensor& positions, int rotary_dim, float theta, Tensor& x,
                    CudaExecutionView execution) {
     apply({positions, x, nullptr, rotary_dim, theta}, execution);
+}
+
+void rope_yarn_dispatch(const Tensor& positions, const YarnR64Table& table, Tensor& q, Tensor* k,
+                        CudaExecutionView execution) {
+    const int tokens  = positions.ne[0];
+    const int q_heads = q.ne[1];
+    const int k_heads = k ? k->ne[1] : 0;
+    // One warp per head; small extents give every head its own warp, large prefill extents
+    // keep more CTAs resident per SM, mirroring the unscaled fixed route.
+    int threads = 128;
+    if (tokens <= 6)
+        threads = 1024;
+    else if (tokens <= static_cast<std::int64_t>(execution.multiprocessor_count()) * 6)
+        threads = 256;
+    else if (tokens <= 1024)
+        threads = 192;
+    threads = std::min(threads, (q_heads + k_heads) * 32);
+    auto* q_data = static_cast<__nv_bfloat16*>(q.data);
+    auto* k_data = k ? static_cast<__nv_bfloat16*>(k->data) : nullptr;
+    const auto q_stride = q.nb[2] / 2;
+    const auto k_stride = k ? k->nb[2] / 2 : 0;
+    const auto* p       = static_cast<const std::int32_t*>(positions.data);
+    if (positions.ne[1] == 3)
+        rope_yarn_d256r64_kernel<3><<<tokens, threads, 0, execution.stream()>>>(
+            p, q_data, k_data, tokens, q_heads, k_heads, q_stride, k_stride, table);
+    else
+        rope_yarn_d256r64_kernel<1><<<tokens, threads, 0, execution.stream()>>>(
+            p, q_data, k_data, tokens, q_heads, k_heads, q_stride, k_stride, table);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 } // namespace ninfer::ops::detail

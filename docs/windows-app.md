@@ -242,7 +242,13 @@ what the choice buys:
   bare number means GiB. The slider runs from what this plan needs to what fits now and marks the
   running size. The panel shows how many full-length requests fit and how many tokens the pool holds.
 - **Max context** (`--max-context`) is the longest prompt plus reply one request may use, and
-  **KV format** (`--kv-dtype`) sets what each token costs.
+  **KV format** (`--kv-dtype`) sets what each token costs. Its ceiling is the model's own position
+  limit, read from the artifact and multiplied by the YaRN choice, not a fixed number.
+- **Long context (YaRN)** (`--yarn-factor`) stretches a Qwen3.5-family model past its native
+  length: 2 for 512K tokens, 4 for about 1M. It changes every request and may slightly lower
+  quality on short texts, so leave it off unless you need the length. The Supervisor refuses
+  DFlash2 beyond the draft's own 256K positions and offers no YaRN for Flash-Next. The running plan
+  shows the Engine-reported position limit.
 - **Concurrent requests** (`--max-concurrency`) is how many requests run at once, sharing the pool.
   Its maximum of 8 is the Engine compile-time lane cap (`kMaximumConcurrency`): CUDA Graphs and
   kernels are built for exact batch `1..8`, so it is not a memory estimate. The panel shows how long

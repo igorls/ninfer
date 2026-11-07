@@ -1,6 +1,9 @@
 #include "fixture.h"
 #include "kv_cache_storage.h"
 
+#include <cstdlib>
+#include <string_view>
+
 namespace ninfer::test::causal_attention {
 namespace {
 void add_append_case(OpSuite& suite, Geometry geometry, KvCacheStorage storage, AttentionCase c,
@@ -405,6 +408,23 @@ void add_small_prefill_cases(OpSuite& suite, KvCacheStorage storage) {
     }
 }
 
+// The visible-key ceiling covers the 4x YaRN extension of 262,144 positions. Its decode and
+// prefill tails at 1,048,576 keys need about 20 GiB of host oracle memory, so they are opt-in
+// (NINFER_LONG_CONTEXT_TESTS=1) for qualification runs rather than part of every suite run.
+void add_long_context_cases(OpSuite& suite, KvCacheStorage storage) {
+    const char* enabled = std::getenv("NINFER_LONG_CONTEXT_TESTS");
+    if (enabled == nullptr || std::string_view(enabled) != "1") return;
+    if (storage != KvCacheStorage::BFloat16 && storage != KvCacheStorage::Fp8E4m3fnGroup128Ue8m0)
+        return;
+    constexpr std::uint32_t kKeys = ops::kCausalAttentionMaximumVisibleKeys;
+    const std::array<int, 3> queries{0, 64, 128};
+    std::cout << "long-context cases enabled for " << cache_name(storage) << '\n';
+    add_cached_case(suite, kGeometries[0], storage, {1, kKeys - 1, kKeys, 1901u},
+                    MappingPattern::Fragmented);
+    add_cached_case(suite, kGeometries[0], storage, {129, kKeys - 129, kKeys, 1902u},
+                    MappingPattern::Fragmented, queries);
+}
+
 void add_storage_cases(OpSuite& suite, KvCacheStorage storage) {
     suite.add(std::string("causal_capacity/") + cache_name(storage),
               [=] {
@@ -438,6 +458,7 @@ void add_storage_cases(OpSuite& suite, KvCacheStorage storage) {
     add_verify_width_cases(suite, storage);
     add_numerical_profile_cases(suite, storage);
     add_small_prefill_cases(suite, storage);
+    add_long_context_cases(suite, storage);
 }
 } // namespace
 

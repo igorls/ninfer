@@ -168,6 +168,7 @@ std::uint64_t VisionConfig::merge_width() const {
 
 Config parse_config(const artifact::Directory& directory, const LoadOptions& options) {
     if (options.masked_draft()) throw ArtifactError("GLM5Next uses its native MTP backend");
+    if (options.yarn_factor) throw ArtifactError("GLM5Next has no YaRN RoPE scaling");
     try {
         Config out{text_config(directory.component("text").config), {}, options.mtp()};
         if (options.vision)

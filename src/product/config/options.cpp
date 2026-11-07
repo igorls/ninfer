@@ -389,6 +389,9 @@ ParsedOptions parse(int argc, char** argv, EntryPoint entry,
         case Field::MaxContext:
             engine.max_context = u32();
             break;
+        case Field::YarnFactor:
+            engine.yarn_factor = real();
+            break;
         case Field::KvDtype:
             engine.kv_cache = kv_storage(string());
             break;

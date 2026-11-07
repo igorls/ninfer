@@ -101,6 +101,8 @@ std::shared_ptr<const ModelDefinition> read_definition(const artifact::Reader& r
     auto pending            = std::move(b.weights);
     out->prepared_resources = std::move(binder).finish();
     out->info.name          = reader.directory().metadata.value("name", "Qwen4ExpForCausalLM");
+    out->info.native_context    = out->config.text.max_context;
+    out->info.position_capacity = out->config.text.max_context;
     out->parents.resize(reader.directory().objects.size());
     out->references.reserve(pending.size());
     out->descriptions.reserve(pending.size());

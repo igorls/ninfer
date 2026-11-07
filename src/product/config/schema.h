@@ -85,6 +85,7 @@ enum class Field {
     RerankIrrelevant,
     RerankMaxDocuments,
     RerankModelId,
+    YarnFactor,
     Count,
 };
 

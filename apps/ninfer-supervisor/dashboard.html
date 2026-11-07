@@ -1961,6 +1961,10 @@ window.NInferCapacity = (() => {
     const rows = [
       ['Context capacity', contextRunning],
       ['Max context', num(flags['--max-context'])],
+      ['Position limit', s.engine_start && s.engine_start.position_capacity
+        ? num(s.engine_start.position_capacity) + (s.engine_start.yarn_factor
+          ? ` (YaRN ${s.engine_start.yarn_factor}×, native ${num(s.engine_start.native_context)})` : ' (native)')
+        : '—'],
       ['Concurrent requests', num(flags['--max-concurrency'])],
       ['Speculation', flags['--spec'] ? `${flags['--spec']}${flags['--draft-tokens'] ? ', ' + flags['--draft-tokens'] + ' drafts' : ''}` : 'off'],
       ['KV cache', flags['--kv-dtype'] || 'default'],
@@ -3362,14 +3366,26 @@ window.NInferCapacity = (() => {
       // A parameter with choices is still optional: "not set" is a real state and is not the
       // same as any one choice, because the engine picks its own default.
       const none = document.createElement('option'); none.value = '';
-      none.textContent = spec.key === 'spec' ? 'Off, ordinary decoding' : spec.key === 'kv_dtype' ? 'Engine default (bf16)' : 'Engine default';
+      const native = (cfgData.context_limits || {}).native || 0;
+      none.textContent = spec.key === 'spec' ? 'Off, ordinary decoding' : spec.key === 'kv_dtype' ? 'Engine default (bf16)'
+        : spec.key === 'yarn_factor' ? 'Off, native length' + (native ? ` (${shortTokens(native)} tokens)` : '') : 'Engine default';
       input.appendChild(none);
       // NVFP4 KV is stored by the engine but not usable on this card generation.
-      spec.choices.forEach(choice => { const o = document.createElement('option'); o.value = choice; o.textContent = spec.key === 'kv_dtype' && choice === 'nvfp4' ? 'nvfp4, not usable on this card' : choice; input.appendChild(o); });
+      spec.choices.forEach(choice => {
+        const o = document.createElement('option'); o.value = choice;
+        o.textContent = spec.key === 'kv_dtype' && choice === 'nvfp4' ? 'nvfp4, not usable on this card'
+          : spec.key === 'yarn_factor' ? `${choice}×` + (native ? `, up to ${shortTokens(Math.floor(native * Number(choice)))} tokens` : '') : choice;
+        input.appendChild(o);
+      });
       input.value = value == null ? '' : value;
       input.onchange = () => {
         cfgEdit('params', spec.key, input.value, original || '');
         input.classList.toggle('dirty', input.value !== (original || ''));
+        if (spec.key === 'yarn_factor') {
+          // The context ceiling follows the factor; redraw so the slider offers the new range.
+          renderConfig();
+          $('param-yarn_factor').focus();
+        }
         if (spec.key === 'spec') {
           if (!input.value || input.value === 'none') {
             cfgEdit('params', 'draft_tokens', '', (cfgData.params || {}).draft_tokens || '');
@@ -3816,10 +3832,18 @@ window.NInferCapacity = (() => {
     const schema = cfgData.schema || [];
     const spec = key => schema.find(x => x.key === key);
     const special = ['context_capacity', 'max_context', 'max_concurrency', 'kv_dtype', 'desktop_reserve'];
-    const rows = group => schema.filter(x => x.group === group && !special.includes(x.key)).map(x => fieldRow(x, params[x.key]));
+    const limits = cfgData.context_limits || {};
+    // A model without YaRN (or an unreadable artifact) does not offer the choice.
+    const hidden = key => key === 'yarn_factor' && !limits.yarn_supported && !params.yarn_factor;
+    const rows = group => schema.filter(x => x.group === group && !special.includes(x.key) && !hidden(x.key)).map(x => fieldRow(x, params[x.key]));
     $('model-fields').replaceChildren(...rows('model'));
     if (spec('context_capacity')) capacityControl(spec('context_capacity'), params.context_capacity);
-    if (spec('max_context')) contextControl(spec('max_context'), params.max_context, spec('kv_dtype'), params.kv_dtype);
+    if (spec('max_context')) {
+      // The ceiling is the model's native length, times the drafted YaRN factor.
+      const context = {...spec('max_context')};
+      if (limits.native) context.max = Math.floor(limits.native * (Number(draftParam('yarn_factor')) || 1));
+      contextControl(context, params.max_context, spec('kv_dtype'), params.kv_dtype);
+    }
     if (spec('max_concurrency')) lanesControl(spec('max_concurrency'), params.max_concurrency);
     $('mem-more').replaceChildren(...rows('memory'), plainField('engine', 'device', 'GPU device index', eng.device, {type: 'int', help: 'Which CUDA device the engine runs on.', find: 'gpu card cuda'}));
     $('requests-fields').replaceChildren(...rows('requests'));

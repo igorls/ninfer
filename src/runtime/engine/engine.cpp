@@ -299,6 +299,9 @@ private:
         description.architecture    = startup.load.architecture;
         description.model_name      = startup.load.model_name;
         description.max_context     = options.max_context;
+        description.native_context    = startup.load.native_context;
+        description.position_capacity = startup.load.position_capacity;
+        description.yarn_factor       = options.yarn_factor;
         description.max_concurrency = options.max_concurrency;
         description.prefill_chunk   = options.prefill_chunk;
         description.kv_cache        = options.kv_cache;

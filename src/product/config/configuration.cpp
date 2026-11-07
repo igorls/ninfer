@@ -112,6 +112,9 @@ StartupConfigurationView view(const LaunchOptions& launch, EntryPoint entry, con
         case Field::MaxContext:
             value = std::uint64_t{e.max_context};
             break;
+        case Field::YarnFactor:
+            value = optional_value(e.yarn_factor, "none");
+            break;
         case Field::KvDtype:
             value = std::string(kv_name(e.kv_cache));
             break;

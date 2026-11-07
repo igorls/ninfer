@@ -11,6 +11,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace ninfer;
@@ -74,12 +75,39 @@ std::vector<int> make_positions(int axes, int tokens, int first_position) {
     return positions;
 }
 
+// YaRN correction range [lo, hi] of the documented ramp, evaluated in FP64.
+std::pair<double, double> yarn_correction_range(const Geometry& geometry,
+                                                const ops::RopeYarn& yarn) {
+    const double pi        = 3.14159265358979323846;
+    const double dimension = geometry.rotary_dim;
+    const auto correction  = [&](double rotations) {
+        return dimension *
+               std::log(double(yarn.original_max_position_embeddings) / (rotations * 2.0 * pi)) /
+               (2.0 * std::log(double(geometry.theta)));
+    };
+    return {std::max(std::floor(correction(yarn.beta_fast)), 0.0),
+            std::min(std::ceil(correction(yarn.beta_slow)), dimension - 1.0)};
+}
+
+// The documented YaRN angular frequency of one pair: a linear ramp between the unscaled
+// frequency below lo and the factor-interpolated frequency above hi.
+double yarn_frequency(const Geometry& geometry, const ops::RopeYarn& yarn, int pair) {
+    const auto [lo, hi]   = yarn_correction_range(geometry, yarn);
+    const double span     = hi == lo ? 0.001 : hi - lo;
+    const double ramp     = std::clamp((pair - lo) / span, 0.0, 1.0);
+    const double unscaled = std::pow(double(geometry.theta), -2.0 * pair / geometry.rotary_dim);
+    return unscaled * (1.0 - ramp) + unscaled / double(yarn.factor) * ramp;
+}
+
 // This is the sole RoPE oracle. It consumes the exact logical BF16 values represented by the
 // public input and evaluates the documented split-half rotation naively in FP64. It does not
 // reproduce output storage rounding, production staging, coefficient tables, range reduction,
-// kernel split, or reduction order.
+// kernel split, or reduction order. With YaRN it applies the documented frequencies and scales
+// both rotated outputs by the attention factor.
 std::vector<double> rope_oracle(const std::vector<float>& input, const std::vector<int>& positions,
-                                const Geometry& geometry, int heads) {
+                                const Geometry& geometry, int heads,
+                                const ops::RopeYarn* yarn = nullptr) {
+    const double magnitude = yarn ? double(yarn->attention_factor) : 1.0;
     std::vector<double> output(input.begin(), input.end());
     const int half = geometry.rotary_dim / 2;
     for (int token = 0; token < geometry.tokens; ++token) {
@@ -96,7 +124,9 @@ std::vector<double> rope_oracle(const std::vector<float>& input, const std::vect
                     axis     = geometry.axes == 3 ? pair % 3 : 0;
                     exponent = -2.0 * static_cast<double>(pair) / geometry.rotary_dim;
                 }
-                const double frequency = std::pow(static_cast<double>(geometry.theta), exponent);
+                const double frequency =
+                    yarn ? yarn_frequency(geometry, *yarn, pair)
+                         : std::pow(static_cast<double>(geometry.theta), exponent);
                 const double phase =
                     static_cast<double>(
                         positions[static_cast<std::size_t>(axis) * geometry.tokens + token]) *
@@ -108,8 +138,8 @@ std::vector<double> rope_oracle(const std::vector<float>& input, const std::vect
                     dense_index(geometry.head_dim, heads, token, head, pair + half);
                 const double first  = static_cast<double>(input[lo]);
                 const double second = static_cast<double>(input[hi]);
-                output[lo]          = first * cosine - second * sine;
-                output[hi]          = second * cosine + first * sine;
+                output[lo]          = magnitude * (first * cosine - second * sine);
+                output[hi]          = magnitude * (second * cosine + first * sine);
             }
         }
     }
@@ -141,9 +171,10 @@ std::vector<double> gather_dense(const std::vector<std::uint16_t>& storage,
     return dense;
 }
 
+// The YaRN magnitude scales every rotated output, so the pair bound scales with it.
 int verify_rope_profile(const std::string& label, const std::vector<double>& got,
                         const std::vector<double>& expected, const std::vector<float>& input,
-                        const Geometry& geometry, int heads) {
+                        const Geometry& geometry, int heads, double magnitude = 1.0) {
     if (got.size() != expected.size() || got.size() != input.size()) {
         std::cerr << label << ": profile input size mismatch\n";
         return 1;
@@ -167,6 +198,7 @@ int verify_rope_profile(const std::string& label, const std::vector<double>& got
                 }
                 const double abs_error = std::abs(got[index] - expected[index]);
                 const double pair_norm =
+                    magnitude *
                     std::hypot(static_cast<double>(input[lo]), static_cast<double>(input[hi]));
                 const double required_pair_rtol =
                     pair_norm == 0.0
@@ -234,7 +266,14 @@ int verify_padding(const std::string& label, const std::vector<std::uint16_t>& s
 
 int run_pair_case(CudaExecutionView execution, const Geometry& geometry, int q_heads, int k_heads,
                   int first_position, int q_padding = 0, int k_padding = 0, int lane_width = 0,
-                  bool graph = false) {
+                  bool graph = false, const ops::RopeYarn* yarn = nullptr) {
+    const double magnitude = yarn ? double(yarn->attention_factor) : 1.0;
+    const auto apply       = [&](Tensor& positions, Tensor& q, Tensor& k, CudaExecutionView view) {
+        if (yarn)
+            ops::rope(positions, geometry.rotary_dim, geometry.theta, *yarn, q, k, view);
+        else
+            ops::rope(positions, geometry.rotary_dim, geometry.theta, q, k, view);
+    };
     constexpr std::uint16_t kPadding = 0x3f81U;
     const int q_dense_per_token      = geometry.head_dim * q_heads;
     const int k_dense_per_token      = geometry.head_dim * k_heads;
@@ -259,8 +298,8 @@ int run_pair_case(CudaExecutionView execution, const Geometry& geometry, int q_h
                                                         97 * axis +
                                                         (2 * axis + 1) * (t % lane_width);
     }
-    const auto q_expected = rope_oracle(q, positions, geometry, q_heads);
-    const auto k_expected = rope_oracle(k, positions, geometry, k_heads);
+    const auto q_expected = rope_oracle(q, positions, geometry, q_heads, yarn);
+    const auto k_expected = rope_oracle(k, positions, geometry, k_heads, yarn);
 
     GuardedDeviceBuffer q_device(q_storage.size() * sizeof(std::uint16_t));
     GuardedDeviceBuffer k_device(k_storage.size() * sizeof(std::uint16_t));
@@ -275,7 +314,7 @@ int run_pair_case(CudaExecutionView execution, const Geometry& geometry, int q_h
     q_tensor.nb[2] = static_cast<std::int64_t>(q_stride) * sizeof(std::uint16_t);
     k_tensor.nb[2] = static_cast<std::int64_t>(k_stride) * sizeof(std::uint16_t);
 
-    ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, q_tensor, k_tensor, execution);
+    apply(position_tensor, q_tensor, k_tensor, execution);
     cuda_synchronize();
 
     if (graph) {
@@ -286,8 +325,7 @@ int run_pair_case(CudaExecutionView execution, const Geometry& geometry, int q_h
         const auto stream_execution =
             ninfer::test::cuda_environment().context.execution_view(stream);
         CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal));
-        ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, q_tensor, k_tensor,
-                  stream_execution);
+        apply(position_tensor, q_tensor, k_tensor, stream_execution);
         CUDA_CHECK(cudaStreamEndCapture(stream, &captured));
         CUDA_CHECK(cudaGraphInstantiate(&executable, captured, nullptr, nullptr, 0));
         for (int replay = 0; replay < 2; ++replay) {
@@ -309,10 +347,10 @@ int run_pair_case(CudaExecutionView execution, const Geometry& geometry, int q_h
     int failures            = 0;
     failures += verify_rope_profile(
         label + " q", gather_dense(q_got, q_dense_per_token, q_stride, geometry.tokens), q_expected,
-        q, geometry, q_heads);
+        q, geometry, q_heads, magnitude);
     failures += verify_rope_profile(
         label + " k", gather_dense(k_got, k_dense_per_token, k_stride, geometry.tokens), k_expected,
-        k, geometry, k_heads);
+        k, geometry, k_heads, magnitude);
     failures += verify_passthrough(label + " q", q_got, q_before, geometry.head_dim, q_heads,
                                    geometry.tokens, geometry.rotary_dim, q_stride);
     failures += verify_passthrough(label + " k", k_got, k_before, geometry.head_dim, k_heads,
@@ -330,7 +368,7 @@ int run_pair_case(CudaExecutionView execution, const Geometry& geometry, int q_h
 }
 
 int run_single_case(CudaExecutionView execution, const Geometry& geometry, int heads,
-                    int first_position, int padding = 0) {
+                    int first_position, int padding = 0, const ops::RopeYarn* yarn = nullptr) {
     constexpr std::uint16_t kPadding = 0x3f81U;
     const int dense_per_token        = geometry.head_dim * heads;
     const int token_stride           = dense_per_token + padding;
@@ -340,7 +378,7 @@ int run_single_case(CudaExecutionView execution, const Geometry& geometry, int h
     const auto storage =
         make_strided_storage(before, dense_per_token, token_stride, geometry.tokens, kPadding);
     const auto positions = make_positions(geometry.axes, geometry.tokens, first_position);
-    const auto expected  = rope_oracle(input, positions, geometry, heads);
+    const auto expected  = rope_oracle(input, positions, geometry, heads, yarn);
 
     GuardedDeviceBuffer device(storage.size() * sizeof(std::uint16_t));
     GuardedDeviceBuffer position_device(positions.size() * sizeof(int));
@@ -350,7 +388,10 @@ int run_single_case(CudaExecutionView execution, const Geometry& geometry, int h
     Tensor position_tensor(position_device.span(), DType::I32, {geometry.tokens, geometry.axes});
     Tensor tensor(device.span(), DType::BF16, {geometry.head_dim, heads, geometry.tokens});
     tensor.nb[2] = static_cast<std::int64_t>(token_stride) * sizeof(std::uint16_t);
-    ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, tensor, execution);
+    if (yarn)
+        ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, *yarn, tensor, execution);
+    else
+        ops::rope(position_tensor, geometry.rotary_dim, geometry.theta, tensor, execution);
     cuda_synchronize();
 
     const auto got          = from_device<std::uint16_t>(device.data(), storage.size());
@@ -358,7 +399,7 @@ int run_single_case(CudaExecutionView execution, const Geometry& geometry, int h
     int failures            = 0;
     failures += verify_rope_profile(
         label, gather_dense(got, dense_per_token, token_stride, geometry.tokens), expected, input,
-        geometry, heads);
+        geometry, heads, yarn ? double(yarn->attention_factor) : 1.0);
     failures += verify_passthrough(label, got, before, geometry.head_dim, heads, geometry.tokens,
                                    geometry.rotary_dim, token_stride);
     failures +=
@@ -448,6 +489,86 @@ int run_vision_packed_case(CudaExecutionView execution) {
     return failures;
 }
 
+// YaRN at the Qwen3.5-family Text shapes: the oracle's correction range for the published
+// parameters, decode/prefill/MRoPE/single-tensor forms on both sides of the native 262,144
+// boundary up to the 4x extension, padded and BF16-unaligned strides, Graph replay, and the
+// geometries and parameters the YaRN forms reject.
+int run_yarn_cases(CudaExecutionView execution) {
+    int failures = 0;
+    const ops::RopeYarn x4{.factor                           = 4.0F,
+                           .original_max_position_embeddings = 262144,
+                           .attention_factor =
+                               static_cast<float>(0.1 * std::log(4.0) + 1.0)};
+    const ops::RopeYarn x2{.factor                           = 2.0F,
+                           .original_max_position_embeddings = 262144,
+                           .attention_factor =
+                               static_cast<float>(0.1 * std::log(2.0) + 1.0)};
+    // Hand-derived for theta=1e7, R=64, L=262144: c(32)=14.24 and c(1)=21.12, so pairs
+    // [0,14] keep their frequency, [22,31] divide it by the factor, and the rest blend.
+    const Geometry text{"27b text", 256, 64, 3, 1, kTextTheta};
+    const auto [lo, hi] = yarn_correction_range(text, x4);
+    if (lo != 14.0 || hi != 22.0 || yarn_frequency(text, x4, 0) != 1.0 ||
+        std::abs(yarn_frequency(text, x4, 31) / std::pow(1.0e7, -62.0 / 64.0) - 0.25) > 1e-15) {
+        std::cerr << "YaRN oracle correction range is " << lo << ".." << hi << '\n';
+        ++failures;
+    }
+
+    const int last = 1'048'575;
+    failures += run_pair_case(execution, {"27b yarn x4 decode", 256, 64, 1, 1, kTextTheta}, 24, 4,
+                              last, 0, 0, 0, false, &x4);
+    failures += run_pair_case(execution, {"27b yarn x4 decode mrope", 256, 64, 3, 1, kTextTheta},
+                              24, 4, last - 2 * 97, 0, 0, 0, false, &x4);
+    failures += run_pair_case(execution, {"27b yarn x4 mrope prefill", 256, 64, 3, 128, kTextTheta},
+                              24, 4, 1'000'000, 0, 0, 0, false, &x4);
+    failures += run_pair_case(execution, {"27b yarn x4 native boundary", 256, 64, 3, 7, kTextTheta},
+                              24, 4, 262'130, 0, 0, 0, false, &x4);
+    failures += run_pair_case(execution, {"27b yarn x2 short prompt", 256, 64, 1, 16, kTextTheta},
+                              24, 4, 0, 0, 0, 0, false, &x2);
+    failures += run_pair_case(execution, {"27b yarn x4 mtp lanes", 256, 64, 3, 16 * 8, kTextTheta},
+                              24, 4, 700'000, 16, 8, 16, true, &x4);
+    const int large_block_capacity = execution.multiprocessor_count() * 6;
+    for (int tokens : {large_block_capacity, large_block_capacity + 1, 2048}) {
+        failures += run_pair_case(execution,
+                                  {"27b yarn x4 residency", 256, 64, 1, tokens, kTextTheta}, 24, 4,
+                                  last - (tokens - 1), 0, 0, 0, false, &x4);
+        failures += run_single_case(
+            execution, {"27b yarn x4 mrope residency", 256, 64, 3, tokens, kTextTheta}, 24,
+            524'288, 0, &x4);
+    }
+    failures += run_single_case(execution, {"27b yarn x2 mtp k", 256, 64, 3, 128, kTextTheta}, 4,
+                                400'000, 8, &x2);
+    // Odd element strides leave tokens BF16- but not pair-aligned.
+    failures += run_pair_case(execution, {"35b yarn x4 unaligned", 256, 64, 1, 5, kTextTheta}, 16,
+                              2, 900'001, 1, 3, 0, false, &x4);
+    failures +=
+        run_single_case(execution, {"35b yarn x4 mtp k", 256, 64, 1, 5, kTextTheta}, 2, 1'000'003,
+                        1, &x4);
+
+    GuardedDeviceBuffer positions(sizeof(int) * 4), q(sizeof(std::uint16_t) * 128 * 32 * 4),
+        k(sizeof(std::uint16_t) * 128 * 8 * 4);
+    Tensor position_tensor(positions.span(), DType::I32, {4});
+    Tensor q128(q.span(), DType::BF16, {128, 32, 4}), k128(k.span(), DType::BF16, {128, 8, 4});
+    Tensor q256(q.span(), DType::BF16, {256, 16, 4}), k256(k.span(), DType::BF16, {256, 4, 4});
+    const auto rejects = [&](const char* label, auto&& call) {
+        try {
+            call();
+            std::cerr << label << " was accepted\n";
+            ++failures;
+        } catch (const std::invalid_argument&) {}
+    };
+    rejects("YaRN D128 geometry",
+            [&] { ops::rope(position_tensor, 128, kTextTheta, x4, q128, k128, execution); });
+    rejects("YaRN R128 rotary width",
+            [&] { ops::rope(position_tensor, 128, kTextTheta, x4, q256, k256, execution); });
+    for (const auto& bad :
+         {ops::RopeYarn{1.0F, 262144, 32, 1, 1.0F}, ops::RopeYarn{4.0F, 0, 32, 1, 1.1F},
+          ops::RopeYarn{4.0F, 262144, 1, 32, 1.1F}, ops::RopeYarn{4.0F, 262144, 32, 1, 0.0F},
+          ops::RopeYarn{std::numeric_limits<float>::infinity(), 262144, 32, 1, 1.1F}})
+        rejects("invalid YaRN parameters",
+                [&] { ops::rope(position_tensor, 64, kTextTheta, bad, q256, k256, execution); });
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -514,6 +635,8 @@ int main() {
                               8, 262'128);
     failures += run_single_case(execution, {"35b dflash context k", 128, 128, 1, 128, kTextTheta},
                                 8, 131'072, 16);
+
+    failures += run_yarn_cases(execution);
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " rope correctness\n";
     return failures == 0 ? 0 : 1;

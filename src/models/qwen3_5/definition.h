@@ -11,6 +11,9 @@ namespace ninfer::models::qwen3_5 {
 
 struct InstanceInfo {
     std::string name;
+    // Trained Text positions and the max_context ceiling under the selected RoPE scaling.
+    std::uint32_t native_context    = 0;
+    std::uint32_t position_capacity = 0;
 };
 
 // Immutable selected model semantics and representation descriptions. Resource bytes and

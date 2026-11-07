@@ -5,6 +5,7 @@
 #include "ninfer/observability/snapshot.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -196,6 +197,16 @@ struct ObservabilityOptions {
     bool gpu_timing = false;
 };
 
+// Largest static YaRN RoPE factor the Engine accepts: 4 x the native 262,144 positions of the
+// Qwen3.5-family checkpoints is the documented 1M-token extension, and the qualified range.
+inline constexpr float kMaximumYarnFactor = 4.0F;
+
+// Position capacity of a model whose native capacity is `native` under YaRN `factor`.
+[[nodiscard]] inline std::uint32_t yarn_position_capacity(std::uint32_t native,
+                                                          float factor) noexcept {
+    return static_cast<std::uint32_t>(std::floor(static_cast<double>(native) * factor));
+}
+
 struct EngineOptions {
     ObservabilityOptions observability;
     std::optional<DeploymentOptions> deployment;
@@ -205,6 +216,11 @@ struct EngineOptions {
     EnginePurpose purpose           = EnginePurpose::Generation;
     int device                      = 0;
     std::uint32_t max_context       = 8192; // Logical ceiling of one request or score window.
+    // Opt-in static YaRN RoPE scaling. Unset keeps the artifact's native RoPE and position
+    // capacity. A factor in (1, kMaximumYarnFactor] applies the model's YaRN frequencies at every
+    // position, short prompts included, and raises the max_context ceiling to
+    // yarn_position_capacity(native, factor). Models without YaRN support reject it.
+    std::optional<float> yarn_factor;
     ContextCapacityPolicy context_capacity;
     // Per-rank planning allowance that startup allocations may consume. Zero adds no allowance.
     std::size_t memory_headroom_bytes  = kDefaultMemoryHeadroomBytes;

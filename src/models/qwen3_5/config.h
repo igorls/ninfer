@@ -35,12 +35,22 @@ struct AttentionConfig {
     }
 };
 
+// Static YaRN extension selected at startup (Qwen3.5-family parameters: beta_fast 32,
+// beta_slow 1, truncated correction range). original_max_position_embeddings is the artifact's
+// native position capacity and attention_factor is 0.1*ln(factor)+1.
+struct YarnConfig {
+    float factor                                    = 0;
+    std::uint32_t original_max_position_embeddings = 0;
+    float attention_factor                          = 0;
+};
+
 struct RopeConfig {
     float rope_theta            = 0;
     float partial_rotary_factor = 0;
     std::array<std::uint32_t, 3> mrope_section{};
     std::uint32_t rotary_dim = 0;
     std::vector<std::uint8_t> pair_axes;
+    std::optional<YarnConfig> yarn;
 };
 
 struct GdnConfig {
@@ -88,6 +98,9 @@ struct TextConfig {
     std::optional<RopeConfig> rope_parameters;
     std::optional<GdnConfig> gdn;
     std::variant<DenseConfig, MoeConfig> ffn;
+
+    // Largest max_context the Text RoPE admits: max_position_embeddings, or its YaRN extension.
+    [[nodiscard]] std::uint32_t position_capacity() const noexcept;
 };
 
 struct DFlash2Config {

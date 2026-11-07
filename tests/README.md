@@ -420,6 +420,13 @@ python3 tools/smoke/serve_thinking_preservation.py \
 The shared messages are in
 [`fixtures/serve/qwen3_6_thinking_preservation.json`](fixtures/serve/qwen3_6_thinking_preservation.json).
 
+### Long-context attention qualification
+
+`NINFER_LONG_CONTEXT_TESTS=1` adds `ninfer_softmax_attention_test` cases at the full 1,048,576
+visible-key envelope (the YaRN x4 ceiling): BF16 and FP8 KV decode and a 129-column prefill tail.
+Their FP64 oracle needs about 20 GiB of host memory and minutes of CPU time, so ordinary suite runs
+leave them out.
+
 ## What belongs here
 
 A permanent test should protect one current risk, such as:

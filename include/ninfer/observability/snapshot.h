@@ -143,6 +143,10 @@ struct LoadSummary {
     std::uint64_t max_rank_staging_bytes = 0;
     std::size_t device_object_count      = 0;
     std::size_t host_object_count        = 0;
+    // Positions the artifact's model was trained for, and the max_context ceiling under the
+    // active RoPE scaling (equal when no scaling is selected).
+    std::uint32_t native_context    = 0;
+    std::uint32_t position_capacity = 0;
     ContextCostSummary context_cost;
 };
 
@@ -164,6 +168,8 @@ struct EngineDescription {
     std::vector<RankDescriptor> ranks;
     std::vector<PlacementDescriptor> placements;
     std::uint32_t max_context = 0, max_concurrency = 0, prefill_chunk = 0;
+    std::uint32_t native_context = 0, position_capacity = 0;
+    std::optional<float> yarn_factor;
     std::vector<ContextPoolCapacity> context_pools;
     std::uint64_t context_token_capacity_estimate = 0;
     KvCacheStorage kv_cache                       = KvCacheStorage::BFloat16;

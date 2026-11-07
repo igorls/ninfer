@@ -635,8 +635,18 @@ struct EngineParamSpec {
 // wide enough not to be a policy while still catching a typo'd extra digit.
 inline const std::vector<EngineParamSpec>& engine_param_specs() {
     static const std::vector<EngineParamSpec> specs = {
+        // The bound here is the Engine's own ceiling (4x YaRN over 262,144 positions). The
+        // active model's limit replaces it in the page and in validate_engine_param_combination.
         {"--max-context", "max_context", ParamKind::Int, "memory", "Max context",
-         "Longest prompt plus reply one request may use (K = 1,024 tokens).", 256, 262144, {}},
+         "Longest prompt plus reply one request may use (K = 1,024 tokens). The model sets the "
+         "ceiling; Long context (YaRN) raises it.", 256, 1048576, {}},
+        {"--yarn-factor", "yarn_factor", ParamKind::Enum, "memory", "Long context (YaRN)",
+         "Stretches the model's position encoding so one request can run past its native "
+         "length: 2 doubles it (512K tokens on the 27B), 4 reaches about 1M. It changes every "
+         "request, short ones included, and Qwen notes it may slightly lower quality on short "
+         "texts, so turn it on only when you need the length. Past the native length, use MTP "
+         "or no speculation, and expect each long request to need tens of GiB of KV.",
+         0, 0, {"2", "3", "4"}},
         {"--context-capacity", "context_capacity", ParamKind::CapacityOrAuto, "memory", "Context capacity",
          "GPU memory every request shares for its KV cache and state.", 1, 262144LL << 20, {}},
         {"--max-concurrency", "max_concurrency", ParamKind::Int, "memory", "Concurrent requests",
@@ -898,10 +908,46 @@ inline std::vector<std::string> validate_engine_params(const std::vector<EngineP
     return errors;
 }
 
+// Position capacities the artifact's own configs declare; zero when unknown.
+struct ArtifactPositionLimits {
+    std::uint32_t text  = 0; // the model's native Text positions
+    std::uint32_t draft = 0; // a DFlash/DFlash2 draft component's positions, when present
+};
+
+// The longest --max-context the model admits under the configured YaRN factor (the Engine's
+// yarn_position_capacity rule), or 0 when the artifact did not declare its positions.
+inline std::uint64_t model_context_limit(std::uint32_t native,
+                                         const std::vector<EngineParam>& params) {
+    if (native == 0) return 0;
+    const std::string* factor = find_param_value(params, "yarn_factor");
+    if (factor == nullptr || factor->empty()) return native;
+    try {
+        std::size_t used  = 0;
+        const float value = std::stof(*factor, &used);
+        if (used == factor->size() && value > 1.0F) return ninfer::yarn_position_capacity(native, value);
+    } catch (const std::exception&) {}
+    return native;
+}
+
 // Cross-field rules the per-field pass cannot see.
 inline std::vector<std::string> validate_engine_param_combination(
-    const std::vector<EngineParam>& params, std::string_view model_identity = {}) {
+    const std::vector<EngineParam>& params, std::string_view model_identity = {},
+    ArtifactPositionLimits limits = {}) {
     std::vector<std::string> errors;
+    const std::string* yarn = find_param_value(params, "yarn_factor");
+    if (yarn != nullptr && model_identity == "qwen3.8-flash-next") {
+        errors.emplace_back("Flash-Next has no YaRN scaling");
+    }
+    long long context = 8192;
+    if (const std::string* value = find_param_value(params, "max_context")) {
+        parse_long_long(*value, context);
+    }
+    if (const auto limit = model_context_limit(limits.text, params);
+        limit != 0 && static_cast<std::uint64_t>(context) > limit) {
+        errors.push_back("Max context is above this model's " + std::to_string(limit) +
+                         "-token limit" +
+                         (yarn == nullptr ? "; Long context (YaRN) can extend it" : ""));
+    }
     const std::string* draft_tokens = find_param_value(params, "draft_tokens");
     const std::string* spec_backend = find_param_value(params, "spec");
     if (draft_tokens != nullptr && *draft_tokens != "0" && spec_backend == nullptr) {
@@ -929,6 +975,12 @@ inline std::vector<std::string> validate_engine_param_combination(
               model_identity != "qwen3.8-27b-orcarouter") ||
              (*spec_backend == "dflash" && model_identity != "qwen3.6-35b-a3b"))) {
             errors.emplace_back("Selected speculative backend is not supported by this model");
+        }
+        // The draft keeps its own RoPE, which YaRN does not stretch.
+        if ((*spec_backend == "dflash" || *spec_backend == "dflash2") && limits.draft != 0 &&
+            static_cast<std::uint64_t>(context) > limits.draft) {
+            errors.push_back("DFlash drafts reach only " + std::to_string(limits.draft) +
+                             " tokens; use MTP or no speculation for a longer max context");
         }
     }
     return errors;

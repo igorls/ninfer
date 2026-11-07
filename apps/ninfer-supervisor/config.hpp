@@ -57,23 +57,51 @@ struct ModelEntry {
 inline constexpr char kNinferV3Magic[8] = {'N', 'I', 'N', 'F', 'E', 'R', '\0', '\3'};
 inline constexpr char kNinferV2Magic[8] = {'N', 'I', 'N', 'F', 'E', 'R', '\0', '\2'};
 
-// The artifact's public model name (`metadata.name`), or empty when it has none or is not v3.
-inline std::string artifact_model_identity(const std::string& path) {
+// The v3 artifact's JSON directory, or null when the file is not a readable v3 artifact.
+inline nlohmann::json artifact_directory(const std::string& path) {
     try {
         std::ifstream in(std::filesystem::path(path), std::ios::binary);
         unsigned char header[32]{};
         in.read(reinterpret_cast<char*>(header), sizeof(header));
-        if (!in || std::memcmp(header, kNinferV3Magic, 8) != 0) { return {}; }
+        if (!in || std::memcmp(header, kNinferV3Magic, 8) != 0) { return nullptr; }
         std::uint64_t size = 0;
         for (unsigned i = 0; i < 8; ++i) { size |= std::uint64_t(header[8 + i]) << (8 * i); }
-        if (size == 0 || size > 64 * 1024 * 1024) { return {}; }
+        if (size == 0 || size > 64 * 1024 * 1024) { return nullptr; }
         std::string directory(static_cast<std::size_t>(size), '\0');
         in.read(directory.data(), static_cast<std::streamsize>(size));
-        if (!in) { return {}; }
-        const auto json = nlohmann::json::parse(directory);
-        if (!json.contains("metadata") || !json.at("metadata").is_object()) { return {}; }
+        if (!in) { return nullptr; }
+        auto json = nlohmann::json::parse(directory);
+        return json.is_object() ? json : nlohmann::json(nullptr);
+    } catch (const std::exception&) { return nullptr; }
+}
+
+// The artifact's public model name (`metadata.name`), or empty when it has none or is not v3.
+inline std::string artifact_model_identity(const std::string& path) {
+    const auto json = artifact_directory(path);
+    if (!json.is_object() || !json.contains("metadata") || !json.at("metadata").is_object()) {
+        return {};
+    }
+    try {
         return json.at("metadata").value("name", std::string{});
     } catch (const std::exception&) { return {}; }
+}
+
+// The Text and masked-draft position capacities the artifact's component configs declare
+// (`max_position_embeddings`), which the Engine enforces and YaRN extends for Text only.
+inline ArtifactPositionLimits artifact_position_limits(const std::string& path) {
+    ArtifactPositionLimits out;
+    const auto json = artifact_directory(path);
+    const auto positions = [&](const char* component) -> std::uint32_t {
+        try {
+            const auto& config = json.at("components").at(component).at("config");
+            const auto value   = config.at("max_position_embeddings").get<std::uint64_t>();
+            return value <= 0xffffffffULL ? static_cast<std::uint32_t>(value) : 0;
+        } catch (const std::exception&) { return 0; }
+    };
+    if (!json.is_object()) return out;
+    out.text  = positions("text");
+    out.draft = std::max(positions("dflash2"), positions("dflash"));
+    return out;
 }
 
 // What a model's artifact looks like on disk right now. Availability is checked

@@ -552,6 +552,9 @@ std::string format_server_start_json(const std::string& server_instance_id, std:
     record["engine"]                               = Json{
                                       {"device", engine_options.device},
                                       {"max_context", engine_options.max_context},
+                                      {"native_context", load.native_context},
+                                      {"position_capacity", load.position_capacity},
+                                      {"yarn_factor", engine_options.yarn_factor ? Json(*engine_options.yarn_factor) : Json(nullptr)},
                                       {"context_capacity_mode", context_capacity_mode_name(engine_options.context_capacity.mode)},
                                       {"context_pools", product::context_capacity_json(description.context_pools)},
                                       {"context_token_capacity_estimate", description.context_token_capacity_estimate},

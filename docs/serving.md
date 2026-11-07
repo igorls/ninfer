@@ -26,6 +26,10 @@ See [CUDA synchronization](cli.md#cuda-synchronization) for the shared `NINFER_C
 ```
 
 The command uses Qwen3.8-27B NVFP4. Each request has a 240,000-token logical ceiling.
+Contexts beyond the native 262,144 positions need `--yarn-factor`; see
+[the CLI guide](cli.md) for its limits and costs. `GET /monitor/info` reports `native_context`,
+`position_capacity` and `yarn_factor` with the model, and the request log's `server_start`
+record carries the same fields under `engine`.
 State and all enabled KV histories share the Device Context byte capacity resolved at startup.
 Requests allocate records as execution advances; if concurrent growth exhausts the pool, the
 scheduler can pause a request and restore it later.

@@ -126,7 +126,8 @@ HTTP(S)、data URI、绝对路径保持原含义；显式 `--media-root` 的工�
 | `model.chat_template` | `--chat-template` | 路径 / `""` | 非空覆盖 artifact 模板；空值恢复 artifact 模板 |
 | `model.vision` | `--vision` / `--no-vision` | bool / false | 启动固定 Vision 权重和执行资源；HTTP 请求不能补开 |
 | `engine.device` | `--device` | 非负 int / 0 | 当前单 rank 的本地 CUDA ordinal |
-| `engine.max_context` | `--max-context` | 正 uint32 / 8192 | 单请求逻辑 context 上限，包含已处理输入和后续生成 |
+| `engine.max_context` | `--max-context` | 正 uint32 / 8192 | 单请求逻辑 context 上限，包含已处理输入和后续生成；不得超过模型的位置容量 |
+| `engine.yarn_factor` | `--yarn-factor` | (1,4] 实数或 `none` / `none` | 启动时选择的静态 YaRN RoPE 缩放，不写入 artifact。位置容量变为 floor(F × 原生 `max_position_embeddings`)，例如 Qwen3.8-27B 取 4 时为 1,048,576。对所有请求生效，短文本质量可能下降；只有 Qwen3.5 系列 Text RoPE 支持，MTP 随之缩放，DFlash/DFlash2 draft 仍受自身位置容量限制。见[模型数学](maintainer/qwen3_5-model.md#static-yarn-extension) |
 | `engine.kv_dtype` | `--kv-dtype` | 枚举 / `bf16` | `bf16/int8/fp8/nvfp4/k8v4`，实际表示支持由消费者判断 |
 | `engine.context_capacity` | `--context-capacity` | 字节容量或 `auto` / `auto` | 每 rank Device Context 总容量，State 与各 KV history 共用；资源准备验证完整工作集与预算 |
 | `engine.prefill_chunk` | `--prefill-chunk` | 128 的正整数倍或 `default` / `default` | default 为 Qwen4Exp/CPU expert offload 4096，其余 1024；实际窗口还受 context 限制；不接受 `auto` 或 0 |

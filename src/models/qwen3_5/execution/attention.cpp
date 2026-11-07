@@ -17,6 +17,15 @@ void require_rope_axes(const Tensor& positions, const RopeConfig& config) {
     }
 }
 
+ops::RopeYarn yarn_parameters(const YarnConfig& yarn) {
+    return {.factor                           = yarn.factor,
+            .original_max_position_embeddings =
+                static_cast<std::int32_t>(yarn.original_max_position_embeddings),
+            .beta_fast        = 32.0F,
+            .beta_slow        = 1.0F,
+            .attention_factor = yarn.attention_factor};
+}
+
 } // namespace
 
 std::size_t attention_projection_workspace_bytes(const AttentionProfile& parameters,
@@ -34,13 +43,22 @@ void attention_projection(const Tensor& hidden, const AttentionParameters& param
 void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query,
                CudaExecutionView execution) {
     require_rope_axes(positions, config);
-    ops::rope(positions, dimension(config.rotary_dim), config.rope_theta, query, execution);
+    if (config.yarn)
+        ops::rope(positions, dimension(config.rotary_dim), config.rope_theta,
+                  yarn_parameters(*config.yarn), query, execution);
+    else
+        ops::rope(positions, dimension(config.rotary_dim), config.rope_theta, query, execution);
 }
 
 void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query, Tensor& key,
                CudaExecutionView execution) {
     require_rope_axes(positions, config);
-    ops::rope(positions, dimension(config.rotary_dim), config.rope_theta, query, key, execution);
+    if (config.yarn)
+        ops::rope(positions, dimension(config.rotary_dim), config.rope_theta,
+                  yarn_parameters(*config.yarn), query, key, execution);
+    else
+        ops::rope(positions, dimension(config.rotary_dim), config.rope_theta, query, key,
+                  execution);
 }
 
 } // namespace ninfer::models::qwen3_5::execution

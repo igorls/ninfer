@@ -166,6 +166,7 @@ std::uint64_t GdnConfig::conv_channels() const {
 
 Config parse_config(const artifact::Directory& directory, const LoadOptions& options) {
     if (options.masked_draft()) throw ArtifactError("Qwen4Exp supports native MTP");
+    if (options.yarn_factor) throw ArtifactError("Qwen4Exp has no YaRN RoPE scaling");
     Config out{text_config(directory.component("text").config), {}, options.mtp()};
     if (options.vision) out.vision = vision_config(companion(directory, "vision"), out.text.hidden);
     if (out.mtp) {

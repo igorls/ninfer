@@ -3,7 +3,34 @@
 #include "core/device.h"
 #include "core/tensor.h"
 
+#include <cstdint>
+
 namespace ninfer::ops {
+
+/**
+ * YaRN frequency scaling (NTK-by-parts interpolation with attention-magnitude correction) for the
+ * Text RoPE forms below. With R = rotary_dim, base frequency w_i = theta^(-2i/R) for pair
+ * i in [0,R/2), and correction dimension c(r) = R*ln(L/(2*pi*r)) / (2*ln(theta)):
+ *
+ *   lo  = max(floor(c(beta_fast)), 0),   hi = min(ceil(c(beta_slow)), R-1)
+ *   g_i = clamp((i - lo) / span, 0, 1),  span = hi - lo, or 0.001 when hi = lo
+ *   w'_i = (1 - g_i) * w_i + g_i * w_i / factor
+ *
+ * phi(i,t) = position * w'_i replaces the unscaled angle and both rotated outputs of every pair
+ * are multiplied by attention_factor m:
+ *
+ *   y[i] = m*(x[i]*cos(phi) - x[i+R/2]*sin(phi)),  y[i+R/2] = m*(x[i+R/2]*cos(phi) + x[i]*sin(phi))
+ *
+ * L is the position count the unscaled frequencies were trained for. factor and attention_factor
+ * are positive and finite, factor > 1, L > 0, and 0 < beta_slow < beta_fast.
+ */
+struct RopeYarn {
+    float factor                                  = 1;
+    std::int32_t original_max_position_embeddings = 0;
+    float beta_fast                               = 32;
+    float beta_slow                               = 1;
+    float attention_factor                        = 1;
+};
 
 /**
  * Applies split-half NeoX RoPE in place. For pair i in [0,rotary_dim/2), angle phi(i,t), and
@@ -35,6 +62,16 @@ void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& q, Tenso
 // Single-tensor form with the same formula and storage contract. The head count comes directly
 // from x; Q versus K role does not change the transformation.
 void rope(const Tensor& positions, int rotary_dim, float theta, Tensor& x,
+          CudaExecutionView execution);
+
+// YaRN forms: Text 1-D (positions I32 [T]) or Text MRoPE (I32 [T,3], pair i uses axis i%3) with
+// head_dim=256 and rotary_dim=64, the angle and magnitude defined by RopeYarn, and otherwise the
+// storage, alias, padding and resource contract of the forms above. Angles are accurate for every
+// I32 position; other geometries are rejected.
+void rope(const Tensor& positions, int rotary_dim, float theta, const RopeYarn& yarn, Tensor& q,
+          Tensor& k, CudaExecutionView execution);
+
+void rope(const Tensor& positions, int rotary_dim, float theta, const RopeYarn& yarn, Tensor& x,
           CudaExecutionView execution);
 
 } // namespace ninfer::ops

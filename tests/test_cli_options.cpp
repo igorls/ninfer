@@ -7,6 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -387,6 +388,31 @@ device = 0
     }
 }
 
+// YaRN is opt-in, accepts (1,4], and `none` clears a factor inherited from a file.
+void test_yarn_factor(const Files& files) {
+    require(!parse({"ninfer", "model.ninfer", "--prompt", "x"}).launch.engine.yarn_factor,
+            "YaRN is enabled by default");
+    for (const auto& [text, factor] :
+         std::vector<std::pair<std::string, float>>{{"2", 2.0F}, {"4", 4.0F}, {"1.5", 1.5F}}) {
+        const auto parsed = serve({"ninfer-serve", "model.ninfer", "--yarn-factor", text});
+        require(parsed.launch.engine.yarn_factor == factor, "YaRN factor was not applied");
+    }
+    for (const auto* text : {"1", "0.5", "4.01", "nan", "inf", "-2", "yarn", ""}) {
+        rejection([&] { serve({"ninfer-serve", "model.ninfer", "--yarn-factor", text}); });
+    }
+    const auto path = files.write("model.path = 'model.ninfer'\n[engine]\nyarn_factor = 4\n");
+    require(serve({"ninfer-serve", "--config", path.string()}).launch.engine.yarn_factor == 4.0F,
+            "configuration file YaRN factor was ignored");
+    const auto cleared =
+        serve({"ninfer-serve", "--config", path.string(), "--yarn-factor", "none"});
+    require(!cleared.launch.engine.yarn_factor, "none did not clear an inherited YaRN factor");
+    const auto rendered =
+        ninfer::product::format_configuration(ninfer::product::configuration_view(
+            serve({"ninfer-serve", "model.ninfer", "--yarn-factor", "2"})));
+    require(rendered.find("yarn_factor") != std::string::npos,
+            "configuration display omits the YaRN factor");
+}
+
 void test_context_display() {
     ninfer::EngineDescription description;
     description.ranks.resize(2);
@@ -414,6 +440,7 @@ int main() {
         test_file_merge(files);
         test_file_errors_and_example(files);
         test_deployment(files);
+        test_yarn_factor(files);
         test_context_display();
         std::cout << "ok\n";
         return 0;

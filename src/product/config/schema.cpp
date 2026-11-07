@@ -28,6 +28,10 @@ constexpr FieldSpec kFields[] = {
      Scope::Common},
     {Field::MaxContext, "engine.max_context", "--max-context", "", "N",
      "Per-request context limit (8192; perplexity defaults to its scoring window).", Scope::Common},
+    {Field::YarnFactor, "engine.yarn_factor", "--yarn-factor", "", "F|none",
+     "Static YaRN RoPE factor (1,4]: raises the position limit to F x native, at a possible "
+     "cost on short prompts; none keeps native RoPE.",
+     Scope::Common},
     {Field::KvDtype, "engine.kv_dtype", "--kv-dtype", "", "bf16|int8|fp8|nvfp4|k8v4",
      "KV representation.", Scope::Common},
     {Field::ContextCapacity, "engine.context_capacity", "--context-capacity", "", "SIZE|auto",
@@ -336,6 +340,7 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
         if (is("model")) return DefaultValue{};
         break;
     case Field::ThinkingBudget:
+    case Field::YarnFactor:
         if (is("none")) return DefaultValue{};
         break;
     default:
@@ -401,6 +406,11 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
         return std::uint64_t{parse_duration_ms(value, false)};
     case Field::Temperature:
         return real(value, command_line, 0, 2);
+    case Field::YarnFactor: {
+        const auto factor = real(value, command_line, 1, kMaximumYarnFactor);
+        if (!(static_cast<float>(factor) > 1.0F)) invalid("YaRN factor must exceed 1 in FP32");
+        return factor;
+    }
     case Field::TopP:
     case Field::MinP:
         return real(value, command_line, 0, 1);
