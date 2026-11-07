@@ -220,9 +220,9 @@ int main(int argc, char** argv) {
             std::cerr << "ninfer-supervisor: already running for " << config_abs << "\n";
             ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             MessageBoxW(nullptr,
-                        L"NInfer supervisor is already running for this configuration.\n"
+                        L"NInfer Workstation is already running for this configuration.\n"
                         L"Its dashboard has been opened instead.",
-                        L"NInfer", MB_OK | MB_ICONINFORMATION);
+                        L"NInfer Workstation", MB_OK | MB_ICONINFORMATION);
             CloseHandle(instance_mutex);
             return 3;
         }
