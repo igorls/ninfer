@@ -70,7 +70,7 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_we
     Tensor x(device_activation.span(), DType::BF16, {kHidden, tokens});
     Tensor output   = qkv.tensor();
     Tensor z_output = z.tensor();
-    ops::linear_split(x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()},
+    ops::linear_split(x, ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}},
                       std::array{output, z_output}, projection_workspace,
                       ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
@@ -116,7 +116,7 @@ int run_q4_q5_graph_case(DevicePackedWeight& query_key, DevicePackedWeight& valu
     Tensor output     = qkv.tensor();
     Tensor z_output   = z.tensor();
     const auto launch = [&](CudaExecutionView cuda) {
-        ops::linear_split(x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()},
+        ops::linear_split(x, ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}},
                           std::array{output, z_output}, projection_workspace, cuda);
     };
     launch(stream_execution);
@@ -398,8 +398,8 @@ int run_nvfp4() {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kRows   = 16384;
     quantized_weight::PatternedWeightOptions options;
-    options.weight_scale_divisor = 0.125F;
-    options.input_scale_divisor  = 3.5F;
+    options.weight_scale = 0.125F;
+    options.input_scale  = 3.5F;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::NVFP4, kRows, kHidden, 607U, options));
     int failures = 0;

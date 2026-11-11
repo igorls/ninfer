@@ -1,6 +1,6 @@
 # Upstream ports
 
-Updated: November 5, 2026.
+Updated: November 11, 2026.
 
 This is the living record of how this workstation fork ([igorls/ninfer](https://github.com/igorls/ninfer))
 tracks [Neroued/ninfer](https://github.com/Neroued/ninfer): the reviewed upstream point, the fork
@@ -20,11 +20,84 @@ both Blackwell targets, resident execution and the fork's product contracts gove
 those decisions. A source merge, hardware qualification and release acceptance are
 separate states.
 
-### Active release integration after the config qualification snapshot
+### Candidate sync through `77c2e5e2` (November 10, 2026)
 
-The sole active deliverable is the upstream sync and a stable `workstation`
-release. Qwen4 preparation and other product work are parked. Worktree removal
-follows release acceptance, retaining unique source work and required evidence.
+This candidate starts at fork `f6443b0ef` and reviews all 63 upstream commits in
+`a754fcf3..77c2e5e2` on `sync/upstream-77c2e5e2`. Source integration is committed
+on the sync branch; it is not merged into `workstation` or released. Qualification
+is limited to the checks recorded below. The October/November release integration
+notes below remain historical evidence for their named revisions.
+
+| Incoming work | Candidate disposition |
+|---|---|
+| `d49b9af76`, `7fdc0eca5`: native FP4-Local storage and Ops | Carry shared representation/materialization support for multiplier NVFP4, CSF32 compressed scales, MXFP8 and FP32 block scales. Retain the fork's FP32-row FP8, U4Z8 PLE and INT64 representations. Native activation calibration carries the actual multiply/divide operation and per-expert operands. |
+| `98d52545f..f083cbf83`: MoE streaming, product normalization and shared FFN tuning | Carry the incoming implementations, including `454c5e7a6`'s tiny-input correction. Spark-specific schedules remain target-gated. |
+| `68ffe5107..611e31907`: Linear projection, split and SwiGLU schedules | Carry the incoming kernels and shape policies while retaining the fork's FP32-row split registrations, KV-first Flash segmentation and independent qualification criteria. |
+| `a5fb8f472..361dbbd19`: shared FFN, KDA, KPool, mHC, embedding and RMSNorm | Carry shared/target-selected implementations; source presence does not qualify Spark or GLM5Next. |
+| `62674baee`: formatting | Carry with the affected upstream sources. |
+| `77c2e5e27`: recovery and shutdown | Adopt zero-frontier direct resume, recovery ownership until the next commit, restoration/progress observations and Engine stop before HTTP worker joins. Retain nonblocking fork snapshots and cancel preparation on the fork's prompt-description route as well as generation and token counting. Windows handles Ctrl+Break through the same control thread as Ctrl+C/SIGTERM. |
+
+The 53 conflicted paths comprise 29 content conflicts, 22 modify/delete conflicts
+and two file-location conflicts. The existing deferral of upstream's consolidated
+Op-test topology continues: retain the fork's independently owned fixtures and
+port relevant behavior, rather than resurrecting removed suites or relaxing their
+criteria. Add the incoming exact native-format codec oracle, with MSVC compile
+options and explicit OpSuite linkage, alongside those suites. Retain Supervisor
+checks and add the live-client shutdown test, using a hidden dedicated console
+and Ctrl+Break on Windows instead of Python's forceful SIGTERM implementation.
+GLM5Next recipe activation and its model-specific conversion fixture remain
+outside the fork product; shared native-format converter tests are retained.
+Distributed execution stays disabled by default. No new artifact is downloaded
+or regenerated for this candidate.
+
+Initial verification on Windows, Python 3.11.15 with CPU Torch: the
+artifact/converter suites pass 113 tests and eight subtests, with 16 CUDA-only
+cases skipped. Five initial failures were stale activation-scale and matrix-scale
+field names in retained fork callers; these are updated without changing the
+criteria. The TTFT suite has 84 passes and five HTTP-cancellation failures. All
+five failures reproduce in the same environment on an exported `f6443b0ef`
+baseline (four other cancellation cases pass); the transport implementation and
+that fixture are unchanged by this sync. This existing Windows benchmark-client
+limitation is retained, not attributed to the new Engine shutdown path.
+
+Native Windows Release builds applications, tests and benchmarks with MSVC
+19.51 and CUDA 13.3.33 (`sm_120a`); the existing CRT link warning remains.
+Initial build failures exposed stale projection and calibration calls in the
+retained fixtures and in Flash-Next's split PLE projection. The latter now
+uses each prepared parent's policy, as workspace planning does. The fixture
+updates keep their original represented operands and criteria.
+
+- On the RTX PRO 6000 Blackwell Workstation Edition (driver 621.14), all 51
+  focused CTests pass. They cover artifact materialization and Python interop,
+  the exact native-format codecs, affected BF16/FP8/NVFP4 projection and split
+  routes, GDN snapshot/record, KDA, MoE, RMSNorm, embedding, PLE Host preparation,
+  serving schemas, telemetry, context scheduling and Supervisor. Both upstream
+  dashboard request tests, TypeScript checks and the production web build pass.
+- Seven real Qwen3.8-27B NVFP4 checks pass: native transactions and four pressure
+  scenarios (replay, snapshot, cancel while paused and cancel during replay) for
+  each of ordinary decoding, MTP and DFlash2, plus the eager HTTP shutdown test.
+  A connected non-streaming request received HTTP 503 and Ctrl+Break drained the
+  candidate process in 0.438 s. The Windows fixture needed a dedicated console
+  broadcast with its sender protected; a process-group signal alone did not
+  deliver the event when a new console was created.
+- Flash-Next's real-artifact binding and resource plan pass for Text, Vision,
+  MTP and scoring selections. The generation plans require 70–72 GiB of
+  resident weights before runtime allocations. Resident Flash-Next inference
+  cannot be exercised alongside the live desktop workload with its reserve.
+
+The [paired performance check](../performance.md#windows-upstream-sync-77c2e5e2-2026-11-10)
+uses `f6443b0ef` and matched single-lane 27B workloads. Median prefill is 1.5%
+faster for the short ordinary request and 0.9% slower for the 4,002-token MTP
+request. Ordinary median decode is 0.2% slower; median MTP decode and draft
+acceptance match. The allocation reports match at displayed precision; minimum
+reported free memory after startup is 17.8 GiB. This limited comparison does
+not qualify Linux, physical RTX 5090, resident Flash-Next or Spark execution.
+
+### Prior release integration after the config qualification snapshot
+
+At this stage the deliverable was the upstream sync and a stable `workstation`
+release. Qwen4 preparation and other product work were parked. Worktree removal
+followed release acceptance, retaining unique source work and required evidence.
 
 The candidate integration from `4126ecf4` through `7131c0b9` is source work, not an
 accepted `workstation` merge or hardware-qualified release. It carries unified Engine

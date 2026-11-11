@@ -125,3 +125,5 @@ target_link_libraries(ninfer_kv_cache_append_test PRIVATE ninfer_op_suite)
 
 target_link_libraries(ninfer_qsa_sparse_gqa_test PRIVATE ninfer_op_suite)
 target_link_libraries(ninfer_sliding_window_attention_test PRIVATE ninfer_op_suite)
+
+include("${CMAKE_CURRENT_LIST_DIR}/quant/tests.cmake")

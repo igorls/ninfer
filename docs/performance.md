@@ -1747,3 +1747,40 @@ behavior were not measured.
 
 All three items were accepted for this merge with these findings on record. That covers
 the source integration only; it is not release acceptance or RTX 5090 qualification.
+
+
+## Windows upstream sync `77c2e5e2` (2026-11-10)
+
+Windows 11, MSVC 19.51, CUDA 13.3.33, RTX PRO 6000 Blackwell Workstation
+Edition (driver 621.14). Compare the uncommitted upstream candidate against the
+existing Windows build with the same product sources and build configuration as
+`f6443b0ef` (the YaRN feature revision `4fc972a0`). Both arms use the same
+Qwen3.8-27B NVFP4 artifact, FP8 KV, CUDA Graphs, one lane, 8,192 maximum context,
+2 GiB Device Context, no Host context backing, 2,048-token prefill chunk, and
+8 GiB desktop reserve. Greedy output with thinking disabled reaches the
+256-token limit in every sample. No prompt tokens were reused.
+
+Each row is three fresh CLI invocations per arm, in order baseline, candidate,
+candidate, baseline, baseline, candidate. Prefill and decode are the CLI's
+reported generation metrics, excluding weight loading. The other desktop
+workload remained active and GPU clocks were not fixed. Values are median
+[min–max]; changes compare medians.
+
+| Workload and metric | Baseline | Candidate | Change |
+|---|---:|---:|---:|
+| 42-token prompt, ordinary, prefill (ms) | 39.2 [38.8–39.3] | 38.6 [38.5–39.4] | −1.5% |
+| 42-token prompt, ordinary, decode (tok/s) | 65.7 [65.7–65.9] | 65.6 [65.4–65.6] | −0.2% |
+| 4,002-token prompt, optimized-head MTP3, prefill (ms) | 316 [316–318] | 319 [317–321] | +0.9% |
+| 4,002-token prompt, optimized-head MTP3, decode (tok/s) | 224.4 [221.7–228.6] | 224.4 [220.0–225.3] | 0.0% |
+
+Both arms report 21.5 GiB GPU and 1.02 MiB Host allocations for ordinary
+inference, and 22.3 GiB GPU and 1.11 MiB Host allocations for MTP. At displayed
+precision, free memory after startup is 18.7 GiB for ordinary, 17.8–17.9 GiB
+for baseline MTP and 17.9 GiB for candidate MTP. Every MTP run drafts 194 tokens
+and accepts 190. This does not assert bitwise identity of generated output.
+
+The candidate's long-prompt median prefill is 3 ms slower, and its slowest
+MTP decode sample is 220.0 tok/s versus 221.7 tok/s for the slowest baseline
+sample. The ordinary decode samples are also slightly slower. This small
+shared-machine comparison does not isolate causes, establish a speed gain, or
+qualify other concurrency levels, artifacts, GPUs or offload routes.

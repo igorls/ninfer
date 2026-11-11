@@ -183,10 +183,14 @@ public:
 
     void warmup();
 
+    void request_stop() noexcept { engine_->request_stop(); }
+
 private:
     [[nodiscard]] ninfer::PromptInput acquire_prompt_input(
         const GenerationRequest& req, std::chrono::steady_clock::time_point deadline,
         const std::function<bool()>& is_cancelled) const;
+    [[nodiscard]] std::function<bool()>
+    preparation_cancellation(std::function<bool()> external) const;
 
     enum class CacheParticipation : std::uint8_t {
         Disabled,

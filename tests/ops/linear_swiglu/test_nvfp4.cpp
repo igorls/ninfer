@@ -13,11 +13,11 @@ int check_negative_gate() {
     namespace qw       = test::quantized_weight;
     constexpr int rows = 34816, k = 5120, half = rows / 2;
     auto packed = qw::make_patterned_weight(
-        QType::NVFP4, rows, k, 1837U, {.weight_scale_divisor = 1.0f, .input_scale_divisor = 6.0f});
+        QType::NVFP4, rows, k, 1837U, {.weight_scale = 1.0f, .input_scale = 6.0f});
     std::fill(packed.payload.begin(), packed.payload.end(), 0);
     // Preserve the scalar metadata, while constructing the two independently scaled groups.
     const float divisor = 1.0f;
-    std::memcpy(packed.payload.data() + packed.weight_divisor_offset, &divisor, 4);
+    std::memcpy(packed.payload.data() + packed.matrix_scale_offset, &divisor, 4);
     const auto scale_offset = [&](int row, int group) {
         return packed.scale_plane_offset +
                static_cast<std::size_t>((row / 128) * (k / 64) + group / 4) * 512 +

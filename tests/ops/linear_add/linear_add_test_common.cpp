@@ -175,8 +175,8 @@ HostWeight make_weight(WeightFormat format, const InvocationCase& shape) {
     }
     quantized_weight::PatternedWeightOptions options;
     if (format == WeightFormat::NVFP4) {
-        options.weight_scale_divisor = 0.125F;
-        options.input_scale_divisor  = 3.5F;
+        options.weight_scale = 0.125F;
+        options.input_scale  = 3.5F;
     } else if (format != WeightFormat::FP8) {
         options.row_split_scale =
             (format == WeightFormat::Q4G64F16S || format == WeightFormat::Q5G64F16S)

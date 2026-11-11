@@ -1608,6 +1608,11 @@ request bodies, credentials, or arbitrary client error messages.
 If a tool marker is returned to text because its structure or tool identity cannot be represented,
 Serve emits one warning with only the failure classification, never the generated markup.
 
+Shutdown accepts SIGINT/SIGTERM on Linux and Ctrl+C/Ctrl+Break on Windows.
+The control thread stops the Engine before joining HTTP workers. A pending
+non-streaming generation can return HTTP 503 while its client stays connected.
+Preparation, prompt counting and prompt description also observe Engine shutdown.
+
 ## Live metrics
 
 `GET /metrics` serves Prometheus text format 0.0.4 on the same port. It follows the server's

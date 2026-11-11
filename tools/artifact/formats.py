@@ -34,6 +34,15 @@ class Nvfp4Format:
 
     name: str
     group_size: int
+    scalar_operation: str = "divide"
+
+
+@dataclass(frozen=True, slots=True)
+class Mxfp8Format:
+    """E4M3FN weights with a UE8M0 multiplier for each K32 group."""
+
+    name: str
+    group_size: int = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,11 +63,16 @@ class U4Z8Format:
 
 @dataclass(frozen=True, slots=True)
 class Fp8BlockFormat:
-    """E4M3FN weights with one BF16 multiplier per 128-by-128 block."""
+    """E4M3FN weights with one stored multiplier per rectangular block."""
 
     name: str
     block_rows: int = 128
     block_columns: int = 128
+    scale_format: str = "bf16"
+
+    @property
+    def scale_bytes(self) -> int:
+        return 2 if self.scale_format == "bf16" else 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,7 +84,14 @@ class Nf4Format:
 
 
 NumericFormat: TypeAlias = (
-    DirectFormat | QuantFormat | Nvfp4Format | Fp8RowFormat | U4Z8Format | Fp8BlockFormat | Nf4Format
+    DirectFormat
+    | QuantFormat
+    | Nvfp4Format
+    | Mxfp8Format
+    | Fp8RowFormat
+    | U4Z8Format
+    | Fp8BlockFormat
+    | Nf4Format
 )
 
 
@@ -87,7 +108,12 @@ NVFP4 = Nvfp4Format("nvfp4", 16)
 FP8_E4M3FN_ROW_BF16 = Fp8RowFormat("fp8_e4m3fn_row_bf16", 2)
 FP8_E4M3FN_ROW_FP32 = Fp8RowFormat("fp8_e4m3fn_row_fp32", 4)
 U4Z8_G16_FP16 = U4Z8Format("u4z8_g16_fp16", 16)
+NVFP4_MUL = Nvfp4Format("nvfp4_mul", 16, "multiply")
+MXFP8 = Mxfp8Format("mxfp8")
 FP8_E4M3FN_BLOCK128X128_BF16 = Fp8BlockFormat("fp8_e4m3fn_block128x128_bf16")
+FP8_E4M3FN_BLOCK128X128_FP32 = Fp8BlockFormat(
+    "fp8_e4m3fn_block128x128_fp32", scale_format="fp32"
+)
 NF4_G16_E4M3FN = Nf4Format("nf4_g16_e4m3fn")
 NF4_CODEBOOK_WORDS = (
     0xBF800000,
@@ -118,13 +144,17 @@ DIRECT_FORMATS = MappingProxyType(
 QUANT_FORMATS = MappingProxyType(
     {item.name: item for item in (Q4_G64_FP16, Q5_G64_FP16, Q6_G64_FP16, Q8_G32_FP16)}
 )
-NVFP4_FORMATS = MappingProxyType({NVFP4.name: NVFP4})
+NVFP4_FORMATS = MappingProxyType({item.name: item for item in (NVFP4, NVFP4_MUL)})
 FP8_ROW_FORMATS = MappingProxyType(
     {item.name: item for item in (FP8_E4M3FN_ROW_BF16, FP8_E4M3FN_ROW_FP32)}
 )
 U4Z8_FORMATS = MappingProxyType({U4Z8_G16_FP16.name: U4Z8_G16_FP16})
+MXFP8_FORMATS = MappingProxyType({MXFP8.name: MXFP8})
 FP8_BLOCK_FORMATS = MappingProxyType(
-    {FP8_E4M3FN_BLOCK128X128_BF16.name: FP8_E4M3FN_BLOCK128X128_BF16}
+    {
+        item.name: item
+        for item in (FP8_E4M3FN_BLOCK128X128_BF16, FP8_E4M3FN_BLOCK128X128_FP32)
+    }
 )
 NF4_FORMATS = MappingProxyType({NF4_G16_E4M3FN.name: NF4_G16_E4M3FN})
 NUMERIC_FORMATS = MappingProxyType(
@@ -132,6 +162,7 @@ NUMERIC_FORMATS = MappingProxyType(
         **DIRECT_FORMATS,
         **QUANT_FORMATS,
         **NVFP4_FORMATS,
+        **MXFP8_FORMATS,
         **FP8_ROW_FORMATS,
         **U4Z8_FORMATS,
         **FP8_BLOCK_FORMATS,
@@ -234,10 +265,13 @@ __all__ = [
     "Q6_G64_FP16",
     "Q8_G32_FP16",
     "NVFP4",
+    "NVFP4_MUL",
+    "MXFP8",
     "FP8_E4M3FN_ROW_BF16",
     "FP8_E4M3FN_ROW_FP32",
     "U4Z8_G16_FP16",
     "FP8_E4M3FN_BLOCK128X128_BF16",
+    "FP8_E4M3FN_BLOCK128X128_FP32",
     "NF4_G16_E4M3FN",
     "NF4_CODEBOOK_WORDS",
     "NF4_CODEBOOK",
@@ -246,6 +280,7 @@ __all__ = [
     "DIRECT_FORMATS",
     "QUANT_FORMATS",
     "NVFP4_FORMATS",
+    "MXFP8_FORMATS",
     "FP8_ROW_FORMATS",
     "U4Z8_FORMATS",
     "FP8_BLOCK_FORMATS",
@@ -253,6 +288,7 @@ __all__ = [
     "DirectFormat",
     "QuantFormat",
     "Nvfp4Format",
+    "Mxfp8Format",
     "Fp8RowFormat",
     "U4Z8Format",
     "Fp8BlockFormat",

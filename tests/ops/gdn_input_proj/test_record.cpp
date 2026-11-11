@@ -299,9 +299,9 @@ int run_q4_q5() {
                          std::uint32_t seed) {
         const std::size_t snapshot_bytes =
             ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-                ops::PairedProjectionWeights{qk.view(), value_z.view()}, batch, width, width);
+                ops::PairedProjectionWeights{{qk.view()}, {value_z.view()}}, batch, width, width);
         const std::size_t record_bytes = ops::gdn_input_proj_conv_record_workspace_capacity_bytes(
-            ops::PairedProjectionWeights{qk.view(), value_z.view()}, batch, width, width);
+            ops::PairedProjectionWeights{{qk.view()}, {value_z.view()}}, batch, width, width);
         return run_case(
             "Q4/Q5 B=" + std::to_string(batch) + " T=" + std::to_string(width), kHidden, kValueRows,
             kZRows, width, batch, std::move(valid), snapshot_bytes, record_bytes,
@@ -309,14 +309,14 @@ int run_q4_q5() {
                 const Tensor& valid_columns, const Tensor& snapshot_base, Tensor& q, Tensor& k,
                 Tensor& v, Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
                 ops::gdn_input_proj_conv_snapshot(
-                    x, ops::PairedProjectionWeights{qk.view(), value_z.view()}, conv,
+                    x, ops::PairedProjectionWeights{{qk.view()}, {value_z.view()}}, conv,
                     {source, state, snapshot_base}, valid_columns, {q, k, v, z}, workspace, cuda);
             },
             [&](const Tensor& x, const Tensor& conv, StateFieldView state,
                 const Tensor& valid_columns, Tensor& record, Tensor& q, Tensor& k, Tensor& v,
                 Tensor& z, MemoryArena& workspace, CudaExecutionView cuda) {
                 ops::gdn_input_proj_conv_record(
-                    x, ops::PairedProjectionWeights{qk.view(), value_z.view()}, conv, state,
+                    x, ops::PairedProjectionWeights{{qk.view()}, {value_z.view()}}, conv, state,
                     valid_columns, {q, k, v, z}, record, workspace, cuda);
             },
             seed);
@@ -399,8 +399,8 @@ int run_nvfp4() {
     constexpr std::int32_t kZRows     = 6144;
     constexpr std::int32_t kRows      = 16384;
     quantized_weight::PatternedWeightOptions options;
-    options.weight_scale_divisor = 0.125F;
-    options.input_scale_divisor  = 3.5F;
+    options.weight_scale = 0.125F;
+    options.input_scale  = 3.5F;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::NVFP4, kRows, kHidden, 1601U, options));
 

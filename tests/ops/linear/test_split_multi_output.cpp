@@ -71,7 +71,7 @@ WeightParent physical_parent(const DevicePackedWeight& source) {
                            static_cast<std::uint64_t>(weight.k)};
     auto geometry       = weight_geometry(weight.qtype, weight.layout, shape);
     const auto divisors = weight.qtype == QType::NVFP4
-                              ? std::span(&source.host.weight.weight_scale_divisor, 1)
+                              ? std::span(&source.host.weight.weight_scale, 1)
                               : std::span<const float>{};
     return {std::move(geometry), weight.device, static_cast<const std::byte*>(weight.payload),
             divisors};
@@ -389,10 +389,15 @@ int run_nvfp4_target_case(DevicePackedWeight& parent, std::int32_t tokens,
     const auto physical = physical_parent(parent);
     const auto qw = rows(physical, 0, 6144), kw = rows(physical, 6144, 1024);
     const auto gw = rows(physical, 7168, 6144), vw = rows(physical, 13312, 1024);
-    const auto divisor      = parent.view().input_scale_divisor;
+    const auto divisor      = parent.view().input_scale;
     const float unused_step = ops::allows_a4(policy) ? 0.0F : 1.0F;
-    const auto auxiliary    = [&](int index) -> std::optional<float> {
-        return omit_divisors ? std::nullopt : std::optional(divisor + index * unused_step);
+    const auto calibration = [](float value) {
+        return ops::ActivationCalibrationView::broadcast(ops::ActivationScaleOperation::Divide,
+                                                         value);
+    };
+    const auto auxiliary = [&](int index) {
+        return omit_divisors ? ops::ActivationCalibrationView{}
+                             : calibration(divisor + index * unused_step);
     };
     const auto prepared = std::get<ops::SingleProjectionWeight>(ops::prepare_projection_weights(
         std::array<ops::WeightInput, 4>{{{qw, policy, auxiliary(0)},
@@ -401,10 +406,10 @@ int run_nvfp4_target_case(DevicePackedWeight& parent, std::int32_t tokens,
                                          {vw, policy, auxiliary(3)}}}));
     if (policy == ops::LinearPolicy::AllowA8) {
         const auto mixed = std::get<ops::SingleProjectionWeight>(ops::prepare_projection_weights(
-            std::array<ops::WeightInput, 4>{{{qw, ops::LinearPolicy::AllowA4, divisor},
-                                             {kw, policy, divisor + 1},
-                                             {gw, policy, divisor + 2},
-                                             {vw, policy, divisor + 3}}}));
+            std::array<ops::WeightInput, 4>{{{qw, ops::LinearPolicy::AllowA4, calibration(divisor)},
+                                             {kw, policy, calibration(divisor + 1)},
+                                             {gw, policy, calibration(divisor + 2)},
+                                             {vw, policy, calibration(divisor + 3)}}}));
         if (mixed.policy != ops::LinearPolicy::AllowA8) {
             throw std::runtime_error(
                 "NVFP4 combined Use lost its activation permission intersection");
@@ -442,8 +447,8 @@ int run_nvfp4_target() {
     constexpr std::int32_t kHidden     = 5120;
     constexpr std::int32_t kParentRows = 14336;
     quantized_weight::PatternedWeightOptions options;
-    options.weight_scale_divisor = 0.125F;
-    options.input_scale_divisor  = 3.5F;
+    options.weight_scale = 0.125F;
+    options.input_scale  = 3.5F;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::NVFP4, kParentRows, kHidden, 331U, options));
 

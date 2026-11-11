@@ -81,6 +81,9 @@ is not qualified for production.
 Qwen4-27B 的[架构与量化](designs/qwen4-27b-rtx5090.md)及
 [Op 需求](designs/qwen4-27b-op-checklist.md)属于独立适配计划。
 
+[GLM5Next FP4-Local Op 清单](designs/glm5next-fp4-local-op-checklist.md)记录原生格式的
+完整计算接入、实际形状、代码组织与逐点优化要求。
+
 Qwen3.8-Flash-Next 使用 Qwen4Exp；Qwen3.8-27B 使用 Qwen3.5。
 
 Shared infrastructure references: [Frontend](maintainer/frontend.md), [Context storage](maintainer/context-management.md), [weights and loading](maintainer/weights-and-loading.md), [speculative execution](maintainer/speculative-decoding.md). Fork representation and platform contracts remain in the detailed references above.

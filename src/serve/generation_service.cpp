@@ -380,6 +380,15 @@ GenerationService::acquire_request_lifetime(DeadlinePolicy deadline_policy) cons
     }
 }
 
+std::function<bool()>
+GenerationService::preparation_cancellation(std::function<bool()> external) const {
+    return [this, external = std::move(external)] {
+        if (!engine_->is_available())
+            throw RequestError(RequestErrorKind::Unavailable, "inference engine is unavailable");
+        return external && external();
+    };
+}
+
 PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                            GenerationConsumerMode consumer_mode,
                                            ninfer::GenerationObservationOptions observation,
@@ -399,6 +408,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                                                 ContextCacheHints context_cache,
                                                 CacheParticipation cache_participation,
                                                 DeadlinePolicy deadline_policy) const {
+    is_cancelled = preparation_cancellation(std::move(is_cancelled));
     PreparedRequest prepared;
     prepared.constraint_param = request.constraint_param;
     for (const auto& tool : request.tools) prepared.tool_schema_params.push_back(tool.schema_param);
@@ -521,6 +531,7 @@ ninfer::PromptInput GenerationService::acquire_prompt_input(
 
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
+    is_cancelled = preparation_cancellation(std::move(is_cancelled));
     const Clock::time_point deadline =
         Clock::now() + std::chrono::milliseconds(options_.launch.engine.pending_timeout_ms);
     try {
@@ -543,6 +554,7 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
 
 ninfer::PromptSummary GenerationService::describe_prompt(
     const GenerationRequest& request, std::function<bool()> is_cancelled) const {
+    is_cancelled = preparation_cancellation(std::move(is_cancelled));
     const Clock::time_point deadline =
         Clock::now() + std::chrono::milliseconds(options_.launch.engine.pending_timeout_ms);
     try {

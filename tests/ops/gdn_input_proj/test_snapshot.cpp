@@ -550,13 +550,14 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_we
     Tensor v                          = value.tensor();
     Tensor z_output                   = z.tensor();
     const std::size_t workspace_bytes = ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-        ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, 1, tokens, tokens);
+        ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, 1, tokens,
+        tokens);
     ninfer::DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(),
                                            std::max<std::size_t>(1, workspace_bytes));
     MemoryArena workspace(workspace_storage.span());
 
     ops::gdn_input_proj_conv_snapshot(
-        x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, conv,
+        x, ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, conv,
         {source, conv_state, snapshot_base}, Tensor{}, {q, k, v, z_output}, workspace,
         ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
@@ -653,7 +654,7 @@ int run_q4_q5() {
     constexpr std::int32_t kChannels     = 10240;
     const std::vector<float> conv_weight = make_conv_weight(kChannels, 631U);
     const std::size_t workspace_bytes = ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-        ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, 8, 1, 1);
+        ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, 8, 1, 1);
     failures += run_batched_case(
         "Q4/Q5 A16 B=8 W=1", kHidden, kValueRows, kZRows, 1, 8, {}, conv_weight, workspace_bytes,
         kGdnInputProjConvSnapshotA16Tolerance,
@@ -676,7 +677,7 @@ int run_q4_q5() {
             Tensor&, const Tensor& valid, const Tensor&, Tensor& q, Tensor& k, Tensor& v, Tensor& z,
             MemoryArena& workspace, CudaExecutionView execution) {
             ops::gdn_input_proj_conv_update(
-                x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, conv,
+                x, ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, conv,
                 source, destination, valid, {q, k, v, z}, workspace, execution);
         });
     // The batched organisations whose aggregate column count is 10 reach the same Q5 parent
@@ -688,7 +689,7 @@ int run_q4_q5() {
     constexpr std::int32_t kAggTenBatch = 2;
     const std::size_t agg_ten_workspace_bytes =
         ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-            ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, kAggTenBatch,
+            ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, kAggTenBatch,
             kAggTenWidth, kAggTenWidth);
     failures += run_batched_case(
         "Q4/Q5 A16 B=2 W=5", kHidden, kValueRows, kZRows, kAggTenWidth, kAggTenBatch, {},
@@ -711,7 +712,7 @@ int run_q4_q5() {
             Tensor& state, const Tensor& valid, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
             Tensor& z, MemoryArena& workspace, CudaExecutionView execution) {
             ops::gdn_input_proj_conv_snapshot(
-                x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, conv,
+                x, ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, conv,
                 {source, state, snapshot_base}, valid, {q, k, v, z}, workspace,
                 execution);
         });
@@ -726,7 +727,7 @@ int run_q4_q5() {
     const std::vector<std::int32_t> narrow_valid{4, 2};
     const std::size_t narrow_workspace_bytes =
         ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-            ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, kNarrowBatch,
+            ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, kNarrowBatch,
             kNarrowWidth, kNarrowWidth);
     failures += run_batched_case(
         "Q4/Q5 A16 B=2 W=4 masked", kHidden, kValueRows, kZRows, kNarrowWidth, kNarrowBatch,
@@ -749,7 +750,7 @@ int run_q4_q5() {
             Tensor& state, const Tensor& valid, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
             Tensor& z, MemoryArena& workspace, CudaExecutionView execution) {
             ops::gdn_input_proj_conv_snapshot(
-                x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, conv,
+                x, ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, conv,
                 {source, state, snapshot_base}, valid, {q, k, v, z}, workspace,
                 execution);
         });
@@ -763,7 +764,7 @@ int run_q4_q5() {
     const std::vector<std::int32_t> mixed_valid{16, 9, 4};
     const std::size_t mixed_workspace_bytes =
         ops::gdn_input_proj_conv_snapshot_workspace_capacity_bytes(
-            ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, kMixedBatch,
+            ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, kMixedBatch,
             kMixedWidth, kMixedWidth);
     failures += run_batched_case(
         "Q4/Q5 A16 B=3 W=16 masked", kHidden, kValueRows, kZRows, kMixedWidth, kMixedBatch,
@@ -786,7 +787,7 @@ int run_q4_q5() {
             Tensor& state, const Tensor& valid, const Tensor& snapshot_base, Tensor& q, Tensor& k, Tensor& v,
             Tensor& z, MemoryArena& workspace, CudaExecutionView execution) {
             ops::gdn_input_proj_conv_snapshot(
-                x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()}, conv,
+                x, ops::PairedProjectionWeights{{query_key.view()}, {value_z_weight.view()}}, conv,
                 {source, state, snapshot_base}, valid, {q, k, v, z}, workspace,
                 execution);
         });
@@ -1099,8 +1100,8 @@ int run_nvfp4() {
     constexpr std::int32_t kHidden = 5120;
     constexpr std::int32_t kRows   = 16384;
     quantized_weight::PatternedWeightOptions options;
-    options.weight_scale_divisor = 0.125F;
-    options.input_scale_divisor  = 3.5F;
+    options.weight_scale = 0.125F;
+    options.input_scale  = 3.5F;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::NVFP4, kRows, kHidden, 823U, options));
 
@@ -1326,8 +1327,8 @@ int main() {
     }
 
     const ops::PairedProjectionWeights q4_q5_capacity_weights{
-        capacity_weight(QType::Q4_G64_FP16, 4096, 5120),
-        capacity_weight(QType::Q5_G64_FP16, 12288, 5120)};
+        {capacity_weight(QType::Q4_G64_FP16, 4096, 5120)},
+        {capacity_weight(QType::Q5_G64_FP16, 12288, 5120)}};
     const ops::SingleProjectionWeight q8_capacity_weights{
         capacity_weight(QType::Q8_G32_FP16, 12288, 2048)};
 

@@ -51,8 +51,9 @@ void launch_mma(const Tensor& x, const CudaSwiGLUExperts& experts, const ExpertR
         Gate ? s.input_codes : s.product_codes,
         static_cast<const std::uint8_t*>(Gate ? s.input_scales : s.product_scales),
         Gate ? experts.bank.gate_up : experts.bank.down,
-        Gate ? *experts.activation_divisors.gate_up : *experts.activation_divisors.down,
-        *experts.activation_divisors.down, s.groups, s.product_codes,
+        Gate ? experts.activation_calibration.gate_up.scalar_divisor()
+             : experts.activation_calibration.down.scalar_divisor(),
+        experts.activation_calibration.down.scalar_divisor(), s.groups, s.product_codes,
         static_cast<std::uint8_t*>(s.product_scales), s.contributions,
         static_cast<const float*>(routes.coefficients.data), s.routed_sum, subtiles,
         plan.nvfp4.down_row_window, static_cast<int>(plan.nvfp4.cache), minimum_expert_count,
@@ -106,8 +107,9 @@ void launch_input(const Tensor& x, const CudaSwiGLUExperts& experts, const Stora
     const auto stream = execution.stream();
     quantize_input<<<(std::max(x.ne[1] * (kHidden / 16), kExperts) + 255) / 256, 256, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), s.input_codes,
-        static_cast<std::uint8_t*>(s.input_scales), *experts.activation_divisors.gate_up, x.ne[1],
-        s.groups.counts, s.routed_sum, clear_counts);
+        static_cast<std::uint8_t*>(s.input_scales),
+        experts.activation_calibration.gate_up.scalar_divisor(), x.ne[1], s.groups.counts,
+        s.routed_sum, clear_counts);
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -153,6 +155,26 @@ void launch_experts(const Tensor& x, const CudaSwiGLUExperts& experts, const Exp
     if (plan.column_major_down) {
         launch_column_jobs(s.groups, x.ne[1], plan.job_columns(), plan.preserve_balanced_down,
                            execution);
+    }
+    if constexpr (Intermediate == 320) {
+        if (plan.pool_expert_limit) {
+            const auto run = [&]<int C>() {
+                launch_pool_down<kHidden, kExperts, kTopK, C>(
+                    PoolContraction<C>{
+                        s.product_codes, static_cast<const std::uint8_t*>(s.product_scales),
+                        experts.bank.down, experts.activation_calibration.down.scalar_divisor()},
+                    s.groups, static_cast<const int*>(routes.ids.data),
+                    static_cast<const float*>(routes.coefficients.data), s.routed_sum, x.ne[1],
+                    plan.pool_min_experts, plan.pool_expert_limit, plan.pool_row_window,
+                    plan.pool_queued_ctas_per_sm, execution, plan.pool_token_threshold);
+            };
+            if (plan.pool_columns == 32)
+                run.template operator()<32>();
+            else if (plan.pool_columns == 128)
+                run.template operator()<128>();
+            else
+                throw std::logic_error("invalid expert pool column tile");
+        }
     }
     phase.template operator()<false>();
 }

@@ -55,9 +55,7 @@ enum class LinearPolicy : std::uint8_t {
  * contiguous, non-null and 16-byte aligned; T is positive. Output overlaps neither X nor
  * any weight plane. Inputs are preserved. There is no bias, activation or transpose.
  *
- * Supports registered weight geometries and column domains for contiguous BF16, RowSplit
- * Q4/Q5/Q6-G64 and Q8-G32 with FP16 scales, row-scaled FP8, and block-scaled NVFP4.
- * Unsupported format/geometry/layout combinations throw.
+ * Supports registered representations and geometries. Unsupported combinations throw.
  *
  * `out` stores a BF16 approximation of this ideal result under the named numerical criterion for
  * the selected private activation-compute path.

@@ -29,8 +29,14 @@ void ple(const Tensor& embedding, const TextConfig& c, const PleParameters& p,
         auto* data=static_cast<std::byte*>(buffers.projection.data);
         auto key_matrix=Tensor(data,cuda.device(),DType::BF16,{channels,m});
         auto value_matrix=Tensor(data+std::size_t(channels)*m*2,cuda.device(),DType::BF16,{h,m});
-        { auto scratch=arena.scope(); ops::linear(input,pair.first,key_matrix,ops::LinearPolicy::A16Only,arena,cuda); }
-        { auto scratch=arena.scope(); ops::linear(input,pair.second,value_matrix,ops::LinearPolicy::A16Only,arena,cuda); }
+        {
+            auto scratch = arena.scope();
+            ops::linear(input, pair.first.weight, key_matrix, pair.first.policy, arena, cuda);
+        }
+        {
+            auto scratch = arena.scope();
+            ops::linear(input, pair.second.weight, value_matrix, pair.second.policy, arena, cuda);
+        }
         key=key_matrix.view({h,streams,t,b}); value=value_matrix.view({h,t,b});
     }
     auto residual_view   = residual.view({h, streams, t, b});

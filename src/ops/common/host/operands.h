@@ -343,6 +343,8 @@ struct Fp8WeightGeometry {
 };
 
 Fp8WeightGeometry validate_fp8_weight(const Weight& weight, const char* operation);
+Fp8WeightGeometry validate_mxfp8_weight(const Weight& weight, const char* operation);
+Fp8WeightGeometry validate_fp8_block_fp32_weight(const Weight& weight, const char* operation);
 
 struct Nvfp4WeightGeometry {
     std::uint64_t code_plane_bytes;
@@ -352,5 +354,6 @@ struct Nvfp4WeightGeometry {
 };
 
 Nvfp4WeightGeometry validate_nvfp4_weight(const Weight& weight, const char* operation);
+Nvfp4WeightGeometry validate_nvfp4_mul_weight(const Weight& weight, const char* operation);
 
 } // namespace ninfer::ops::common

@@ -217,8 +217,8 @@ quantized_weight::PackedWeight make_q8_g32_fp16_weight(std::int32_t n, std::int3
 quantized_weight::PackedWeight make_nvfp4_weight(std::int32_t n, std::int32_t k,
                                                  std::uint32_t seed) {
     quantized_weight::PatternedWeightOptions options;
-    options.weight_scale_divisor = 0.125F;
-    options.input_scale_divisor  = 3.5F;
+    options.weight_scale = 0.125F;
+    options.input_scale  = 3.5F;
     return quantized_weight::make_patterned_weight(QType::NVFP4, n, k, seed, options);
 }
 

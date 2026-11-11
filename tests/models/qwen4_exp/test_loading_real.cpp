@@ -189,8 +189,8 @@ void check_parameters(const q4::ModelShard& model, const q4::execution::Paramete
             const auto down = matrix_weight(source.down, e);
             require(gu.n == 1280 && gu.k == 2560 && down.n == 2560 && down.k == 640,
                     "expert native geometry");
-            require(gu.weight_scale_divisor == source.gate_up.divisor(e) &&
-                        down.weight_scale_divisor == source.down.divisor(e),
+            require(gu.weight_scale == source.gate_up.matrix_scale(e) &&
+                        down.weight_scale == source.down.matrix_scale(e),
                     "expert divisor addressing");
         }
     }
@@ -207,8 +207,8 @@ void check_parameters(const q4::ModelShard& model, const q4::execution::Paramete
                     ffn.gate_up_type == QType::NVFP4 && ffn.down_type == QType::NVFP4 &&
                     ffn.gate_up_policy == ops::LinearPolicy::AllowA4 &&
                     ffn.down_policy == ops::LinearPolicy::AllowA4 &&
-                    mtp.activation_divisors.gate_up == 1.0F &&
-                    mtp.activation_divisors.down == 1.0F,
+                    mtp.activation_calibration.gate_up.scalar_divisor() == 1.0F &&
+                    mtp.activation_calibration.down.scalar_divisor() == 1.0F,
                 "mixed-recipe MTP NVFP4 operands and unit activation divisors");
     } else {
         require(bank.gate_up.layout.format == QType::FP8_E4M3FN_BLOCK128X128_BF16 &&
@@ -217,7 +217,8 @@ void check_parameters(const q4::ModelShard& model, const q4::execution::Paramete
                     ffn.down_type == QType::FP8_E4M3FN_BLOCK128X128_BF16 &&
                     ffn.gate_up_policy == ops::LinearPolicy::AllowA8 &&
                     ffn.down_policy == ops::LinearPolicy::AllowA8 &&
-                    !mtp.activation_divisors.gate_up && !mtp.activation_divisors.down,
+                    mtp.activation_calibration.gate_up.empty() &&
+                    mtp.activation_calibration.down.empty(),
                 "NVIDIA-recipe MTP block-FP8 operands");
     }
     const auto& gdn = std::get<q4::execution::GdnParameters>(p.text.layers[0].mixer);
@@ -266,7 +267,7 @@ int main(int argc, char** argv) {
     try {
         DeviceContext device;
         bool materialize = false, host = false;
-        int rank = -1;
+        int rank         = -1;
         std::uint32_t ep = 2;
         for (int i = 2; i < argc; ++i) {
             const std::string_view arg(argv[i]);

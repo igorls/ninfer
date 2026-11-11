@@ -19,7 +19,7 @@ enum class Operation { Linear, Add, Split, SwiGLU };
 
 int check_bank(Operation operation, int n, int k) {
     const auto packed = quantized_weight::make_patterned_weight(
-        QType::NVFP4, n, k, 701U, {.weight_scale_divisor = 128.0F, .input_scale_divisor = 1.0F});
+        QType::NVFP4, n, k, 701U, {.weight_scale = 128.0F, .input_scale = 1.0F});
     const std::array<std::uint64_t, 3> shape{2, static_cast<std::uint64_t>(n + 256),
                                              static_cast<std::uint64_t>(k)};
     const auto geometry =
@@ -32,7 +32,7 @@ int check_bank(Operation operation, int n, int k) {
     std::memcpy(bytes.data() + scale_offset, packed.payload.data() + packed.scale_plane_offset,
                 packed.scale_plane_bytes);
     const std::array divisors{64.0F, 128.0F};
-    std::memcpy(bytes.data() + geometry.divisor_offset, divisors.data(), sizeof(divisors));
+    std::memcpy(bytes.data() + geometry.matrix_scale_offset, divisors.data(), sizeof(divisors));
     GuardedDeviceBuffer storage(bytes.size());
     storage.copy_from_host(bytes.data(), bytes.size());
     const WeightParent parent{geometry, storage.span().device,

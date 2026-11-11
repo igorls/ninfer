@@ -171,7 +171,7 @@ def test_nvfp4_known_vector_geometry_swizzle_tail_and_round_trip():
         geometry.code_plane_bytes,
         geometry.scale_plane_offset,
         geometry.scale_plane_bytes,
-        geometry.weight_divisor_offset,
+        geometry.matrix_scale_offset,
         geometry.payload_bytes,
     ) == (4096, 4096, 512, 4608, 4612)
 
@@ -196,7 +196,7 @@ def test_nvfp4_known_vector_geometry_swizzle_tail_and_round_trip():
     for row, lane in ((0, 0), (31, 3), (32, 0), (127, 3)):
         offset = geometry.scale_plane_offset + (row % 32) * 16 + (row // 32) * 4 + lane
         assert payload[offset] == int(scales[row, lane])
-    assert payload[geometry.weight_divisor_offset :] == divisor
+    assert payload[geometry.matrix_scale_offset :] == divisor
 
     decoded_packed, decoded_scales, decoded_divisor = decode_nvfp4_words(payload, shape)
     assert torch.equal(decoded_packed, packed)
@@ -211,7 +211,7 @@ def test_nvfp4_expert_bank_concatenates_independent_expert_planes():
         geometry.code_plane_bytes,
         geometry.scale_plane_offset,
         geometry.scale_plane_bytes,
-        geometry.weight_divisor_offset,
+        geometry.matrix_scale_offset,
         geometry.payload_bytes,
     ) == (12288, 12288, 1536, 13824, 13836)
     assert encoded_size("batched_block_scale_k16_m128x4_v1", "nvfp4", shape) == 13836
@@ -232,7 +232,7 @@ def test_nvfp4_expert_bank_concatenates_independent_expert_planes():
         assert payload[expert * 4096 : (expert + 1) * 4096] == matrix[:4096]
         scale_begin = geometry.scale_plane_offset + expert * 512
         assert payload[scale_begin : scale_begin + 512] == matrix[4096:4608]
-        divisor_begin = geometry.weight_divisor_offset + 4 * expert
+        divisor_begin = geometry.matrix_scale_offset + 4 * expert
         assert payload[divisor_begin : divisor_begin + 4] == matrix[4608:]
 
     decoded = decode_nvfp4_words(payload, shape)
