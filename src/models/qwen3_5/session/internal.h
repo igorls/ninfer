@@ -136,6 +136,7 @@ struct RequestControl {
     std::vector<CaptureGroup> capture_groups;
     std::size_t next_capture = 0;
     std::uint32_t last_saved = 0, last_intermediate_attempt = 0;
+    std::optional<std::uint32_t> retry_frontier;
     bool capture_pending = false;
 
     struct Prefill {
@@ -350,10 +351,14 @@ public:
                   ResumeState* resume           = nullptr,
                   ExecutionUnitKind resume_kind = ExecutionUnitKind::Decode,
                   std::uint32_t resume_tokens   = 1);
-    [[nodiscard]] bool start_capture(SequenceHandle sequence);
+    [[nodiscard]] runtime::ContextStart start_capture(SequenceHandle sequence);
+    [[nodiscard]] bool retry_capture(SequenceHandle sequence);
+    [[nodiscard]] std::vector<CheckpointHandle> share_capture(SequenceHandle sequence,
+                                                              CheckpointHandle source);
     [[nodiscard]] bool capture_is_input(SequenceHandle sequence) const;
     [[nodiscard]] std::optional<CapturePreparation>
-    prepare_capture(SequenceHandle sequence, std::span<const CheckpointHandle> host_victims = {});
+    prepare_capture(SequenceHandle sequence, std::span<const CheckpointHandle> victims = {},
+                    runtime::CaptureStorage storage = runtime::CaptureStorage::Automatic);
     void skip_capture(SequenceHandle sequence,
                       runtime::CaptureSkip reason = runtime::CaptureSkip::Unavailable);
     // Finite physical actions, each including every optional holder needed for its release.
@@ -385,8 +390,7 @@ public:
     start_decode(std::span<const SequenceHandle>, std::span<const runtime::RoundBudget>,
                  std::span<const bool> constrained = {});
     [[nodiscard]] std::optional<runtime::ExecutionTicket>
-    start_control(std::span<const SequenceHandle>, std::span<const TokenId>, std::uint32_t stride,
-                  std::span<const std::optional<std::uint32_t>> splits);
+    start_control(std::span<const SequenceHandle>, std::span<const TokenId>, std::uint32_t stride);
     [[nodiscard]] std::optional<runtime::ExecutionTicket> start_score(qwen::PreparedPromptData&&,
                                                                       std::uint32_t first_target, const CausalScoreReadout&);
     [[nodiscard]] std::optional<SessionEvent> poll();
@@ -468,7 +472,6 @@ public:
         std::vector<ContinuationMetadata> completed;
         std::vector<std::uint32_t> columns;
         std::vector<std::vector<TokenId>> inputs;
-        std::vector<std::optional<std::uint32_t>> splits;
         std::unique_ptr<context::ContextTransaction> preparation;
         std::unique_ptr<context::ContextTransaction> settlement;
         std::optional<GeneratedResult> generated;
@@ -549,7 +552,8 @@ public:
     enum class CaptureReservationStatus { Ready, NeedsContext, Unavailable };
     [[nodiscard]] CaptureReservationStatus
     reserve_capture_destination(std::uint32_t, std::uint32_t,
-                                std::span<const CheckpointHandle> host_victims = {});
+                                std::span<const CheckpointHandle> victims = {},
+                                runtime::CaptureStorage storage = runtime::CaptureStorage::Automatic);
     void prepare_capture_boundary(std::uint32_t);
     void abort_context() noexcept;
     void cancel_context() noexcept;

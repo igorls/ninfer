@@ -20,11 +20,92 @@ both Blackwell targets, resident execution and the fork's product contracts gove
 those decisions. A source merge, hardware qualification and release acceptance are
 separate states.
 
-### Candidate sync through `77c2e5e2` (November 10, 2026)
+### Sync through `13ebb92f6` (November 11, 2026)
+
+This sync starts at fork merge `8bcb72c85` and reviews all 33 upstream commits
+in `77c2e5e2..13ebb92f6` on `sync/upstream-13ebb92f6`. Source integration and
+hardware qualification remain separate. No model artifact is regenerated.
+
+| Incoming work | Fork disposition |
+|---|---|
+| `9d06bec9d` | Carry native FP4 MoE pipeline handoff synchronization. |
+| `41da21f47`, `e8059c32b` | Carry prefill capture under fragmentation, current-input recovery retention, shared identical captures and retry at committed boundaries. Preserve the fork's demand-based discovered-prefix admission. |
+| `77418cfec`, `52e7cd7e0`, `13ebb92f6` | Carry removal of redundant prompt work/prefill splits and Jinja rendering, capture lifetime and iteration fixes. Preserve prompt logprobs, reasoning-feature and continuation-frontier readouts. Superseded rewrite execution boundaries are removed. |
+| `4461c9683` | Carry typed invalid-input handling for malformed tool history; retain the fork's serving extensions and cancellation routes. |
+| `9eff5314f` | Carry complete decode-input warmup outside benchmark measurement/profiling. |
+| `5fb5529f0`, `d5d535956..18601ff16`, `928350526` | Carry GLM DFlash2 source, shared draft config/loading, gathered normalization/selection, sparse vocabulary, BF16 KV materialization, configurable RoPE and extended convolution/attention helpers. Spark schedules remain target gated. GLM conversion recipes remain unregistered in the fork product. |
+| `23d6de509..d6c26471c` | Carry separated communication backends and native Spark collectives as source; distributed execution stays disabled by default. |
+| `68a02c25e` | Remove the completed upstream checklist. |
+
+The fork's test-layout deferral continues. Its original fixtures and numerical
+criteria are retained; additional family fixtures cover the new draft helper
+contracts through explicit supplemental targets. The fork's top-k workspace and
+launch ownership remains canonical, with keys-only merging added beside it.
+Native MSVC kernel naming and the fused gated-query RoPE route are retained.
+The superseded fixed-theta pair/single RoPE implementation is removed. MSVC
+adaptations use exact unsigned lazy-range arithmetic instead of `__int128` and
+64-byte TMA descriptor alignment, matching the established fork kernel contract.
+Parser errors retain the public cause-only formatting as render errors do.
+
+Verification on Windows 11, MSVC 19.51, CUDA 13.3.33 (`sm_120a`), RTX PRO 6000
+Blackwell Workstation Edition (driver 621.14):
+
+- Python 3.11.15 with CPU Torch: 113 artifact/converter tests and eight subtests
+  pass, with 16 CUDA-only skips. An attempted collection of the unregistered GLM
+  loading script cannot import its deliberately excluded conversion fixture;
+  it is outside the fork product checks and does not qualify GLM execution.
+- Dashboard: both request tests, TypeScript checks and the production web build pass.
+- All seven supplemental CUDA suites pass, covering gathered normalization,
+  configurable RMSNorm packing/RoPE, BF16 embeddings, extended dynamic convolution,
+  gathered selector/sparse vocabulary, BF16 context materialization and extended
+  sliding attention against their independent numerical/state oracles.
+- Eleven retained CUDA suites pass with their original criteria: embedding,
+  RMSNorm packing/RoPE, sampling/conditional selector/top-k, native FP4 MoE,
+  dynamic convolution preparation, BF16 projection and GDN snapshot/record.
+  Retained calls now pass their represented epsilon/theta, input kind, vocabulary
+  domain, hidden geometry and materialization profile explicitly.
+- Initial Windows build failures exposed unsupported upstream `__int128`, an
+  over-aligned by-value TMA descriptor, stale retained-fixture API calls and a
+  Flash-Next prompt-readout variable whose declaration upstream's prefill cleanup
+  removed, plus the fork timing fallback needing to unwrap upstream's optional
+  first-token timing. These are corrected. Review also caught the missing keys-only top-k
+  chunk helper, an initially wrong retained RoPE test theta and the obsolete
+  fixed-theta implementation; all are corrected without relaxing oracle criteria.
+- The complete native Windows Release build passes for applications, tests and
+  benchmarks; the existing CRT link warning remains. All 40 host/model/API
+  CTests pass, covering typed inputs, Jinja/capture lifetimes, cache policy,
+  context stores, model binding, token readouts, serving schemas/logging and Supervisor.
+- Four additional CTests pass: artifact Device materialization, Python/C++ writer
+  interop, complete Qwen state-image isolation/round trips and the retained Q8
+  context-materialization oracle. This makes 62 focused CTests in total.
+- Flash-Next real-artifact binding/resource plans pass for Text/Vision/MTP and
+  scoring selections, without materializing its 70–72 GiB resident weights.
+
+Seven full Qwen3.8-27B NVFP4 checks pass: connected-client HTTP shutdown;
+native transaction cancellation, paused ownership and replay recovery for each
+of ordinary decoding, MTP and DFlash2; and replay, snapshot, cancellation while
+paused and cancellation during replay under actual resource pressure for all
+three modes. Ctrl+Break drains the connected resident request in 0.500 s.
+
+The [performance record](../performance.md#windows-upstream-sync-13ebb92f6-2026-11-11)
+retains the initial resource constraint (approximately 13 GiB free with the desktop
+reserve). Capacity subsequently rose to approximately 45 GiB without stopping
+another workload, allowing the full 27B checks above. Against `8bcb72c85`, median
+prefill improves 46.1% for the 42-token ordinary request and 6.6% for the 4,002-token
+MTP3 request; median decode changes are +0.8% and +0.9%. Ordinary decode ranges
+overlap. MTP accepts 191/191 drafts instead of 190/194, so decode includes different
+speculative work. Workspace peaks increase by 0.38 MiB and 1.0 MiB within the same
+reported 535 MiB reservation; reported GPU/Host allocations match at displayed
+precision. These results do not isolate a kernel gain or measure all CPU/resource
+costs. Resident Flash-Next execution remains unqualified.
+Linux, physical RTX 5090, Spark/distributed and GLM runtime qualification are not
+established by this source sync.
+
+### Sync through `77c2e5e2` (November 10, 2026)
 
 This candidate starts at fork `f6443b0ef` and reviews all 63 upstream commits in
 `a754fcf3..77c2e5e2` on `sync/upstream-77c2e5e2`. Source integration is committed
-on the sync branch; it is not merged into `workstation` or released. Qualification
+as `8bcb72c85` and integrated into `workstation`. Qualification
 is limited to the checks recorded below. The October/November release integration
 notes below remain historical evidence for their named revisions.
 

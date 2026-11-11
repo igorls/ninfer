@@ -240,7 +240,7 @@ int run() {
     DeviceBuffer norm_device     = to_device(norm_host);
     DeviceBuffer base_device     = to_device(base_host);
     const auto capacity =
-        ops::rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(2, 16, 1, 8);
+        ops::rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(kHidden, 2, 16, 1, 8);
     ninfer::DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(),
                                            capacity);
     MemoryArena workspace(workspace_storage.span());
@@ -299,7 +299,7 @@ int run() {
                 failures += fd.verify_guards(label);
                 const auto exact =
                     ops::rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(
-                        width, width, batch, batch);
+                        kHidden, width, width, batch, batch);
                 if (workspace.used() != 0 || workspace.peak_used() != exact) {
                     std::cerr << label << ": workspace mismatch\n";
                     ++failures;

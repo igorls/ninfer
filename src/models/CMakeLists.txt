@@ -3,6 +3,8 @@ add_library(ninfer_model_loading STATIC
   registry.cpp
   common/frontend/resources.cpp
   common/bindings.cpp
+  common/dflash/config.cpp
+  common/dflash/weights.cpp
   common/parallel.cpp
   common/parallel_weights.cpp
   common/vision/resources.cpp

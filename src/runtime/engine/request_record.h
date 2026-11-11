@@ -195,7 +195,6 @@ struct RequestRecord {
     bool queue_wait_recorded = false;
     std::optional<GenerationBudget> budget;
     std::optional<BeginSummary> admitted_begin;
-    std::optional<BeginSummary> begin;
     std::vector<TokenId> generated;
     // Parallel to `generated` when the request enabled token logprobs, otherwise empty.
     std::vector<TokenLogprobs> token_logprobs;

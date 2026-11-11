@@ -19,6 +19,10 @@
   binding, exact hash/NF4 reconstruction, incremental windows, cancellation and buffer lifetimes;
 - `ops/` — semantic Op qualification with independent mathematical or state-transition oracles;
   Linear and fused Linear suites are separated by their supported weight/activation paths;
+  supplemental `ninfer_draft_*_test` and `ninfer_gathered_sampling_test` targets cover gathered
+  normalization/selection, sparse vocabulary, extended convolution and embedding geometry,
+  configurable RoPE, BF16 context materialization and sliding attention. Their independent
+  fixtures coexist with the retained fork suites; Spark top-k keys are target-gated;
 - `runtime/` — scheduler fairness, cache resource policy, capacity and context-cost calculations;
 - `distributed/` — typed native work, bounded transport, and opt-in two-rank GPU execution;
 - `cpu/` — topology/ISA, bounded task admission, bound collectives, publication and shutdown;

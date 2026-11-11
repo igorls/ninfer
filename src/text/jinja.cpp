@@ -27,11 +27,12 @@ struct Raised {
 
 // Render failures reach API clients. The interpreter prefixes the innermost failing statement's
 // cause with its location and a two-line source excerpt ending in "\nError: "; only the cause is
-// reported.
+// reported. Parser errors instead append their excerpt after the first line.
 std::string render_failure_cause(const std::string& message) {
     constexpr std::string_view marker = "\nError: ";
     const std::size_t at              = message.find(marker);
-    return at == std::string::npos ? message : message.substr(at + marker.size());
+    return at == std::string::npos ? message.substr(0, message.find('\n'))
+                                   : message.substr(at + marker.size());
 }
 
 std::string pointer_component(std::string value) {
@@ -82,7 +83,8 @@ jinja::value convert(const nlohmann::ordered_json& input, const std::string& poi
         throw std::invalid_argument("Unsupported template JSON value");
     if (origin) {
         result->origin = origin;
-        if (is_val<value_string>(result)) result->val_str.tag(origin, found != tags.end());
+        if (is_val<value_string>(result))
+            cast_val<value_string>(result)->val_str.tag(origin, found != tags.end());
     }
     return result;
 }
@@ -102,7 +104,7 @@ struct JinjaTemplate::Impl {
             tokens.source = source;
             program       = jinja::parse_from_tokens(tokens);
         } catch (const std::exception& error) {
-            throw std::invalid_argument(source_name + ": " + error.what());
+            throw std::invalid_argument(source_name + ": " + render_failure_cause(error.what()));
         }
     }
 };

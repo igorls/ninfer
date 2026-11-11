@@ -429,7 +429,8 @@ server-error codes. Failures in the normalized prompt contract use `invalid_prom
 and availability failures retain their dedicated codes. Internal invariant failures are not
 relabeled as client input errors. When the chat template itself rejects a request, the message is
 the template's own `raise_exception` text (or the interpreter's cause) after the template's source
-name, without a template trace.
+name, without a template trace. Malformed tool history rejected during chat-template
+preparation returns HTTP 400 with `invalid_prompt`.
 
 The request `model` must be the public model ID (the artifact `metadata.name` by default, falling
 back to its architecture name when absent, or the explicit `--model-id` override), a configured

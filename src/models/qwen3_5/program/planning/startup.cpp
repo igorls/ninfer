@@ -362,7 +362,8 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                     linear_scratch(layout, profile.draft->feature_projection, local_width * batch,
                                    local_width * batch);
                     scratch(layout, ops::context_kv_materialize_workspace_capacity_bytes(
-                                        batch, local_width, local_width));
+                                        *profile.draft->context_materialization, batch, local_width,
+                                        local_width));
                     return finish(layout);
                 }
                 (void)workspace::dflash_context(layout, config, *draft, tokens);
@@ -382,7 +383,7 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                         (void)workspace::dflash2_branch(layout, config, *draft, width, batch);
                         scratch(layout,
                                 ops::rmsnorm_dynamic_grouped_conv_prepare_workspace_capacity_bytes(
-                                    width, width, batch, batch));
+                                    dimension(config.hidden_size), width, width, batch, batch));
                     };
                     {
                         auto attention = layout.scope();
@@ -434,7 +435,8 @@ WorkspaceSpec build_workspace_plan(const SequencePlanImpl& plan) {
                     linear_scratch(layout, profile.draft->selector->hidden_projection, mask_columns,
                                    mask_columns);
                     scratch(layout, ops::candidate_selector_path_workspace_capacity_bytes(
-                                        drafts, drafts, batch, batch));
+                                        ops::CandidateSelectorInput::Candidates, drafts, drafts,
+                                        batch, batch));
                     return finish(layout);
                 }
                 {

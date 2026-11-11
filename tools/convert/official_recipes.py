@@ -633,6 +633,165 @@ def qwen3_8_flash_next_mixed(model, recipe, sources):
         recipe.share("mtp/output_head", "text/output_head")
 
 
+def _glm_dflash2(model, recipe):
+    if "dflash2" not in model.components:
+        return
+    for role in ("token_embedding", "output_head"):
+        recipe.share("dflash2/" + role, "text/" + role)
+    recipe.place("dflash2/*", (2, 2))
+    config = model.components["dflash2"]["config"]
+    for layer in range(config["num_hidden_layers"]):
+        prefix = f"dflash2/layers/{layer}/attention/"
+        recipe.group(tuple(prefix + role for role in ("key", "value", "query")))
+        for role in ("key", "value"):
+            recipe.share(prefix + "context_" + role, prefix + role)
+
+
+def glm5next(model, recipe, sources):
+    """NVIDIA Main NVFP4, Q8 projections/shared FFN and block-FP8 MTP experts."""
+    if model.config["architectures"] != ["Glm5NextForCausalLM"]:
+        raise ValueError("glm5next requires GLM5Next mathematics")
+    cfg = model.config
+    h, intermediate, experts = (
+        cfg[key] for key in ("hidden_size", "moe_intermediate_size", "n_routed_experts")
+    )
+    recipe.provenance.update(
+        mapping="glm5next",
+        nvidia_nvfp4="preserve_codes_scales; RN_FP32(1/multiplier) divisors",
+        convolution_order="tap_then_qkv_channels",
+        mla_prepare_order="latent_index_key_pool_gate_query_a_index_weight",
+        mla_factor_order="head_channel_latent",
+    )
+    for name, parameter in model.parameters.items():
+        if name.startswith("text/") and "/mlp/" in name and parameter.projection:
+            recipe.assign(
+                name, format="nvfp4", method=import_encoded, activation_policy="AllowA4"
+            )
+        elif name.startswith(("text/", "mtp/")) and (
+            name.endswith(
+                (
+                    "/kda/query",
+                    "/kda/key",
+                    "/kda/value",
+                    "/kda/output",
+                    "/attention/output",
+                )
+            )
+            or "/moe/shared/" in name
+        ):
+            _assign(recipe, name, Q8)
+    recipe.place("text/*", (0,))
+    _glm_dflash2(model, recipe)
+    for component in ("vision", "mtp"):
+        if component in model.components:
+            recipe.place(component + "/*", (1 if component == "vision" else 2, 0))
+    nvidia = ModelOptNvfp4(sources["base"])
+    for layer, kind in enumerate(cfg["mlp_layer_types"]):
+        if kind != "dense":
+            continue
+        prefix = f"model.language_model.layers.{layer}.mlp."
+        if nvidia.scales(prefix + "gate_proj") != nvidia.scales(prefix + "up_proj"):
+            raise ValueError(f"layer {layer}: dense gate/up multipliers differ")
+    controls = []
+    layers = [
+        layer for layer, kind in enumerate(cfg["mlp_layer_types"]) if kind == "sparse"
+    ]
+    width = h * intermediate
+    for ordinal, layer in enumerate(layers):
+        p = f"text/layers/{layer}/moe/experts/"
+        gate_up_parts, down_parts = [], []
+        layer_inputs = None
+        for expert in range(experts):
+            refs, scalars = {}, {}
+            for role in ("gate", "up", "down"):
+                prefix = f"model.language_model.layers.{layer}.mlp.experts.{expert}.{role}_proj"
+                refs[role] = nvidia.matrix(
+                    prefix, (h, intermediate) if role == "down" else (intermediate, h)
+                )
+                scalars[role] = nvidia.scales(prefix)
+            if scalars["gate"] != scalars["up"]:
+                raise ValueError(
+                    f"layer {layer} expert {expert}: gate/up multipliers differ"
+                )
+            input_words = (scalars["gate"][2], scalars["down"][2])
+            if layer_inputs is None:
+                layer_inputs = input_words
+                controls.extend((scalars["gate"][3], scalars["down"][3]))
+            elif layer_inputs != input_words:
+                raise ValueError(f"layer {layer}: expert activation multipliers differ")
+            first, last = expert * width, (expert + 1) * width
+            gate_up_parts.extend(
+                (p + role, first, last, refs[role]) for role in ("gate", "up")
+            )
+            down_parts.append((p + "down", first, last, refs["down"]))
+        for parts, shape, order in (
+            (gate_up_parts, (experts, 2 * intermediate, h), 0),
+            (down_parts, (experts, h, intermediate), 1),
+        ):
+            recipe.parent(
+                parts,
+                shape=shape,
+                format="nvfp4",
+                method=import_encoded,
+                layout="batched_block_scale_k16_m128x4_v1",
+                order=(3, layer, order),
+            )
+    if layers:
+        recipe.auxiliary_tensor(
+            "expert_activation_divisors",
+            AuxiliaryValue("fp32", (len(layers), 2), b"".join(controls)),
+        )
+        for ordinal, layer in enumerate(layers):
+            for role in ("gate", "up", "down"):
+                name = f"text/layers/{layer}/moe/experts/{role}"
+                recipe.use(
+                    name,
+                    model.parameters[name].inputs[0],
+                    activation_policy="AllowA4",
+                    auxiliaries={
+                        "activation_input_divisor": AuxiliaryReference(
+                            "expert_activation_divisors",
+                            2 * ordinal + int(role == "down"),
+                            2 * ordinal + int(role == "down") + 1,
+                        )
+                    },
+                )
+    if "mtp" in model.components:
+        for role in ("token_embedding", "output_head"):
+            recipe.share("mtp/" + role, "text/" + role)
+        p = "mtp/layers/0/moe/experts/"
+        gate_up_parts, down_parts = [], []
+        for expert in range(experts):
+            refs = {}
+            for role in ("gate", "up", "down"):
+                refs[role] = tensor_source(
+                    sources["base"],
+                    f"model.language_model.layers.{cfg['num_hidden_layers']}.mlp.experts.{expert}.{role}_proj.weight",
+                    (h, intermediate) if role == "down" else (intermediate, h),
+                )
+            first, last = expert * width, (expert + 1) * width
+            gate_up_parts.extend(
+                (p + role, first, last, refs[role]) for role in ("gate", "up")
+            )
+            down_parts.append((p + "down", first, last, refs["down"]))
+        for parts, shape, order in (
+            (gate_up_parts, (experts, 2 * intermediate, h), 0),
+            (down_parts, (experts, h, intermediate), 1),
+        ):
+            recipe.parent(
+                parts,
+                shape=shape,
+                format="fp8_e4m3fn_block128x128_bf16",
+                method=fp8_block_maxabs,
+                order=(2, 1, order),
+            )
+        for role in ("gate", "up", "down"):
+            name = p + role
+            recipe.use(
+                name, model.parameters[name].inputs[0], activation_policy="AllowA8"
+            )
+
+
 def glm5next_fp4_local(model, recipe, sources):
     """Preserve native FP4-Local encodings and their calibrated activation contracts."""
     if model.config["architectures"] != ["Glm5NextForCausalLM"]:
@@ -656,6 +815,7 @@ def glm5next_fp4_local(model, recipe, sources):
             name, format=format, method=import_encoded, activation_policy=policy
         )
     recipe.place("text/*", (0,))
+    _glm_dflash2(model, recipe)
     for component, order in (("vision", 1), ("mtp", 2)):
         if component in model.components:
             recipe.place(component + "/*", (order, 0))

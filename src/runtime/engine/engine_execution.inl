@@ -79,17 +79,13 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
                 row_tokens, request->budget->remaining(), request->budget->limit_reason());
             if (decision.accepted_tokens == 0 || decision.accepted_tokens > count ||
                 (!decision.finished() && decision.accepted_tokens != count) ||
-                (decision.finished() && decision.continuation != ContinuationAction::Decode) ||
-                (decision.prefix_execution_split_after &&
-                 (*decision.prefix_execution_split_after == 0 ||
-                  *decision.prefix_execution_split_after > decision.accepted_tokens))) {
+                (decision.finished() && decision.continuation != ContinuationAction::Decode)) {
                 throw std::logic_error("output policy returned an invalid licensed prefix");
             }
             decisions[row] = CommitDecision{
                 .accepted_tokens              = decision.accepted_tokens,
                 .terminal                     = decision.finished(),
                 .cancelled                    = false,
-                .prefix_execution_split_after = decision.prefix_execution_split_after,
             };
             finish_reasons[row] = decision.finish_reason;
             continuations[row]  = decision.continuation;
@@ -228,6 +224,11 @@ void EngineCore<Instance>::commit_pending(PendingBatch&& pending, ComputeFlight 
             }
             if (fail_output(request, lane)) continue;
         }
+        if (!decode_round && !decisions[row].terminal && !committed.capture_ready[row] &&
+            instance_.session->retry_capture(*request->sequence)) {
+            capture_decisions_[lane].reset();
+            committed.capture_ready[row] = true;
+        }
         if (decisions[row].terminal) {
             request->model_state     = EngineRequestState::ModelFinished;
             request->terminal_reason = finish_reasons[row];
@@ -288,7 +289,10 @@ void EngineCore<Instance>::resolve_prefill_progress(
     if (!request->cancelled.load(std::memory_order_acquire)) {
         resources_.observe_committed(*request->base_plan, request->id, computed_begin,
                                      computed_begin + progress.processed_prompt_tokens,
-                                     instance_.session->capture_frontiers(*request->sequence));
+                                     instance_.session->capture_frontiers(
+                                         *request->sequence, computed_begin,
+                                         computed_begin + progress.processed_prompt_tokens),
+                                     request->continuation_owner);
     }
     if (progress.complete && request->computed_prompt_tokens != suffix_tokens) {
         throw std::logic_error("completed prefill did not reach the admitted prompt frontier");
@@ -304,6 +308,12 @@ void EngineCore<Instance>::resolve_prefill_progress(
         reserve_active_capture(request, EngineRequestState::Prefill);
         return;
     }
+    if (!progress.complete && !request->cancelled.load(std::memory_order_acquire) &&
+        instance_.session->retry_capture(*request->sequence)) {
+        capture_decisions_[request->lane->value].reset();
+        reserve_active_capture(request, EngineRequestState::Prefill);
+        return;
+    }
     if (!progress.complete) { return; }
     if (!request->lane || !progress.pending) {
         throw std::logic_error("completed prefill has no lane or pending token");
@@ -311,7 +321,6 @@ void EngineCore<Instance>::resolve_prefill_progress(
     if (!request->admitted_begin || progress.summary != *request->admitted_begin) {
         throw std::logic_error("runtime Begin summary differs from committed admission");
     }
-    request->begin = progress.summary;
     const auto lane = request->lane->value;
     if (!request->options.execution.logprobs.prompt_positions.empty()) {
         const auto readout = instance_.session->prompt_token_logprobs(lane);
@@ -418,7 +427,6 @@ template <class Instance>
         flight.generated_sizes.push_back(request->generated.size());
         flight.logprob_sizes.push_back(request->token_logprobs.size());
     }
-    std::array<std::optional<std::uint32_t>, kMaximumConcurrency> splits{};
     try {
         EnginePhaseScope phase(*this, EngineHostPhase::CommitOutput);
         for (std::size_t row = 0; row < flight.requests.size(); ++row) {
@@ -428,13 +436,9 @@ template <class Instance>
             const auto decision =
                 request->output.preview_control(tokens, request->budget->remaining());
             if (decision.accepted_tokens != flight.control_stride || decision.finished() ||
-                decision.continuation != ContinuationAction::Decode ||
-                (decision.prefix_execution_split_after &&
-                 (*decision.prefix_execution_split_after == 0 ||
-                  *decision.prefix_execution_split_after > decision.accepted_tokens))) {
+                decision.continuation != ContinuationAction::Decode) {
                 throw std::logic_error("target control preview returned an invalid decision");
             }
-            splits[row] = decision.prefix_execution_split_after;
             if (tokens.size() > request->generated.capacity() - request->generated.size()) {
                 throw std::logic_error("admission did not reserve control token capacity");
             }
@@ -447,8 +451,7 @@ template <class Instance>
         phase.finish();
         ExecutionCallScope call(*this);
         const auto ticket = instance_.session->start_control(
-            flight.sequences, flight.control_tokens, flight.control_stride,
-            {splits.data(), flight.requests.size()});
+            flight.sequences, flight.control_tokens, flight.control_stride);
         call.finish();
         if (!ticket) {
             discard_control_preview(flight);

@@ -119,7 +119,6 @@ struct RenderedChat {
     // opener; the reasoning feature readout reads the last position before it.
     std::optional<std::size_t> reasoning_boundary;
     std::optional<std::size_t> continuation_boundary;
-    std::vector<std::size_t> rewrite_execution_boundaries;
     // Index n is the exact byte frontier after serializing the first n input messages. A missing
     // value means the template has no independent boundary there (for example, before a leading
     // instruction message folded into the system preamble).

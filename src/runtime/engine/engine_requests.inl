@@ -418,9 +418,9 @@ void EngineCore<Instance>::complete_success(const std::shared_ptr<Request>& requ
     result.token_logprobs                  = std::move(request->token_logprobs);
     result.prompt_logprobs                 = std::move(request->prompt_logprobs);
     result.reasoning_features              = std::move(request->reasoning_features);
-    if (request->begin) {
-        result.stats.reused_prompt_tokens = request->begin->reused_prompt_tokens;
-        result.stats.prefix_reuse_path    = request->begin->prefix_reuse_path;
+    if (request->admitted_begin) {
+        result.stats.reused_prompt_tokens = request->admitted_begin->reused_prompt_tokens;
+        result.stats.prefix_reuse_path    = request->admitted_begin->prefix_reuse_path;
     }
     result.stats.executions             = request->executions;
     result.stats.decode_by_batch        = std::move(request->decode_by_batch);
@@ -449,7 +449,7 @@ void EngineCore<Instance>::complete_success(const std::shared_ptr<Request>& requ
     if (result.stats.timings.decode_seconds <= 0.0 && request->first_token &&
         result.generated_token_ids.size() > 1)
         result.stats.timings.decode_seconds =
-            std::max(0.0, result.stats.timings.total_seconds - result.stats.timings.first_token_seconds);
+            std::max(0.0, result.stats.timings.total_seconds - *result.stats.timings.first_token_seconds);
     release_request(request);
     finish_engine_phase(completion, EngineHostPhase::CommitOutput);
     result.stats.engine_timing       = request->host_timing.public_snapshot();

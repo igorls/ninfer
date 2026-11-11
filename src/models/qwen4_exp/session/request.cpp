@@ -65,11 +65,6 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
     for (const auto id : input.token_ids)
         if (id < 0 || std::uint32_t(id) >= p.definition->resources().text.public_token_count)
             throw std::invalid_argument("prompt token is outside the public vocabulary");
-    std::uint32_t previous = 0;
-    for (const auto f : input.identity.rewrite_execution_frontiers) {
-        if (f <= previous || f > count) throw std::invalid_argument("invalid execution frontier");
-        previous = f;
-    }
     if (const auto& r = input.identity.rewrite_checkpoint;
         r && (!r->recovery_frontier || r->recovery_frontier > r->frontier || r->frontier > count))
         throw std::invalid_argument("invalid input recovery point");
@@ -91,7 +86,7 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
         plan->logprobs.top > kMaximumTopLogprobs ||
         plan->logprobs.prompt_positions.size() > kMaximumPromptReadouts)
         throw std::invalid_argument("token readout exceeds supported bounds");
-    previous = 0;
+    std::uint32_t previous = 0;
     bool first = true;
     for (auto at : plan->logprobs.prompt_positions) {
         if (!plan->logprobs.enabled || plan->logprobs.top || at + 1ULL >= count ||

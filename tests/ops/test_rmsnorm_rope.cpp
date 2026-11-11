@@ -210,7 +210,7 @@ int run_pair_case(int width, int batch, int first_position, std::uint32_t seed,
     Tensor position_tensor(position_device.span(), DType::I32, {width, batch});
     execute(
         [&](CudaExecutionView cuda) {
-            ops::rmsnorm_rope(position_tensor, q_weight_tensor, k_weight_tensor, q_tensor, k_tensor,
+            ops::rmsnorm_rope(position_tensor, q_weight_tensor, k_weight_tensor, static_cast<float>(kEpsilon), static_cast<float>(kTheta), q_tensor, k_tensor,
                               cuda);
         },
         [&](CudaExecutionView cuda) {
@@ -263,7 +263,7 @@ int run_single_case(int tokens, int first_position, std::uint32_t seed, bool gra
     Tensor position_tensor(position_device.span(), DType::I32, {tokens});
     execute(
         [&](CudaExecutionView cuda) {
-            ops::rmsnorm_rope(position_tensor, weight_tensor, input_tensor, cuda);
+            ops::rmsnorm_rope(position_tensor, weight_tensor, static_cast<float>(kEpsilon), static_cast<float>(kTheta), input_tensor, cuda);
         },
         [&](CudaExecutionView cuda) {
             const auto stream = cuda.stream();

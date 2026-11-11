@@ -82,7 +82,7 @@ int run_case(std::int32_t width, std::int32_t batch, std::uint32_t seed, bool gr
             DecodeGraphDefinition definition;
             DecodeGraphExecutable executable;
             definition.capture(stream, [&] {
-                ops::rmsnorm_pack_tail(input_tensor, weight_tensor, output_tensor,
+                ops::rmsnorm_pack_tail(input_tensor, weight_tensor, kEps, output_tensor,
                                        stream_execution);
             });
             executable.instantiate(definition);
@@ -93,7 +93,7 @@ int run_case(std::int32_t width, std::int32_t batch, std::uint32_t seed, bool gr
         }
         cuda_check(cudaStreamDestroy(stream), "destroy stream");
     } else {
-        ops::rmsnorm_pack_tail(input_tensor, weight_tensor, output_tensor,
+        ops::rmsnorm_pack_tail(input_tensor, weight_tensor, kEps, output_tensor,
                                ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
     }

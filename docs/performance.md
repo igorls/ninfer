@@ -1784,3 +1784,66 @@ MTP decode sample is 220.0 tok/s versus 221.7 tok/s for the slowest baseline
 sample. The ordinary decode samples are also slightly slower. This small
 shared-machine comparison does not isolate causes, establish a speed gain, or
 qualify other concurrency levels, artifacts, GPUs or offload routes.
+
+
+## Windows upstream sync `13ebb92f6` (2026-11-11)
+
+Windows 11, MSVC 19.51, CUDA 13.3.33, RTX PRO 6000 Blackwell Workstation
+Edition (driver 621.14). Compare the merge candidate through `13ebb92f6` against
+the saved, previously tested Windows binaries for `8bcb72c85`. Both use the same
+Qwen3.8-27B NVFP4 artifact, FP8 KV, CUDA Graphs, one lane, 8,192 maximum context,
+2 GiB Device Context, no Host context backing, 2,048-token prefill chunk, and
+8 GiB desktop reserve. Thinking is disabled and sampling is greedy. Every sample
+reaches the 256-token output limit with zero prompt-token reuse.
+
+Each row is three fresh CLI invocations per arm, in order baseline, candidate,
+candidate, baseline, baseline, candidate. Prefill and decode are the CLI's
+reported generation metrics, excluding weight loading and prompt preparation.
+Other desktop workloads remain active; GPU clocks are not fixed. Values are
+median [min–max]; changes compare medians. These are whole-request measurements
+at these two selected workloads, not isolated kernel measurements.
+
+Initially approximately 13 GiB was free, below the 20 GiB base-artifact weights
+alone plus the desktop reserve, so full-model checks were held. Free capacity
+subsequently rose to approximately 45 GiB without stopping another workload or
+reducing the reserve. The measurements below and all seven full 27B runtime
+checks then completed. The November 10 results above remain evidence for their
+preceding baseline and source revision, not this comparison.
+
+| Workload and metric | Baseline `8bcb72c85` | Candidate | Change |
+|---|---:|---:|---:|
+| 42-token prompt, ordinary, prefill (ms) | 41.2 [40.9–42.1] | 22.2 [22.2–23.7] | −46.1% |
+| 42-token prompt, ordinary, decode (tok/s) | 63.7 [62.5–64.8] | 64.2 [64.0–65.0] | +0.8% |
+| 4,002-token prompt, optimized-head MTP3, prefill (ms) | 320 [318–322] | 299 [299–300] | −6.6% |
+| 4,002-token prompt, optimized-head MTP3, decode (tok/s) | 218.7 [217.9–219.0] | 220.7 [219.9–221.0] | +0.9% |
+
+The ordinary decode ranges overlap; the best baseline sample exceeds two of the
+three candidate samples. This comparison does not establish a uniform decode
+gain or isolate the cause of the prefill reduction.
+
+Every baseline MTP sample uses 65 rounds, drafts 194 tokens and accepts 190
+(97.9%); every candidate sample uses 64 rounds and accepts all 191 drafted tokens
+(100%). Neither arm reports fallback steps. This different speculative-work
+outcome prevents treating the decode delta as an isolated kernel speed gain.
+Token-for-token or probability equivalence between revisions was not measured.
+
+At displayed precision, both arms report GPU allocations of 21.5 GiB for ordinary
+inference and 22.3 GiB for MTP, and Host allocations of 1.02 MiB and 1.11 MiB,
+respectively. The reserved workspace is 535.0 MiB in both arms. Actual reported
+workspace peaks increase from 3.82 to 4.20 MiB (+0.38 MiB, +9.9%) for the short
+request and from 509.4 to 510.4 MiB (+1.0 MiB, +0.2%) for MTP. These are real
+workspace costs within the existing reservation. Free memory after startup is
+22.1–22.3 GiB for ordinary inference, 21.5 GiB for baseline MTP and 21.5–21.6 GiB
+for candidate MTP. These allocator counters do not measure all process heap/RSS
+or CPU scheduling costs.
+
+Native Windows compiler adaptations preserve exact lazy-range arithmetic without
+`__int128`, use 64-byte TMA descriptor alignment as in the existing MSVC path,
+and name the BF16 sliced-K kernel directly inside the launch lambda. They are
+source/build adaptations, not separately measured inference optimizations.
+
+This comparison does not qualify other concurrency levels, artifacts, MoE or
+DFlash2 performance, offload, resident Flash-Next execution, Spark/distributed,
+Linux or a physical RTX 5090. Full 27B ordinary/MTP/DFlash2 behavior is qualified
+only by the focused transaction, pressure/cancellation and shutdown checks
+recorded in the upstream-port notes.

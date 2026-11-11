@@ -25,6 +25,9 @@ using namespace ninfer::test;
 
 namespace {
 
+constexpr ops::ContextKVMaterializeProfile kProfile{5120, 128, 8, 2048,
+                                                    QType::Q8_G32_FP16, 1.e-6F, 1.e7F};
+
 constexpr int kLayers             = static_cast<int>(ops::kContextKVMaterializeLayers);
 constexpr int kHidden             = 5120;
 constexpr int kRows               = 1024;
@@ -343,7 +346,7 @@ int run_case(Fixture& fixture, const std::string& label, int width, int batch,
     const auto state_offsets      = fixture.records->record_offsets(state_records);
     DeviceBuffer offsets_device   = to_device(state_offsets);
     const std::size_t workspace_bytes =
-        ops::context_kv_materialize_workspace_capacity_bytes(batch, width, width);
+        ops::context_kv_materialize_workspace_capacity_bytes(kProfile, batch, width, width);
     GuardedDeviceBuffer scratch(std::max<std::size_t>(workspace_bytes, 1));
     MemoryArena workspace(scratch.span());
     Tensor context_tensor(context_device.span(), DType::BF16, {kHidden, width, batch});
@@ -357,7 +360,7 @@ int run_case(Fixture& fixture, const std::string& label, int width, int batch,
                : static_cast<std::uint32_t>(width)};
     const auto launch = [&](CudaExecutionView cuda) {
         ops::context_kv_materialize(context_tensor, positions_tensor, counts_tensor, fixture.views,
-                                    envelope, workspace, cuda);
+                                    kProfile, envelope, workspace, cuda);
     };
     launch(ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
@@ -493,7 +496,7 @@ int main() {
                              {-1, -1, -1, 2047, -1, -1, 262142, 262143, 262144}, 0, true, true);
         for (int batch = 1; batch <= 8; ++batch) {
             const auto capacity = ops::context_kv_materialize_workspace_capacity_bytes(
-                batch, 1, batch == 1 ? 2048 : 16);
+                kProfile, batch, 1, batch == 1 ? 2048 : 16);
             if (capacity != fixture.observed_peak[batch]) {
                 std::cerr << "workspace interval peak mismatch B=" << batch << "\n";
                 ++failures;

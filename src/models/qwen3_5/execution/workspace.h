@@ -198,7 +198,7 @@ struct DFlashContextRoots {
 
 template <class Allocator>
 DFlashContextRoots dflash_context(Allocator& allocator, const TextConfig& target,
-                                  const DraftConfig& config, std::int32_t tokens) {
+                                  const dflash::Config& config, std::int32_t tokens) {
     return {
         matrix(allocator, DType::BF16, dimension(target.hidden_size), tokens),
         matrix(allocator, DType::BF16, dimension(target.hidden_size), tokens),
@@ -213,7 +213,7 @@ struct DFlashContextLayerRoots {
 
 template <class Allocator>
 DFlashContextLayerRoots dflash_context_layer(Allocator& allocator, const TextConfig& target,
-                                             const DraftConfig& config, std::int32_t tokens) {
+                                             const dflash::Config& config, std::int32_t tokens) {
     return {
         matrix(allocator, DType::BF16, dimension(config.attention.key_width()), tokens),
         matrix(allocator, DType::BF16, dimension(config.attention.key_width()), tokens),
@@ -233,7 +233,7 @@ struct DFlashAttentionRoots {
 
 template <class Allocator>
 DFlashAttentionRoots dflash_attention(Allocator& allocator, const TextConfig& target,
-                                      const DraftConfig& config, std::int32_t tokens) {
+                                      const dflash::Config& config, std::int32_t tokens) {
     return {
         matrix(allocator, DType::BF16, dimension(target.hidden_size), tokens),
         matrix(allocator, DType::BF16, dimension(config.attention.query_width()), tokens),
@@ -253,7 +253,7 @@ struct DFlash2BranchRoots {
 
 template <class Allocator>
 DFlash2BranchRoots dflash2_branch(Allocator& allocator, const TextConfig& target,
-                                  const DraftConfig& config, std::int32_t width,
+                                  const dflash::Config& config, std::int32_t width,
                                   std::int32_t batch) {
     return {allocator.alloc(DType::BF16, {dimension(target.hidden_size), width, batch}),
             allocator.alloc(DType::BF16,
@@ -267,8 +267,8 @@ struct DFlashMlpRoots {
 };
 
 template <class Allocator>
-DFlashMlpRoots dflash_mlp(Allocator& allocator, const TextConfig& target, const DraftConfig& config,
-                          std::int32_t tokens) {
+DFlashMlpRoots dflash_mlp(Allocator& allocator, const TextConfig& target,
+                          const dflash::Config& config, std::int32_t tokens) {
     return {
         matrix(allocator, DType::BF16, dimension(target.hidden_size), tokens),
         matrix(allocator, DType::BF16, dimension(config.intermediate_size), tokens),

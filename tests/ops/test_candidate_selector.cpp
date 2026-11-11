@@ -461,12 +461,12 @@ int run(bool ties = false, bool dependent = false) {
         Tensor drafts(draft_device.span(), DType::I32, {kSteps, batch_size});
         Tensor q(q_device.span(), DType::FP32, {kCandidates, kSteps, batch_size});
         const auto capacity = ops::candidate_selector_path_workspace_capacity_bytes(
-            kSteps, kSteps, batch_size, batch_size);
+            ops::CandidateSelectorInput::Candidates, kSteps, kSteps, batch_size, batch_size);
         GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 1));
         MemoryArena workspace(scratch.span());
         const auto launch = [&](CudaExecutionView cuda) {
             ops::candidate_selector_path(
-                ids, unary, hidden, anchor, predecessor, successor, positions,
+                ids, unary, hidden, anchor, predecessor, successor, successor.ne[1], positions,
                 static_cast<const ops::SamplingConfig*>(config_device.data()), drafts, q, workspace,
                 cuda);
         };
@@ -577,7 +577,7 @@ int run(bool ties = false, bool dependent = false) {
              dp = to_device(pp), dc = to_device(pc);
         GuardedDeviceBuffer dd(3 * kSteps * 4), dq(3 * kSteps * kCandidates * 4);
         const auto capacity =
-            ops::candidate_selector_path_workspace_capacity_bytes(kSteps, kSteps, 3, 3);
+            ops::candidate_selector_path_workspace_capacity_bytes(ops::CandidateSelectorInput::Candidates, kSteps, kSteps, 3, 3);
         GuardedDeviceBuffer sw(std::max<std::size_t>(capacity, 1));
         MemoryArena workspace(sw.span());
         Tensor ti(di.span(), DType::I32, {kCandidates, kSteps, 3}),
@@ -586,7 +586,7 @@ int run(bool ties = false, bool dependent = false) {
             tp(dp.span(), DType::I32, {3});
         Tensor td(dd.span(), DType::I32, {kSteps, 3}),
             tq(dq.span(), DType::FP32, {kCandidates, kSteps, 3});
-        ops::candidate_selector_path(ti, tu, th, ta, predecessor, successor, tp,
+        ops::candidate_selector_path(ti, tu, th, ta, predecessor, successor, successor.ne[1], tp,
                                      static_cast<const ops::SamplingConfig*>(dc.data()), td, tq,
                                      workspace, ninfer::test::cuda_environment().default_execution);
         cuda_synchronize();
