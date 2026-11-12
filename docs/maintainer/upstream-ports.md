@@ -47,6 +47,14 @@ adaptations use exact unsigned lazy-range arithmetic instead of `__int128` and
 64-byte TMA descriptor alignment, matching the established fork kernel contract.
 Parser errors retain the public cause-only formatting as render errors do.
 
+Release qualification on Colab exposed one retained GDN snapshot fixture creating
+its borrowed-stream execution view after graph capture began. Move that validated
+view construction before capture, matching the other fixture routes. The Linux
+driver rejects the device query during capture; the production Op and its
+independent numerical/state criteria are unchanged. The product benchmark guide
+now describes the integrated prompt/conversation CLI and decode-prefix warmup;
+the superseded corpus/matrix options are removed from that guide.
+
 Verification on Windows 11, MSVC 19.51, CUDA 13.3.33 (`sm_120a`), RTX PRO 6000
 Blackwell Workstation Edition (driver 621.14):
 

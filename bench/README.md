@@ -104,84 +104,66 @@ instructions are in [Tools](../tools/README.md#memory-bandwidth-probe).
 
 ## Product benchmark
 
-The benchmark slices exact token counts from `bench/fixtures/bench_corpus.ids`, calls
-`Engine::prepare_tokens()`, then calls `Engine::generate()` once for each repetition. It does not
-have a private prefill/decode loop and does not call model implementation interfaces.
-
-The matrix contains three independently measured test kinds:
-
-- `pp{P}` prepares `P` tokens and requests one output token. This is the smallest request that runs
-  the model; `prefill t/s` is `P / GenerationTimings.prefill_seconds`.
-- `tg{G}` prepares a one-token seed outside the reported phase and requests `G+1` output tokens.
-  The begin-round token belongs to prefill, leaving exactly `G` tokens in the reported decode
-  phase.
-- `pp{P}+tg{G}` uses the same `G+1` convention after a `P`-token prefill and reports both phase
-  rates from the same generation call.
-
-Unconstrained requests use raw output and disable model-default stops, keeping the requested
-token count exact. All requests disable prefix reuse. When CUDA Graph is enabled and the matrix
-contains decode work, a public generation batch with the selected grammar/concurrency settings
-primes the decode graphs before warmups and measured repetitions.
+`ninfer_bench` prepares explicit prompts or CLI-format conversations and generates through the
+public Engine. It uses the same artifact, startup, sampling and generation options as the CLI;
+there is no private model execution loop. Use its executable `--help` for the complete options.
 
 ## CLI
 
 ```text
-ninfer_bench --weights <artifact.ninfer>
-          [--corpus <ids-path>]
-          [-p, --n-prompt <list>]
-          [-n, --n-gen <list>]
-          [-pg, --prompt-gen <P,G;P,G...>]
-          [-r, --repetitions <n>] [--warmup <n>]
+ninfer_bench <artifact.ninfer>
+          --prompt <text> [--prompt <text> ...]
+          [--messages <conversation.json> ...]
+          [--max-tokens <n>]
+          [--repetitions <n>] [--warmup <n>]
           [--concurrency <1..8>]
-          [--grammar-file <path> | --json-schema-file <path> | --json-object | --regex <pattern> | --choice <text> ...]
-          [--mixed-constraints]
-          [--max-ctx <tokens>] [--prefill-chunk <tokens>]
-          [--kv-dtype <bf16|int8|fp8|nvfp4|k8v4>]
-          [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft]
-          [--device <id>] [--no-cuda-graph] [--profile-measured]
-          [-o, --output <table|json|csv>] [--output-file <path>]
+          [--profile-measured]
+          [--output <table|json|csv>] [--output-file <path>]
+          [common startup and generation options]
 ```
 
-With no `-p`, `-n`, or `-pg`, the matrix is `pp512` and `tg128`.
-`--prefill-chunk` accepts a positive multiple of 128. When omitted, Engine uses 1024 for resident
-models or 4096 for CPU expert offload.
+Provide at least one `--prompt` or `--messages`. Concurrency defaults to the input count. A single
+input is copied to all lanes; with multiple inputs, their count must equal concurrency. Engine
+maximum concurrency defaults to that value unless explicitly configured.
+
+`--max-tokens` is a positive per-request output limit, and EOS is honored; it is not a fixed decode
+step count. Use one output token for prefill-only measurement. Warmup defaults to one complete
+generation, followed by three measured repetitions. Each run uses the same inputs and sampling
+seeds, with runtime caches kept warm. Reports retain actual token counts and per-batch decode
+observations; do not infer a fixed workload from the output limit.
 
 Example:
 
 ```bash
-./build/bench/ninfer_bench \
-  --weights out/qwen3_6_27b.ninfer \
-  -p 512,2048 -n 128 -pg '2048,128' -r 5 --warmup 1
+./build/bench/ninfer_bench out/qwen3_6_27b.ninfer \
+  --prompt 'Explain how a river delta forms.' --no-thinking \
+  --max-tokens 128 --repetitions 5 --warmup 1
 ```
 
-Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (MTP K=1..5, DFlash/DFlash2
-K=1..15); `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
-enabled by default.
+Select a supported backend with `--spec mtp|dflash|dflash2 --draft-tokens K` and the proposal head
+with `--proposal-head full|optimized`. CUDA Graphs are enabled by default. Artifact capabilities
+and native preparation determine which selections are supported.
 
-`--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
-and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with
-`cudaProfilerStart/Stop`. Use it with an Nsight Systems `cudaProfilerApi` capture range so artifact
-load, graph construction, and warmup do not enter topology counts.
+Before each decode run, ordinary one-token requests complete for all concurrency inputs outside
+the timing and profiler ranges. Prefix reuse defaults on for decode and off for prefill-only;
+explicit startup configuration wins. Shared Context capacity still determines which rows remain
+resident. Consequently a decode benchmark's prefill timing is not a fresh uncached CLI prefill.
+
+`--profile-measured` requires `--repetitions 1` and brackets measured execution on all ranks.
+Use an Nsight Systems `cudaProfilerApi` capture range to exclude preparation and warmup.
 
 For a DFlash2 companion artifact:
 
 ```bash
-./build/bench/ninfer_bench --weights out/qwen3_8_27b_nvfp4.ninfer \
-  -pg '2048,128' --spec dflash2 --draft-tokens 7 --lm-head-draft \
-  --max-ctx 4096 --kv-dtype bf16 --warmup 1 -r 3
+./build/bench/ninfer_bench out/qwen3_8_27b_nvfp4_dflash2.ninfer \
+  --prompt 'List the integers from 1 to 600, one per line.' --no-thinking \
+  --max-tokens 128 --spec dflash2 --draft-tokens 7 --proposal-head optimized \
+  --max-context 4096 --kv-dtype bf16 --warmup 1 --repetitions 3
 ```
 
-`--concurrency` submits that many prepared requests per repetition. `--grammar-file`,
-`--json-schema-file`, `--json-object`, `--regex` and repeated `--choice` select mutually exclusive output constraints and enable
-normal text output and default EOS; a constrained request may finish before the output limit.
-`--mixed-constraints` applies the selected constraint to alternate requests and requires concurrency
-of at least two. Warmups use the same mixture and compile constraints before measured repetitions.
-`batch out t/s` measures all actual output tokens over the repetition's submit-to-completion wall
-time. Per-request phase rates remain separate from this aggregate throughput.
-
-The benchmark disables context retention because every repetition is an independent root request.
-Reports record `speculative_backend`, `draft_tokens`, and the proposal head independently;
-JSON and CSV identify DFlash2 explicitly. KV/State capacity uses the native shared Context policy.
+Inputs are independent root requests. Reported request timings, result resolution, retirement,
+Host costs and aggregate throughput use the Engine's observations. Compare revisions with the
+same inputs, output limits, cache settings and actual generated work.
 
 ## Context-cost calibration
 
@@ -1649,6 +1631,3 @@ wire bandwidth. Single-collective graphs can expose NCCL/CUDA replay overhead ab
 captured chain; retain both results. The control connection sends one command per measured shape,
 not one per collective. No model inference or application throughput is measured here.
 
-Before decode measurement, `ninfer_bench` completes a normal one-token request for every
-concurrency input, outside the measured/profiled window, then submits the measured requests
-together. This warms their prefix caches without guaranteeing all rows remain live together.
