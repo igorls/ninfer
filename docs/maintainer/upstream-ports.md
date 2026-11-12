@@ -51,7 +51,12 @@ Release qualification on Colab exposed one retained GDN snapshot fixture creatin
 its borrowed-stream execution view after graph capture began. Move that validated
 view construction before capture, matching the other fixture routes. The Linux
 driver rejects the device query during capture; the production Op and its
-independent numerical/state criteria are unchanged. The product benchmark guide
+independent numerical/state criteria are unchanged. The scoring-state fixture
+also expected explicit Host RoPE vectors after the sync began eliding linear
+positions. It now checks all three actual Device input axes against the exact
+zero-based position oracle. Fresh StateImage clearing, exact repeated scores,
+stale-binding rejection and complete resource retirement retain their criteria.
+The product benchmark guide
 now describes the integrated prompt/conversation CLI and decode-prefix warmup;
 the superseded corpus/matrix options are removed from that guide.
 
@@ -105,9 +110,53 @@ overlap. MTP accepts 191/191 drafts instead of 190/194, so decode includes diffe
 speculative work. Workspace peaks increase by 0.38 MiB and 1.0 MiB within the same
 reported 535 MiB reservation; reported GPU/Host allocations match at displayed
 precision. These results do not isolate a kernel gain or measure all CPU/resource
-costs. Resident Flash-Next execution remains unqualified.
-Linux, physical RTX 5090, Spark/distributed and GLM runtime qualification are not
+costs. Resident Flash-Next execution was held during this Windows stage;
+the subsequent G4 qualification below covers its Linux resident route.
+Physical RTX 5090, Spark/distributed and GLM runtime qualification are not
 established by this source sync.
+
+#### G4 release qualification (November 11, 2026)
+
+Linux Colab G4: RTX PRO 6000 Blackwell Server Edition (97,887 MiB), driver
+580.82.07, CUDA 13.3.73, GCC 13.3.0, CMake 3.31.10 and Python 3.11.17.
+The full native applications/tests/benchmarks build passes after installing the
+image's missing `liburing-dev` prerequisite. Public source is fetched at its
+explicit commit. Tests use the mixed Flash-Next artifact at Hugging Face revision
+`ef61b3c856f91e58a58e41a5a6269b6c8648d266`; all four published v3 input files pass
+their hashes. Offline canonical reframe preserves the payload and produces the
+same canonical entry as the workstation artifact, without requantization.
+
+- All 33 selected native contracts pass, including the seven new draft-helper
+  suites, eleven retained CUDA suites, artifact/materialization, context,
+  frontend/Jinja and Flash model/state contracts. None is skipped.
+- Real-artifact binding passes, followed by all 26 resident Engine cases:
+  backend rejection and concurrency admission; graph/eager and batch parity;
+  ordinary/MTP Host round trips; cache turnover and conversation chains;
+  expert/ragged traces; logprobs/structured output; scoring, prefix independence,
+  hidden readout and chunk invariance; vision reuse; MTP generation, batching,
+  target parity, long FP8, concurrent reuse, shared-prefix promotion and staged
+  materialization. Reclaim and scoring-state checks also pass.
+- Initial failures are retained: the GDN fixture queried its stream during
+  capture, and the scoring fixture required an explicit Host position encoding
+  after linear-position elision. The former is corrected before capture; the
+  latter now checks every actual Device RoPE axis against the same exact oracle.
+  State clearing, exact repeated scores and retirement criteria remain intact.
+  The corrected GDN test also passes natively on Windows. Qualification uses
+  `3071cc26a` for the 33 contracts, binding, Engine and reclaim, and `aad9f9113`
+  for the corrected scoring fixture and benchmark smokes. Both retain the product
+  implementation of `546fb9999`; subsequent release-record edits are documentation.
+- Four ordinary/MTP3 benchmark smokes pass at 582 and 2,202 prompt tokens, three
+  measured generations each, all reaching 65 output tokens. Every measured
+  prompt is fully reused after the benchmark's prefix warmup. These are absolute
+  cached-prompt observations, without a matched preceding Flash build; detailed
+  timings, allocator costs and limits are in the
+  [performance record](../performance.md#flash-next-g4-release-qualification-2026-11-11).
+
+This establishes the selected Linux resident Flash-Next behavior on Server
+Edition. Current Windows resident Flash-Next, physical RTX 5090, expert offload,
+GLM and Spark/distributed routes are not qualified by these G4 checks. The earlier
+ordinary Flash decode cost remains recorded; these smokes do not establish its
+removal. Historical System One quality/calibration scores are not rerun here.
 
 ### Sync through `77c2e5e2` (November 10, 2026)
 
@@ -1742,7 +1791,7 @@ were produced with recipe overrides and are not committed recipes.
 | Routed-expert statistics and trace | no routed-expert observation | `--expert-stats` / `--expert-trace DIR`: the NVFP4-bank `sparse_moe` optionally publishes its top-10 selection, the `qwen4_exp` Program mirrors it per executed unit, and the server keeps live counts (`GET /admin/experts`) and writes `.nxtr` traces with request-log ids | Measures expert-activation skew on real traffic for an expert VRAM budget (keeping only part of the routed experts resident). Off by default; startup reserves the trace slices only when enabled. Op test checks the published ids against the FP64 oracle selection; Engine real cases check record shape, tags, positions and unchanged greedy output |
 | Engine-discovered shared prefix on first sighting (`493b78c4`, `bb8c4068`) | saved whenever its coverage budget allows, ahead of the request's deeper points | takes free space only on its first sighting; the next request to reach it publishes it under the ordinary optional-capture budget (repeated demand still needs two committed requests) | As a fallback it shrank the same request's turn-closure budget to the tokens between them, so with a full context cache a plain multi-turn chat resumed only from the system prefix. Flash-Next v3 with a full cache (Host context 9.49 of 9.52 GB): turns 2 to 4 of a 5.2K-token-system chat reused 5,182 tokens each before and 5,189 / 5,226 / 5,263 after; with ~500-token answers turn 5 reused 5,182 of 7,292 before and 6,892 of 7,480 after. `493b78c4` gated on reused demand, which a capture sees only from the third request, so a full-cache shared system message (~5.7K tokens) asked different questions reused 0, 0, 0, then 5,738; `bb8c4068` gates on another request's crossing: 0, 0, then 5,740 from the third request. The cost against upstream, which reuses from the second request: with no free space, the second request over a new unmarked system message still prefills it cold; an explicit `prompt_cache_breakpoint` on that message reuses from the second request. Real case `conversation chain survives a full cache` also requires a third question over the conversation's system message to resume from it (1,850 of 1,871 tokens); Flash-Next reuse cases pass, and the 27B `prefix_real` and native-transaction tests passed with `493b78c4`. Proposed upstream |
 | JSON structural whitespace | unbounded at every site | each run is limited to 128 bytes, at the root and inside containers and const/enum literals | Sampling could stay in whitespace until the output limit and never reach the value. On the final source a schema request with a thinking budget of 2 returned 160 tokens of whitespace from the first byte, and `{"const":{"changed":true}}` did the same inside the object once the root alone was bounded, so every site needs the limit. Upstream's test rejects "an arbitrary length limit" but only checks 80 spaces, and it passes unchanged. Cost: the first JSON compile in a process took about 260 ms instead of about 9 ms on the Qwen3.8 vocabulary (about 171 ms at a limit of 80, 77 ms at 32); later new grammars in that fixture took about 10-45 ms. Decode time for the same output is unchanged |
-| Static YaRN RoPE (`--yarn-factor`) | the Qwen3.5 position capacity is the artifact's `max_position_embeddings` (262,144) and the converter rejects scaled RoPE | opt-in startup factor in (1,4] for Qwen3.5-family Text RoPE (MTP scaled with it), never stored in the artifact; `max_context` up to `floor(F*262144)`; the causal-attention visible-key envelope rises from 262,144 to 1,048,576; Supervisor limits come from the artifact and the YaRN choice | Community request for 1M-token contexts, documented by Qwen for these checkpoints. In review on `feat/yarn-rope-scaling`, not yet on `workstation`. Hardware qualification is Linux G4 only: the FP64-oracle RoPE and 1M-key attention suites and Qwen3.8-27B retrieval, speed and memory at 256K, 515K and 1.04M ([performance](../performance.md#yarn-long-context-qwen38-27b)). Native Windows builds the products and tests with MSVC and passes the CPU-only CLI, startup-option, Supervisor and dashboard tests; GPU tests and inference ran only on the G4, so no Windows, Workstation Edition, RTX 5090, OrcaRouter or 35B MoE inference was run. The design was compared with an outside contributor's Flash-Next 1M YaRN experiment (same YaRN parameters, enabled automatically above 262,144 there); no code from it was used. DFlash drafts are not scaled. Fork feature; nothing upstream to port |
+| Static YaRN RoPE (`--yarn-factor`) | the Qwen3.5 position capacity is the artifact's `max_position_embeddings` (262,144) and the converter rejects scaled RoPE | opt-in startup factor in (1,4] for Qwen3.5-family Text RoPE (MTP scaled with it), never stored in the artifact; `max_context` up to `floor(F*262144)`; the causal-attention visible-key envelope rises from 262,144 to 1,048,576; Supervisor limits come from the artifact and the YaRN choice | Community request for 1M-token contexts, documented by Qwen for these checkpoints. Integrated into `workstation` by PR #42 (`f6443b0ef`); the following is feature-specific qualification from that change. Hardware qualification is Linux G4 only: the FP64-oracle RoPE and 1M-key attention suites and Qwen3.8-27B retrieval, speed and memory at 256K, 515K and 1.04M ([performance](../performance.md#yarn-long-context-qwen38-27b)). Native Windows builds the products and tests with MSVC and passes the CPU-only CLI, startup-option, Supervisor and dashboard tests; GPU tests and inference ran only on the G4, so no Windows, Workstation Edition, RTX 5090, OrcaRouter or 35B MoE inference was run. The design was compared with an outside contributor's Flash-Next 1M YaRN experiment (same YaRN parameters, enabled automatically above 262,144 there); no code from it was used. DFlash drafts are not scaled. Fork feature; nothing upstream to port |
 | `POST /v1/rerank` | no rerank route | Jina-shaped rerank scored by an in-process System One Choice; `GET /v1/models` advertises `ninfer-choice-rerank-v1`; missing or wrong API key is HTTP 401 with the OpenAI error object | Added 2026-10-02. `return_documents` defaults to true. Choice labels stay off the public response |
 
 ## Dropped

@@ -1630,4 +1630,3 @@ payload GB/s. These are sustained repeated-enqueue measurements, not isolated re
 wire bandwidth. Single-collective graphs can expose NCCL/CUDA replay overhead absent from a long
 captured chain; retain both results. The control connection sends one command per measured shape,
 not one per collective. No model inference or application throughput is measured here.
-

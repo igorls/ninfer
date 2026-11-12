@@ -1847,3 +1847,64 @@ DFlash2 performance, offload, resident Flash-Next execution, Spark/distributed,
 Linux or a physical RTX 5090. Full 27B ordinary/MTP/DFlash2 behavior is qualified
 only by the focused transaction, pressure/cancellation and shutdown checks
 recorded in the upstream-port notes.
+
+## Flash-Next G4 release qualification (2026-11-11)
+
+Linux Colab G4, RTX PRO 6000 Blackwell Server Edition (97,887 MiB), driver
+580.82.07, CUDA 13.3.73, GCC 13.3.0, Python 3.11.17. Product implementation
+`546fb9999`, with test-only corrections through `aad9f9113`. The full native
+build, 33 selected contracts, 26 real-artifact resident Engine cases, binding,
+reclaim and scoring-state checks pass. Initial fixture failures and their
+disposition are retained in the [port record](maintainer/upstream-ports.md#g4-release-qualification-november-11-2026).
+
+Artifact: `igorls/Qwen3.8-Flash-Next-mixed-NInfer` revision
+`ef61b3c856f91e58a58e41a5a6269b6c8648d266`, published v3 entry and three
+continuations verified before canonical reframe. The payload is unchanged;
+the canonical entry matches the workstation copy. No conversion or quantization
+recipe is changed for this test.
+
+These four absolute benchmark smokes use one lane, resident weights, BF16 KV,
+CUDA Graphs, maximum context 4,096, prefill chunk 1,024, Device Context 2 GiB,
+no Host context backing and an 8 GiB desktop reserve. Sampling is greedy with
+thinking disabled. The same river-observation passage is repeated 15 or 60 times,
+then asks for the integers 1 through 600. The prepared prompts contain 582 and
+2,202 tokens. Each mode starts in a separate benchmark process, with one full
+warmup and three measured repetitions; order is short ordinary, short MTP3,
+long ordinary, long MTP3. MTP uses the full shared head.
+
+The current native benchmark completes one-token prefix requests before every
+decode repetition. All twelve measurements report **zero computed prefill tokens**
+and reach the 65-token output limit. Consequently first-token timing below is
+for a fully cached prompt, excluding model loading and prompt preparation; it
+does not measure fresh-prompt prefill or HTTP TTFT. Values are median [min–max].
+
+| Prompt tokens / backend | Decode (tok/s) | Cached first token (ms) |
+|---|---:|---:|
+| 582 / ordinary | 134.16 [134.13–139.41] | 1.221 [1.192–1.249] |
+| 582 / MTP3 | 277.96 [277.66–284.47] | 1.191 [1.185–1.420] |
+| 2,202 / ordinary | 130.85 [130.81–136.30] | 1.640 [1.615–1.737] |
+| 2,202 / MTP3 | 275.77 [273.90–279.94] | 1.637 [1.629–1.719] |
+
+Every MTP repetition uses 16 rounds, drafts and accepts all 48 proposals and
+reports zero fallback steps. This describes these requests, not an acceptance
+rate across tasks. No token-for-token comparison between benchmark modes or
+against a preceding build is asserted.
+
+Startup allocator counters are identical between the two lengths within each
+backend: ordinary uses 72.18 GiB Device (70.01 GiB weights) and 93.68 MiB Host;
+MTP uses 73.70 GiB Device (71.50 GiB weights) and 93.79 MiB Host. Thus enabling
+MTP adds approximately 1.52 GiB Device and 0.11 MiB Host for this configuration.
+The counters include the 2 GiB Device Context and a 159.62 MiB workspace
+allocation. Measured workspace peaks are 0.8455 MiB ordinary and 3.3804 MiB MTP
+in every repetition; each uploads 327,680 PLE bytes. There is no Host expert or
+Host context backing in this configuration. These are allocator/transfer
+observations, not complete CPU RSS or disk-I/O measurements.
+
+There is no matched preceding Flash build in this qualification, clocks are not
+locked, and the first ordinary samples are faster than their following two.
+The earlier ordinary Flash slowdown attributed in part to resident graph launch
+ordering remains on record above and is not shown repaired by these results.
+The changed benchmark inputs and prefix warmup also prevent direct comparison
+with the historical fixed-token matrix. These smokes do not qualify fresh
+prefill performance, other concurrency levels, Windows resident Flash, physical
+RTX 5090, offload, or System One quality/calibration.
