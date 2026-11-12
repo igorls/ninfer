@@ -58,13 +58,6 @@ public:
                     "fresh scoring inherited a prior history frontier");
             require(!row.mtp_frontier && !row.mtp_table.valid(),
                     "scoring unexpectedly uses an MTP history");
-            require(row.rope_positions.size() == 3 * row.ids.size(),
-                    "fresh scoring omitted its three RoPE axes");
-            for (unsigned axis = 0; axis < 3; ++axis)
-                for (std::size_t t = 0; t < row.ids.size(); ++t)
-                    require(row.rope_positions[axis * row.ids.size() + t] ==
-                                static_cast<std::int32_t>(t),
-                            "fresh scoring inherited RoPE positions");
             const auto eos = implementation.parameters.profile->config.text.ple.eos;
             require(row.ple_raw_tail == std::array<TokenId, 2>{eos, eos},
                     "fresh scoring inherited the previous PLE raw tail");
@@ -112,6 +105,9 @@ public:
             const auto bases     = read_tensor<std::int32_t>(frame.batch.base_positions);
             const auto valid     = read_tensor<std::int32_t>(frame.batch.valid_columns);
             const auto positions = read_tensor<std::int32_t>(frame.batch.positions);
+            // Linear positions may be implicit in the submitted WorkRow. Observe
+            // all three actual kernel input axes, independent of that encoding.
+            const auto rope_positions = read_tensor<std::int32_t>(frame.batch.rope_positions);
             require(bases.size() == 1 && bases[0] == 0 && valid.size() == 1 &&
                         valid[0] == static_cast<std::int32_t>(row.ids.size()),
                     "fresh scoring device batch exposes an earlier KV history");
@@ -123,6 +119,13 @@ public:
             for (std::size_t t = 0; t < positions.size(); ++t)
                 require(positions[t] == static_cast<std::int32_t>(t),
                         "fresh scoring device positions do not start at zero");
+            require(rope_positions.size() == 3 * row.ids.size(),
+                    "fresh scoring device input omitted its three RoPE axes");
+            for (unsigned axis = 0; axis < 3; ++axis)
+                for (std::size_t t = 0; t < row.ids.size(); ++t)
+                    require(rope_positions[axis * row.ids.size() + t] ==
+                                static_cast<std::int32_t>(t),
+                            "fresh scoring device input inherited RoPE positions");
             if (!results) {
                 const auto image    = read_state(row.states.at(0).destination);
                 first_state_written = std::any_of(image.begin(), image.end(), [](std::byte value) {
