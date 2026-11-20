@@ -226,21 +226,6 @@ void validate_standard_output_controls(const Json& body) {
 }
 
 void validate_compatibility_hints(const Json& body) {
-    // vLLM exposes repetition_penalty, but NInfer's Engine intentionally has no such sampler.
-    // The neutral value is accepted so common client defaults remain harmless.
-    if (body.contains("repetition_penalty") && !body.at("repetition_penalty").is_null()) {
-        if (!body.at("repetition_penalty").is_number()) {
-            bad_request("repetition_penalty must be a number", "repetition_penalty");
-        }
-        const double value = body.at("repetition_penalty").get<double>();
-        if (!std::isfinite(value) || value != 1.0) {
-            bad_request(
-                "a non-neutral repetition_penalty requires a sampler transform that NInfer does "
-                "not provide; only repetition_penalty=1 is accepted",
-                "repetition_penalty", "repetition_penalty_not_supported");
-        }
-    }
-
     // vLLM/SGLang expose processor-specific kwargs. They cannot be honored by NInfer's fixed
     // Vision frontend, so only omitted/null-valued overrides are semantically neutral.
     if (body.contains("mm_processor_kwargs") && !body.at("mm_processor_kwargs").is_null()) {
@@ -762,9 +747,10 @@ void parse_sampling(const Json& body, GenerationRequest& output) {
     SamplingParams& sampling   = output.sampling;
     sampling.temperature       = get_number(body, "temperature");
     sampling.top_p             = get_number(body, "top_p");
-    sampling.presence_penalty  = get_number(body, "presence_penalty");
-    sampling.frequency_penalty = get_number(body, "frequency_penalty");
-    sampling.seed              = get_seed(body);
+    sampling.presence_penalty   = get_number(body, "presence_penalty");
+    sampling.frequency_penalty  = get_number(body, "frequency_penalty");
+    sampling.repetition_penalty = get_number(body, "repetition_penalty");
+    sampling.seed               = get_seed(body);
 
     // vLLM and SGLang expose top_k/min_p on their OpenAI-compatible endpoints; both map directly
     // to NInfer's native sampler and are useful for Qwen's published sampling presets.

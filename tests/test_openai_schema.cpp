@@ -85,6 +85,55 @@ Json parse_sse(const std::string& event) {
     return Json::parse(event.substr(prefix.size(), event.size() - prefix.size() - 2));
 }
 
+int test_repetition_penalty() {
+    int failures = 0;
+    ServeOptions server;
+    server.launch.generation.sampling.repetition_penalty = 1.25F;
+    const auto translate                                 = [&](const GenerationRequest& request) {
+        return to_request_options(
+            request, server, resolve_prompt_semantics(request, server, reasoning_effort_template()),
+            true);
+    };
+    for (bool stream : {false, true}) {
+        Json body      = base_request();
+        body["stream"] = stream;
+        for (double penalty : {0.5, 1.0, 1.1}) {
+            body["repetition_penalty"] = penalty;
+            const auto error           = api_error([&] { (void)parse(body); });
+            failures += check(error.status == 0,
+                              "valid Chat repetition penalty rejected: " + error.message);
+            if (error.status != 0) { continue; }
+            const auto request = parse(body).generation;
+            failures += check(request.sampling.repetition_penalty == penalty,
+                              "Chat repetition penalty is retained");
+            failures += check(translate(request).execution.sampling.repetition_penalty ==
+                                  static_cast<float>(penalty),
+                              "Chat repetition penalty overrides the server value");
+        }
+        body.erase("repetition_penalty");
+        failures += check(
+            !parse(body).generation.sampling.repetition_penalty &&
+                translate(parse(body).generation).execution.sampling.repetition_penalty == 1.25F,
+            "omitted penalty preserves the server default");
+        body["repetition_penalty"] = nullptr;
+        failures += check(
+            !parse(body).generation.sampling.repetition_penalty &&
+                translate(parse(body).generation).execution.sampling.repetition_penalty == 1.25F,
+            "null penalty preserves the server default");
+    }
+    for (const Json& value :
+         std::vector<Json>{0, -0.5, 1e-100, 1e100, std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::quiet_NaN(), true, "1.1", Json::array(),
+                           Json::object()}) {
+        Json body                  = base_request();
+        body["repetition_penalty"] = value;
+        const auto error           = api_error([&] { (void)options(parse(body).generation); });
+        failures += check(error.status == 400 && error.param == "repetition_penalty",
+                          "invalid repetition penalty has a field-specific 400");
+    }
+    return failures;
+}
+
 int test_request_envelope_and_sampling() {
     int failures                  = 0;
     Json body                     = base_request();
@@ -834,10 +883,6 @@ int test_reasoning_and_extensions() {
     body["mm_processor_kwargs"] = Json{{"max_pixels", nullptr}};
     failures +=
         check(parse(body).generation.messages.size() == 1, "neutral ecosystem defaults accepted");
-    body["repetition_penalty"] = 1.1;
-    failures +=
-        check(api_error([&] { (void)parse(body); }).code == "repetition_penalty_not_supported",
-              "non-neutral repetition penalty rejected");
     body                        = base_request();
     body["mm_processor_kwargs"] = Json{{"max_pixels", 100}};
     failures +=
@@ -1234,6 +1279,7 @@ int main() {
                           "explicit cache mode disables automatic shared prefix reuse");
     }
     failures += test_request_envelope_and_sampling();
+    failures += test_repetition_penalty();
     failures += test_standard_field_policy();
     failures += test_prompt_cache_boundaries();
     failures += test_constrained_decoding_extensions();

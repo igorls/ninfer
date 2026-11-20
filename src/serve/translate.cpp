@@ -44,7 +44,17 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
         sampling.frequency_penalty = static_cast<float>(*request.frequency_penalty);
     }
     if (request.repetition_penalty) {
-        sampling.repetition_penalty = static_cast<float>(*request.repetition_penalty);
+        const double value = *request.repetition_penalty;
+        if (!std::isfinite(value) || value <= 0.0 || value > std::numeric_limits<float>::max()) {
+            invalid_sampling("repetition_penalty must be positive and finite in FP32",
+                             "repetition_penalty");
+        }
+        const float represented = static_cast<float>(value);
+        if (represented <= 0.0F) {
+            invalid_sampling("repetition_penalty must be positive and finite in FP32",
+                             "repetition_penalty");
+        }
+        sampling.repetition_penalty = represented;
     }
     if (request.seed) {
         sampling.seed = *request.seed;

@@ -178,7 +178,7 @@ The endpoint supports:
   processing without generation, and llama.cpp's `-1` removes the output limit so the request
   stops at its context capacity;
 - `temperature`, `top_p`, presence/frequency penalties, and signed integer `seed`;
-- the compatible `top_k` (`0..20`) and `min_p` (`0..1`) sampler extensions;
+- the compatible `top_k` (`0..20`), `min_p` (`0..1`), and `repetition_penalty` sampler extensions;
 - up to four non-empty stop strings, applied to both reasoning and answer output;
 - `n:1`, text-only `modalities`, and `response_format` `text`, `json_object` or `json_schema`
   (see [Structured output](#structured-output));
@@ -418,10 +418,15 @@ tool identity, prompt rendering, or output. Non-string values are malformed; non
 other message roles remain unsupported because they carry participant identity that the loaded chat
 template cannot represent.
 
-For commonly generated OpenAI-compatible payloads, `repetition_penalty` is accepted only at its
-neutral value `1` on Chat Completions (Responses and the `--repetition-penalty` server flag apply
-it), and `mm_processor_kwargs` when empty or containing only null values. String-form
-image/video URLs are also accepted.
+Chat Completions and Responses apply `repetition_penalty` through the native sampler (including
+MTP and DFlash2). It must be positive and finite in FP32; malformed, non-positive, overflowing, or
+underflowing values return a field-specific HTTP 400 on `repetition_penalty`. Omission or `null`
+inherits the server/model default; an explicit `1` overrides that default with the neutral value.
+Values above `1` discourage tokens present in the prepared prompt or generated history; values
+below `1` encourage them. Raw model logprobs remain unchanged.
+
+For commonly generated OpenAI-compatible payloads, `mm_processor_kwargs` is accepted when empty
+or containing only null values. String-form image/video URLs are also accepted.
 
 Malformed protocol values return field-specific HTTP 400 errors. Invalid media sources, bytes, or
 decoded content use `invalid_media`; remote fetch and timeout failures retain their dedicated
