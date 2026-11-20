@@ -62,6 +62,10 @@ ninfer_add_test(ninfer_request_log_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_request_log.cpp"
   LIBRARIES ninfer_serve)
 
+ninfer_add_test(ninfer_request_log_file_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_request_log_file.cpp"
+          "${PROJECT_SOURCE_DIR}/src/serve/request_log_file.cpp")
+
 ninfer_add_test(ninfer_expert_route_recorder_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_expert_route_recorder.cpp"
   LIBRARIES ninfer_serve)

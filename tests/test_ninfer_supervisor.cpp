@@ -1937,10 +1937,17 @@ int test_with_request_log() {
     using namespace ninfer::supervisor;
     int f            = 0;
     const auto added = with_request_log({"model.ninfer"}, "C:/logs/r.jsonl");
-    f += check(added.size() == 3 && added[1] == "--request-log-jsonl", "config path is passed on");
+    f += check(added.size() == 5 && added[1] == "--request-log-jsonl" &&
+                   added[2] == "C:/logs/r.jsonl" && added[3] == "--request-log-max-size" &&
+                   added[4] == "64MiB",
+               "configured path and managed retention reach the child");
     const auto kept =
         with_request_log({"model.ninfer", "--request-log-jsonl", "explicit.jsonl"}, "other.jsonl");
     f += check(kept[2] == "explicit.jsonl", "an explicit flag wins over the config field");
+    const std::vector<std::string> full_history{
+        "model.ninfer", "--request-log-jsonl=bench.jsonl", "--request-log-max-size=0B"};
+    f += check(with_request_log(full_history, "other.jsonl") == full_history,
+               "explicit full history takes precedence over managed retention");
     f += check(with_request_log({"model.ninfer"}, "").size() == 1, "empty path adds nothing");
     return f;
 }

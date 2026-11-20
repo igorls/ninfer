@@ -1702,6 +1702,13 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
+`--request-log-max-size SIZE` sets a byte cap for diagnostic use with one writer. At startup
+and before an append would exceed a nonzero cap, the server prunes the file to the newest
+complete records within one quarter of the cap, leaving room for the incoming record and
+preserving the running instance's startup records. Pruning stages the replacement beside the
+log in `FILE.prune.tmp`. A record too large to fit is skipped with a warning. The standalone
+default is `0B`, which keeps the full history for measurement campaigns.
+
 Every line is one `ninfer_serve_request_log` schema-v31 JSON object. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,

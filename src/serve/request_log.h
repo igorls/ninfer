@@ -4,11 +4,12 @@
 // by operational_log.* and never consumes these serialized records.
 
 #include "serve/request_events.h"
+#include "serve/request_log_file.h"
 #include "product/config/options.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -70,18 +71,19 @@ std::string format_throughput_json(const std::string& server_instance_id,
 
 ServerLogEnvironment query_server_log_environment(int device);
 
-// Opens in append mode so one campaign file can contain multiple independently started MTP/model
-// blocks. Every line carries server_instance_id because request ids restart at one per process.
+// Opens in append mode. Campaigns can keep multiple independently started MTP/model blocks.
+// Every line carries server_instance_id because request ids restart at one per process.
 class JsonlRequestLog {
 public:
     explicit JsonlRequestLog(std::string server_instance_id, const std::string& path,
                              const std::string& protected_artifact_path = {},
-                             std::shared_ptr<spdlog::logger> logger     = {});
+                             std::shared_ptr<spdlog::logger> logger = {},
+                             std::uint64_t max_bytes = 0);
 
     JsonlRequestLog(const JsonlRequestLog&)            = delete;
     JsonlRequestLog& operator=(const JsonlRequestLog&) = delete;
 
-    [[nodiscard]] bool enabled() const noexcept { return output_.is_open(); }
+    [[nodiscard]] bool enabled() const noexcept { return file_.configured() && !failed_.load(); }
 
     [[nodiscard]] const std::string& server_instance_id() const noexcept {
         return server_instance_id_;
@@ -103,14 +105,15 @@ public:
     void write_throughput(const ThroughputReport& report);
 
 private:
-    void append(std::string record);
+    void append(std::string record, bool startup = false);
 
     std::string path_;
     std::string server_instance_id_;
-    std::ofstream output_;
+    RequestLogFile file_;
     std::mutex mutex_;
     std::shared_ptr<spdlog::logger> logger_;
-    bool failed_ = false;
+    std::atomic<bool> failed_{false};
+    bool reported_oversize_ = false;
 };
 
 } // namespace ninfer::serve

@@ -44,15 +44,6 @@ std::string new_server_instance_id() {
            std::to_string(micros);
 }
 
-std::filesystem::path normalized_absolute_path(const std::string& value) {
-    std::error_code error;
-    std::filesystem::path path = std::filesystem::weakly_canonical(value, error);
-    if (!error) { return path; }
-    error.clear();
-    path = std::filesystem::absolute(value, error);
-    return error ? std::filesystem::path(value).lexically_normal() : path.lexically_normal();
-}
-
 std::string cuda_version_string(int version) {
     if (version <= 0) { return {}; }
     return std::to_string(version / 1000) + '.' + std::to_string((version % 1000) / 10);
@@ -871,21 +862,14 @@ ServerLogEnvironment query_server_log_environment(int device) {
 
 JsonlRequestLog::JsonlRequestLog(std::string server_instance_id, const std::string& path,
                                  const std::string& protected_artifact_path,
-                                 std::shared_ptr<spdlog::logger> logger)
-    : path_(path), server_instance_id_(std::move(server_instance_id)), logger_(std::move(logger)) {
-    if (path_.empty()) { return; }
-    if (!protected_artifact_path.empty() &&
-        normalized_absolute_path(path_) == normalized_absolute_path(protected_artifact_path)) {
-        throw std::invalid_argument("request JSONL log must not overwrite the model artifact");
-    }
-    output_.open(path_, std::ios::out | std::ios::app);
-    if (!output_) {
-        throw std::runtime_error("failed to open request JSONL log for append: " + path_);
-    }
-}
+                                 std::shared_ptr<spdlog::logger> logger, std::uint64_t max_bytes)
+    : path_(path), server_instance_id_(std::move(server_instance_id)),
+      file_(path, max_bytes, protected_artifact_path), logger_(std::move(logger)) {}
 
 void JsonlRequestLog::write_startup_config(const product::ServeOptions& options) {
-    if (enabled()) append(format_startup_config_json(server_instance_id_, unix_time_ms(), options));
+    if (enabled()) {
+        append(format_startup_config_json(server_instance_id_, unix_time_ms(), options), true);
+    }
 }
 
 void JsonlRequestLog::write_server_start(const product::ServeOptions& options,
@@ -902,9 +886,10 @@ void JsonlRequestLog::write_server_start(const product::ServeOptions& options,
     const std::optional<std::uint64_t> artifact_size =
         error ? std::nullopt : std::optional<std::uint64_t>(size);
     append(format_server_start_json(
-        server_instance_id_, unix_time_ms(), options, engine_options, sampling_defaults,
-        public_model_id, description, startup, snapshot,
-        query_server_log_environment(options.launch.engine.device), artifact_size));
+               server_instance_id_, unix_time_ms(), options, engine_options, sampling_defaults,
+               public_model_id, description, startup, snapshot,
+               query_server_log_environment(options.launch.engine.device), artifact_size),
+           true);
 }
 
 void JsonlRequestLog::write_request_start(const RequestLogContext& context) {
@@ -942,21 +927,25 @@ void JsonlRequestLog::write_throughput(const ThroughputReport& report) {
     append(format_throughput_json(server_instance_id_, unix_time_ms(), report));
 }
 
-void JsonlRequestLog::append(std::string record) {
-    bool report_failure = false;
+void JsonlRequestLog::append(std::string record, bool startup) {
+    RequestLogWrite result;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (failed_) { return; }
-        output_ << record << '\n';
-        output_.flush();
-        if (!output_) {
-            failed_        = true;
-            report_failure = true;
+        if (failed_.load()) return;
+        result = file_.append(record, startup);
+        if (result == RequestLogWrite::Failed) failed_.store(true);
+        if (result == RequestLogWrite::Oversized) {
+            if (reported_oversize_) return;
+            reported_oversize_ = true;
         }
     }
-    if (report_failure && logger_ != nullptr) {
-        logger_->error("request log disabled | write failed | {}",
+    if (logger_ == nullptr) return;
+    if (result == RequestLogWrite::Failed) {
+        logger_->error("request log disabled | write or prune failed | {}",
                        product::format_pretty_text(path_));
+    } else if (result == RequestLogWrite::Oversized) {
+        logger_->warn("request log record skipped | exceeds available log capacity | {}",
+                      product::format_pretty_text(path_));
     }
 }
 

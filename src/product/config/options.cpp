@@ -522,6 +522,9 @@ ParsedOptions parse(int argc, char** argv, EntryPoint entry,
         case Field::RequestJsonl:
             launch.logging.request_jsonl = path();
             break;
+        case Field::RequestJsonlMaxSize:
+            launch.logging.request_jsonl_max_bytes = u64();
+            break;
         case Field::Prompt:
             parsed.cli.prompt = string();
             break;

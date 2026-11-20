@@ -370,11 +370,7 @@ void EngineChild::spawn() {
         reserve = desktop_reserve_gib_;
     }
     if (reserve >= 0) { args = with_desktop_reserve(std::move(args), reserve); }
-    // The config's request_log was parsed and then only ever READ: the collector tailed a
-    // file the engine had never been told to write, so every request panel on the dashboard
-    // (TTFT, decode rate, prefix reuse, speculative acceptance) was empty unless someone
-    // also hand-wrote --request-log-jsonl into args. Pass it through.
-    args = with_request_log(std::move(args), cfg_.engine.request_log);
+    args = with_request_log(std::move(args), launch_spec.request_log);
     // Same omission, with teeth: api_key_file was read only by the collector, so the
     // engine ran unauthenticated however it was bound. launch_spec, not cfg_, because
     // that copy was taken under the lock.

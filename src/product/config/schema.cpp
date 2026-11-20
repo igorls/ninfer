@@ -154,6 +154,9 @@ constexpr FieldSpec kFields[] = {
      ConfigurationUnit::Milliseconds},
     {Field::RequestJsonl, "logging.request_jsonl", "--request-log-jsonl", "", "FILE",
      "Structured startup/request log; empty disables it.", Scope::Serve},
+    {Field::RequestJsonlMaxSize, "logging.request_jsonl_max_size", "--request-log-max-size", "", "SIZE",
+     "Prune the structured request log at this size; 0B keeps the full history.", Scope::Serve,
+     ConfigurationUnit::Bytes},
     {Field::Prompt, "cli.prompt", "--prompt", "", "TEXT",
      "Prompt text, mutually exclusive with --messages.", Scope::Cli},
     {Field::Messages, "cli.messages", "--messages", "", "FILE",
@@ -394,6 +397,7 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
     case Field::HostCapacity:
     case Field::MediaCache:
     case Field::MemoryHeadroom:
+    case Field::RequestJsonlMaxSize:
         return quantity(value, true, false);
     case Field::MediaLive:
     case Field::VisionMemoryBudget:

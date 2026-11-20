@@ -55,6 +55,7 @@ enum class Field {
     LogLevel,
     StatsInterval,
     RequestJsonl,
+    RequestJsonlMaxSize,
     Prompt,
     Messages,
     ReasoningEffort,

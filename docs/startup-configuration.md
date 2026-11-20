@@ -249,6 +249,7 @@ HTTP 参数保留各协议的取值合同；例如 OpenAI 请求可以将输出�
 | `logging.level` | `--log-level` | `trace/debug/info/warning/error/critical/off` / `info` | 产品诊断日志级别 |
 | `logging.stats_interval` | `--stats-interval` | 毫秒时长 / `5s` | serve 吞吐统计周期；0 关闭周期输出 |
 | `logging.request_jsonl` | `--request-log-jsonl` | 路径 / `""` | serve 结构化启动/请求日志；空值关闭 |
+| `logging.request_jsonl_max_size` | `--request-log-max-size` | 字节容量 / `0B` | 请求日志容量上限；`0B` 保留完整历史 |
 
 ### 2.7 进程控制与环境
 

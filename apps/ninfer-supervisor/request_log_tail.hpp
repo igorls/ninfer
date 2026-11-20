@@ -1,8 +1,7 @@
 #pragma once
 
 // Follows the engine's request log as it grows, reading only what was appended since the last
-// poll. The log is appended for the life of an installation and reaches gigabytes; reading it
-// whole on every dashboard request took most of a minute and gigabytes of memory per call.
+// poll. A prune replaces the file with its retained tail, which is read as a new generation.
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN

@@ -250,6 +250,9 @@ StartupConfigurationView view(const LaunchOptions& launch, EntryPoint entry, con
         case Field::RequestJsonl:
             value = launch.logging.request_jsonl.string();
             break;
+        case Field::RequestJsonlMaxSize:
+            value = launch.logging.request_jsonl_max_bytes;
+            break;
         case Field::Prompt:
             if (!cli->messages_path.empty()) continue;
             value = cli->prompt;

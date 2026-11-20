@@ -79,6 +79,7 @@ max_size = "256MiB" # Responses store capacity, separate from the KV/State conte
 level = "info" # trace / debug / info / warning / error / critical / off
 stats_interval = "5s" # serve only; 0ms disables periodic throughput logs.
 request_jsonl = "" # serve only; empty disables structured request logging.
+request_jsonl_max_size = "0B" # serve only; 0B keeps the full history.
 
 [cli]
 prompt = "Explain sparse attention briefly."

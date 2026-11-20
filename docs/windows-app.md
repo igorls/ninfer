@@ -41,9 +41,11 @@ paths for any other auxiliary resources in custom arguments.
 | Application shortcuts | Start menu → NInfer Workstation |
 
 The dashboard's request figures and its Diagnose findings come from the request log. The
-log is never trimmed, so the Supervisor reads an existing one once, in the background, when it
-starts (about 8 s for 750 MiB) and the findings show that progress until it finishes; after that
-it reads only the records the engine appends.
+Supervisor defaults its managed request log to 64 MiB. The engine prunes an oversized existing
+log on startup and prunes again before new records would exceed the cap. It keeps up to the
+newest 16 MiB of complete records and the running engine's startup metadata. The dashboard
+reloads this retained history in the background. Set `--request-log-max-size` in launch
+arguments to override the default, or use `0B` for a run that needs the full history.
 
 **Calling apps** on Monitor reports observed requests over a rolling 15-minute window, grouped by
 User-Agent. Completed, cancelled, failed, unfinished-at-restart and awaiting-outcome requests are separate; admission

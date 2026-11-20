@@ -1001,14 +1001,18 @@ inline std::vector<std::string> with_engine_endpoint(std::vector<std::string> ar
     return args;
 }
 
-// Adds --request-log-jsonl PATH unless the caller already passed one explicitly, in which
-// case the explicit flag wins and the config field is ignored -- an operator who wrote the
-// flag by hand meant it. An empty path is a no-op, so a config that does not ask for a
-// request log does not get one.
+// The managed diagnostic log keeps a bounded history. A launch can override both the
+// path and size, including an explicit 0B for a campaign that needs a full history.
 inline std::vector<std::string> with_request_log(std::vector<std::string> args,
                                                  const std::string& path) {
-    if (path.empty() || product::has_serve_argument(args, "logging.request_jsonl")) return args;
-    return product::set_serve_argument(std::move(args), "logging.request_jsonl", path);
+    if (path.empty()) return args;
+    if (!product::has_serve_argument(args, "logging.request_jsonl")) {
+        args = product::set_serve_argument(std::move(args), "logging.request_jsonl", path);
+    }
+    if (!product::has_serve_argument(args, "logging.request_jsonl_max_size")) {
+        args = product::set_serve_argument(std::move(args), "logging.request_jsonl_max_size", "64MiB");
+    }
+    return args;
 }
 
 // Adds --api-key-file PATH so the engine actually authenticates. Without this the

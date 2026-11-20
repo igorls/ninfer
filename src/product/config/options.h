@@ -45,6 +45,7 @@ struct StartupLoggingOptions {
     LogLevel level                  = LogLevel::Info;
     std::uint32_t stats_interval_ms = 5000;
     std::filesystem::path request_jsonl;
+    std::uint64_t request_jsonl_max_bytes = 0;
 };
 
 struct LaunchOptions {
