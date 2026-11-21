@@ -453,6 +453,12 @@ public:
     [[nodiscard]] std::span<const TokenLogprobs> round_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::span<const TokenLogprobs> prompt_token_logprobs(std::uint32_t lane) const;
     [[nodiscard]] std::span<const float> reasoning_features(std::uint32_t lane) const;
+    [[nodiscard]] std::uint32_t prompt_hidden_layer_count() const noexcept;
+    [[nodiscard]] std::uint32_t prompt_hidden_size(std::uint32_t lane) const;
+    [[nodiscard]] std::span<const std::uint16_t> prompt_hidden_rows(std::uint32_t lane) const;
+    [[nodiscard]] std::vector<std::uint16_t> take_prompt_hidden_rows(std::uint32_t lane);
+    [[nodiscard]] std::span<const std::uint8_t> prompt_token_types(std::uint32_t lane) const;
+    [[nodiscard]] std::span<const TokenId> prompt_token_ids(std::uint32_t lane) const;
 private:
     std::unique_ptr<detail::SessionImpl> impl_;
 };

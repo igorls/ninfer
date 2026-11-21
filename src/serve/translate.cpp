@@ -380,6 +380,8 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
     options.execution.requested_output_tokens = static_cast<std::uint32_t>(request.max_tokens);
     options.execution.allow_prefix_reuse      = allow_prefix_reuse;
     options.execution.allow_prefix_publication = !request.prompt_cache_read_only;
+    options.execution.capture_prompt_hidden_states = request.capture_prompt_hidden_states;
+    options.execution.hidden_states_layers         = request.hidden_states_layers;
     if (semantics.enable_thinking != false) {
         options.execution.thinking.budget = request.thinking_budget
                                                 ? request.thinking_budget

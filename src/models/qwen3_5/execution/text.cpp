@@ -43,7 +43,7 @@ bool is_sequence(const TextStateUpdate& update) {
 
 TextRun::TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate update,
                  ops::CausalAttentionExecutionEnvelope envelope, Tensor hidden,
-                 const DFlashFeatureSink* features)
+                 const DFlashFeatureSink* features, const HiddenTapSink* hidden_tap)
     : view_(execution), inputs_(std::move(inputs)), update_(update), envelope_(envelope),
       hidden_(hidden), traversal_scope_(view_.workspace.scope()) {
     const auto& config = view_.parameters.profile->config.text;
@@ -108,6 +108,17 @@ TextRun::TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate
             if (layer >= view_.parameters.text.layers.size())
                 throw std::invalid_argument("Main feature layer is outside the model");
         features_ = *features;
+    }
+    if (hidden_tap && !hidden_tap->taps.empty()) {
+        for (const auto& tap : hidden_tap->taps) {
+            const bool valid_layer =
+                tap.layer == kHiddenStateTapEmbedding ||
+                (tap.layer >= 0 &&
+                 static_cast<std::size_t>(tap.layer) < view_.parameters.text.layers.size());
+            if (!tap.host_destination || !valid_layer)
+                throw std::invalid_argument("Main hidden tap sink is invalid");
+        }
+        hidden_tap_ = *hidden_tap;
     }
     residual_ = view_.workspace.alloc(DType::BF16, {channels, columns});
 }
@@ -361,11 +372,33 @@ bool TextRun::start() {
     }
     stage_ = Stage::Layer;
     prefix();
+    if (hidden_tap_) {
+        const std::size_t bytes = residual_.bytes();
+        for (const auto& tap : hidden_tap_->taps) {
+            if (tap.layer == kHiddenStateTapEmbedding) {
+                if (bytes > tap.host_bytes)
+                    throw std::logic_error("Main hidden tap destination is smaller than residual");
+                CUDA_CHECK(cudaMemcpyAsync(tap.host_destination, residual_.data, bytes,
+                                           cudaMemcpyDeviceToHost, view_.execution.stream()));
+            }
+        }
+    }
     return poll();
 }
 
 void TextRun::complete_layer() {
     capture_features(layer_);
+    if (hidden_tap_) {
+        const std::size_t bytes = residual_.bytes();
+        for (const auto& tap : hidden_tap_->taps) {
+            if (tap.layer == static_cast<std::int32_t>(layer_)) {
+                if (bytes > tap.host_bytes)
+                    throw std::logic_error("Main hidden tap destination is smaller than residual");
+                CUDA_CHECK(cudaMemcpyAsync(tap.host_destination, residual_.data, bytes,
+                                           cudaMemcpyDeviceToHost, view_.execution.stream()));
+            }
+        }
+    }
     post_mixer_scope_.reset();
     ++layer_;
     stage_ = Stage::Layer;

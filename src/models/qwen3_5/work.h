@@ -46,6 +46,8 @@ struct PromptReadout {
     TokenLogprobOptions options;
     std::vector<TokenId> next_ids;
     std::optional<std::uint32_t> feature_position;
+    bool capture_hidden_rows = false;
+    std::vector<std::int32_t> hidden_layers;
 };
 
 struct InputWindow {
@@ -126,6 +128,8 @@ struct ForwardResult {
     std::optional<GeneratedResult> generated;
     std::vector<TokenLogprobs> prompt_logprobs;
     std::vector<float> reasoning_features;
+    std::uint32_t prompt_hidden_size = 0;
+    std::vector<std::uint16_t> prompt_hidden_rows;
 };
 
 struct ContextResult {

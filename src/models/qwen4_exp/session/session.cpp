@@ -491,6 +491,12 @@ std::span<const float> Session::reasoning_features(std::uint32_t lane) const {
     const auto& s = impl_->sequences[lane];
     return s ? std::span<const float>(s->reasoning_features) : std::span<const float>{};
 }
+std::uint32_t Session::prompt_hidden_layer_count() const noexcept { return 0; }
+std::uint32_t Session::prompt_hidden_size(std::uint32_t) const { return 0; }
+std::span<const std::uint16_t> Session::prompt_hidden_rows(std::uint32_t) const { return {}; }
+std::vector<std::uint16_t> Session::take_prompt_hidden_rows(std::uint32_t) { return {}; }
+std::span<const std::uint8_t> Session::prompt_token_types(std::uint32_t) const { return {}; }
+std::span<const TokenId> Session::prompt_token_ids(std::uint32_t) const { return {}; }
 std::optional<ExpertRouteGeometry> Session::expert_route_geometry() const noexcept {
     if (!impl_->plan.route_trace) return {};
     const auto layers = static_cast<std::uint16_t>(impl_->definition->config().text.layers.size());

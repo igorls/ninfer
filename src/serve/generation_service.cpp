@@ -612,6 +612,10 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.reasoning_tokens    = static_cast<int>(result.reasoning_tokens);
     outcome.finish_reason       = result.finish_reason;
     outcome.matched_stop_string = std::move(result.matched_stop_string);
+    outcome.prompt_hidden_size  = result.prompt_hidden_size;
+    outcome.prompt_hidden_rows  = std::move(result.prompt_hidden_rows);
+    outcome.prompt_token_types  = std::move(result.prompt_token_types);
+    outcome.prompt_token_ids    = std::move(result.prompt_token_ids);
     if (!result.token_logprobs.empty() || !result.prompt_logprobs.empty()) {
         const auto describe = [&](const ninfer::TokenLogprob& value) {
             TokenLogprobEntry entry{.token_id    = value.token,

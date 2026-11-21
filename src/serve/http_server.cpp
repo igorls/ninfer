@@ -141,6 +141,7 @@ bool report_has_activity(const ThroughputReport& report) {
 
 const char* endpoint_name(std::string_view path) noexcept {
     if (path == "/v1/chat/completions") { return "openai_chat_completions"; }
+    if (path == "/v1/hidden_states") { return "ninfer_hidden_states"; }
     if (path == "/v1/score") { return "ninfer_score"; }
     if (path == "/v1/rerank") { return "ninfer_rerank"; }
     if (path == "/v1/systemone" || path == "/systemone") { return "typesafe_systemone"; }
@@ -516,6 +517,7 @@ void HttpServer::register_routes() {
         });
     };
     post("/v1/chat/completions", &HttpServer::handle_chat_completions);
+    post("/v1/hidden_states", &HttpServer::handle_hidden_states);
     post("/v1/score", &HttpServer::handle_score);
     post("/v1/rerank", &HttpServer::handle_rerank);
     post("/v1/systemone", &HttpServer::handle_systemone);

@@ -419,6 +419,33 @@ std::span<const float> Session::reasoning_features(std::uint32_t lane) const {
     if (lane >= impl_->max_concurrency) throw std::out_of_range("readout lane is out of range");
     return impl_->requests[lane].reasoning_features;
 }
+std::uint32_t Session::prompt_hidden_layer_count() const noexcept {
+    return impl_->plan.profile ? impl_->plan.profile->config.text.num_hidden_layers : 0U;
+}
+std::uint32_t Session::prompt_hidden_size(std::uint32_t lane) const {
+    if (lane >= impl_->max_concurrency) throw std::out_of_range("readout lane is out of range");
+    return impl_->requests[lane].prompt_hidden_size;
+}
+std::span<const std::uint16_t> Session::prompt_hidden_rows(std::uint32_t lane) const {
+    if (lane >= impl_->max_concurrency) throw std::out_of_range("readout lane is out of range");
+    return impl_->requests[lane].prompt_hidden_rows;
+}
+std::vector<std::uint16_t> Session::take_prompt_hidden_rows(std::uint32_t lane) {
+    if (lane >= impl_->max_concurrency) throw std::out_of_range("readout lane is out of range");
+    return std::exchange(impl_->requests[lane].prompt_hidden_rows, {});
+}
+std::span<const std::uint8_t> Session::prompt_token_types(std::uint32_t lane) const {
+    if (lane >= impl_->max_concurrency) throw std::out_of_range("readout lane is out of range");
+    const auto& base = impl_->requests[lane].base;
+    if (!base || !base->prompt) return {};
+    return base->prompt->token_types;
+}
+std::span<const TokenId> Session::prompt_token_ids(std::uint32_t lane) const {
+    if (lane >= impl_->max_concurrency) throw std::out_of_range("readout lane is out of range");
+    const auto& base = impl_->requests[lane].base;
+    if (!base || !base->prompt) return {};
+    return base->prompt->token_ids;
+}
 } // namespace ninfer::models::qwen3_5
 
 namespace ninfer::models::qwen3_5::detail {

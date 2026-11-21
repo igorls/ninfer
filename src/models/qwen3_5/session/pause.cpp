@@ -335,6 +335,9 @@ bool SessionImpl::begin_pause(SequenceHandle handle, runtime::PauseAction action
     if (!saved->snapshot) {
         release_sequence_kv(state);
         release_sequence_state(state);
+        // ReleaseAndReplay replays from token 0 on resume; discard partial hidden-state chunks
+        // captured before the pause so Replay re-captures them cleanly without duplicating tokens.
+        control.prompt_hidden_rows.clear();
     }
     saved->sequence    = std::move(state);
     saved->control     = std::move(control);

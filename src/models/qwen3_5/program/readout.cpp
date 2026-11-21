@@ -1,6 +1,7 @@
 #include "models/qwen3_5/program/internal.h"
 #include "models/qwen3_5/execution/linear.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace ninfer::models::qwen3_5::detail {
@@ -38,17 +39,45 @@ void RankProgramImpl::enqueue_round_readout(ComputeOperation& operation) {
 
 void RankProgramImpl::enqueue_prompt_readout(ComputeOperation& operation) {
     operation.prompt_indices.clear();
-    operation.feature_pending = false;
+    operation.feature_pending       = false;
+    operation.prompt_hidden_pending = false;
     const auto* forward = std::get_if<ForwardWork>(&operation.request.work.operation);
-    if (!forward || forward->purpose != ForwardPurpose::Prefill || !operation.width) return;
+    if (!forward ||
+        (forward->purpose != ForwardPurpose::Prefill &&
+         forward->purpose != ForwardPurpose::Replay) ||
+        !operation.width)
+        return;
     const auto& window = forward->inputs.at(operation.forward_row);
     if (!window.readout) return;
+    auto& frame = resources.frame;
+    auto hidden = frame.input_view(static_cast<int>(operation.width), 1).hidden;
+    if (window.readout->capture_hidden_rows) {
+        const auto& req_layers = window.readout->hidden_layers;
+        const std::size_t slot_bytes =
+            static_cast<std::size_t>(frame.spec.hidden) *
+            static_cast<std::size_t>(frame.spec.prefill_chunk) * sizeof(std::uint16_t);
+        auto* host_base = static_cast<std::uint8_t*>(frame.host_prompt_hidden.data);
+        const std::size_t bytes = hidden.bytes();
+        if (bytes > slot_bytes)
+            throw std::logic_error("prompt hidden readout exceeds frame capacity");
+        if (req_layers.empty()) {
+            CUDA_CHECK(cudaMemcpyAsync(host_base, hidden.data, bytes,
+                                       cudaMemcpyDeviceToHost, device.stream()));
+        } else {
+            for (std::size_t k = 0; k < req_layers.size(); ++k) {
+                if (req_layers[k] == kHiddenStateTapFinalNorm) {
+                    CUDA_CHECK(cudaMemcpyAsync(host_base + k * slot_bytes, hidden.data, bytes,
+                                               cudaMemcpyDeviceToHost, device.stream()));
+                }
+            }
+        }
+        operation.prompt_hidden_pending = true;
+    }
+    if (!resources.readout) return;
     auto& readout = *resources.readout;
     const auto& options = window.readout->options;
     const auto begin = operation.rows.at(operation.forward_row).main_frontier;
     const auto end = begin + operation.width;
-    auto& frame = resources.frame;
-    auto hidden = frame.input_view(static_cast<int>(operation.width), 1).hidden;
     if (window.readout->feature_position && *window.readout->feature_position >= begin &&
         *window.readout->feature_position < end) {
         readout.enqueue_feature(hidden.slice(1,
@@ -84,6 +113,29 @@ void RankProgramImpl::collect_prompt_readout(ComputeOperation& operation) {
         if (!output.reasoning_features.empty())
             throw std::logic_error("reasoning feature row was read twice");
         output.reasoning_features = resources.readout->collect_feature();
+    }
+    if (operation.prompt_hidden_pending) {
+        const auto* base = static_cast<const std::uint16_t*>(resources.frame.host_prompt_hidden.data);
+        const std::size_t H = static_cast<std::size_t>(resources.frame.spec.hidden);
+        const std::size_t W = static_cast<std::size_t>(operation.width);
+        const std::size_t K = std::max<std::size_t>(1, window.readout->hidden_layers.size());
+        const std::size_t slot_elems =
+            H * static_cast<std::size_t>(resources.frame.spec.prefill_chunk);
+        output.prompt_hidden_size = static_cast<std::uint32_t>(H);
+        if (K == 1) {
+            output.prompt_hidden_rows.insert(output.prompt_hidden_rows.end(), base, base + W * H);
+        } else {
+            const std::size_t old_size = output.prompt_hidden_rows.size();
+            output.prompt_hidden_rows.resize(old_size + W * K * H);
+            std::uint16_t* dst = output.prompt_hidden_rows.data() + old_size;
+            for (std::size_t t = 0; t < W; ++t) {
+                for (std::size_t k = 0; k < K; ++k) {
+                    const std::uint16_t* src = base + k * slot_elems + t * H;
+                    std::copy_n(src, H, dst);
+                    dst += H;
+                }
+            }
+        }
     }
 }
 

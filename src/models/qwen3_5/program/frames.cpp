@@ -154,6 +154,11 @@ FrameLayout plan_frames(LayoutBuilder& builder, const FrameSpec& spec) {
         out.host.score_best = add(host, DType::FP32, {kScoreTile}, "Host score best log probabilities");
         out.host.score_hidden = add(host, DType::BF16,
             {spec.hidden, kScoreTile}, "Host score hidden rows");
+    } else {
+        out.host.prompt_hidden = add(
+            host, DType::BF16,
+            {spec.hidden, chunk, static_cast<std::int32_t>(kMaximumHiddenStateTapLayers)},
+            "Host prompt hidden rows");
     }
     out.host.bytes = host.finish(kAlignment, "Host execution frame");
     return out;
@@ -292,6 +297,7 @@ ExecutionFrame::ExecutionFrame(MemorySpan backing, const FrameLayout& layout)
     if (layout.host.score_argmax) host_score_argmax = layout.host.score_argmax->bind(host);
     if (layout.host.score_best) host_score_best = layout.host.score_best->bind(host);
     if (layout.host.score_hidden) host_score_hidden = layout.host.score_hidden->bind(host);
+    if (layout.host.prompt_hidden) host_prompt_hidden = layout.host.prompt_hidden->bind(host);
 }
 
 void ExecutionFrame::validate_input_shape(std::int32_t width, std::int32_t batch) const {

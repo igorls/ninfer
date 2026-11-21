@@ -63,7 +63,9 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_prefill(SequenceHandl
             pending.vision_id = forward.inputs.back().visual->window.id;
         forward.sample = sample ? SamplePurpose::FirstToken : SamplePurpose::None;
         forward.sampling.push_back({request.sampling_host, constrained, request.base->logprobs});
-        if (!request.base->logprobs.prompt_positions.empty() || request.base->reasoning_feature_position) {
+        if (!request.base->logprobs.prompt_positions.empty() ||
+            request.base->reasoning_feature_position ||
+            request.base->capture_prompt_hidden_states) {
             auto& readout = forward.inputs.back().readout.emplace();
             readout.options = request.base->logprobs;
             readout.options.prompt_positions.clear();
@@ -76,6 +78,10 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_prefill(SequenceHandl
                 *request.base->reasoning_feature_position >= begin &&
                 *request.base->reasoning_feature_position < end)
                 readout.feature_position = request.base->reasoning_feature_position;
+            if (request.base->capture_prompt_hidden_states) {
+                readout.capture_hidden_rows = true;
+                readout.hidden_layers       = request.base->hidden_states_layers;
+            }
         }
         return submit_execution(std::move(pending), std::move(*reservation),
                                 Work{.operation = std::move(forward)});
@@ -119,6 +125,12 @@ std::optional<runtime::ExecutionTicket> SessionImpl::start_replay(SequenceHandle
         forward.inputs.back().visual = prepare_visual(state, begin, end);
         if (forward.inputs.back().visual)
             pending.vision_id = forward.inputs.back().visual->window.id;
+        if (request.base->capture_prompt_hidden_states &&
+            end <= request.base->summary.prompt_tokens) {
+            auto& readout               = forward.inputs.back().readout.emplace();
+            readout.capture_hidden_rows = true;
+            readout.hidden_layers       = request.base->hidden_states_layers;
+        }
         return submit_execution(std::move(pending), std::move(*reservation),
                                 Work{.operation = std::move(forward)});
     } catch (const std::exception& error) {

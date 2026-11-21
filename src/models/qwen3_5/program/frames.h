@@ -96,6 +96,7 @@ struct FrameHostLayout {
     std::optional<TensorRegion> drafts;
     std::optional<TensorRegion> step_positions, step_rope_positions, step_valid_columns;
     std::optional<TensorRegion> score_logprobs, score_targets, score_argmax, score_best, score_hidden;
+    std::optional<TensorRegion> prompt_hidden;
     std::size_t bytes = 0;
 };
 
@@ -175,6 +176,7 @@ public:
     Tensor control_ids;
     Tensor host_masks, host_drafts, host_score_logprobs;
     Tensor host_score_targets, host_score_argmax, host_score_best, host_score_hidden;
+    Tensor host_prompt_hidden;
     Tensor host_step_positions, host_step_rope_positions, host_step_valid_columns;
     MemorySpan ingress, commit, egress;
     Tensor anchors, frontiers, backend_frontiers, extents, valid_columns;

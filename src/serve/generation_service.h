@@ -50,6 +50,10 @@ struct GenerationOutcome {
     std::vector<TokenLogprobPosition> token_logprobs;
     // One entry per requested prompt position, in request order.
     std::vector<PromptLogprobPosition> prompt_logprobs;
+    std::uint32_t prompt_hidden_size = 0;
+    std::vector<std::uint16_t> prompt_hidden_rows;
+    std::vector<std::uint8_t> prompt_token_types;
+    std::vector<ninfer::TokenId> prompt_token_ids;
     std::string reasoning;
     std::vector<ninfer::TokenId> generated_token_ids;
     std::vector<ninfer::GeneratedToolCall> tool_calls;
@@ -134,6 +138,10 @@ public:
     // Raw artifact-tokenizer encoding, for validating single-token closed-set options.
     [[nodiscard]] std::vector<ninfer::TokenId> tokenize_text(std::string_view text) const {
         return engine_->tokenize_text(text);
+    }
+
+    [[nodiscard]] std::string token_bytes(ninfer::TokenId id) const {
+        return engine_->token_bytes(id);
     }
 
     [[nodiscard]] const EngineDescription& description() const { return engine_->description(); }

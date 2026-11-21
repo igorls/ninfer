@@ -42,6 +42,8 @@ struct RequestBasePlanImpl {
     ResolvedSamplingParameters sampling;
     TokenLogprobOptions logprobs;
     std::optional<std::uint32_t> reasoning_feature_position;
+    bool capture_prompt_hidden_states = false;
+    std::vector<std::int32_t> hidden_states_layers;
     std::shared_ptr<const qwen::VisionExecutionInput> vision;
     std::vector<CaptureGroup> capture_groups;
     std::shared_ptr<const PreparedCaptureBacking> capture_backing;
@@ -124,6 +126,8 @@ struct RequestControl {
     ResolvedSamplingParameters sampling_host;
     std::vector<TokenLogprobs> round_logprobs, prompt_logprobs;
     std::vector<float> reasoning_features;
+    std::uint32_t prompt_hidden_size = 0;
+    std::vector<std::uint16_t> prompt_hidden_rows;
     SpeculativeStats speculative_stats;
     std::shared_ptr<const RequestBasePlanImpl> base;
     std::optional<UnitDemand> permit;

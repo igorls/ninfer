@@ -188,6 +188,31 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
             features->residency_slots = frame.residency_slots.slice(0, 0, batch);
         }
     }
+    std::optional<execution::HiddenTapSink> hidden_tap;
+    if (const auto* forward_work = std::get_if<ForwardWork>(&operation.request.work.operation)) {
+        if (forward_work->purpose == ForwardPurpose::Prefill ||
+            forward_work->purpose == ForwardPurpose::Replay) {
+            const auto& window = forward_work->inputs.at(operation.forward_row);
+            if (window.readout && window.readout->capture_hidden_rows) {
+                const auto& req_layers = window.readout->hidden_layers;
+                const std::size_t slot_bytes =
+                    static_cast<std::size_t>(frame.spec.hidden) *
+                    static_cast<std::size_t>(frame.spec.prefill_chunk) * sizeof(std::uint16_t);
+                auto* host_base = static_cast<std::uint8_t*>(frame.host_prompt_hidden.data);
+                execution::HiddenTapSink sink;
+                for (std::size_t k = 0; k < req_layers.size(); ++k) {
+                    const std::int32_t layer = req_layers[k];
+                    if (layer == kHiddenStateTapFinalNorm) continue;
+                    sink.taps.push_back(execution::HiddenTapEntry{
+                        .layer            = layer,
+                        .host_destination = host_base + k * slot_bytes,
+                        .host_bytes       = slot_bytes,
+                    });
+                }
+                if (!sink.taps.empty()) hidden_tap.emplace(std::move(sink));
+            }
+        }
+    }
     resources.work.reset();
     if (forward) prefill_timer.start();
     if (!forward) gpu_timer.begin_target();
@@ -196,7 +221,7 @@ void RankProgramImpl::begin_target(ComputeOperation& operation) {
                                      resources.decoder.text_kv, resources.state_images.linear(),
                                      resources.moe.get()},
         std::move(inputs), update, ops::CausalAttentionExecutionEnvelope{minimum, maximum},
-        input.hidden, features ? &*features : nullptr);
+        input.hidden, features ? &*features : nullptr, hidden_tap ? &*hidden_tap : nullptr);
     operation.row_finished = operation.text->start();
 }
 

@@ -418,6 +418,10 @@ void EngineCore<Instance>::complete_success(const std::shared_ptr<Request>& requ
     result.token_logprobs                  = std::move(request->token_logprobs);
     result.prompt_logprobs                 = std::move(request->prompt_logprobs);
     result.reasoning_features              = std::move(request->reasoning_features);
+    result.prompt_hidden_size              = request->prompt_hidden_size;
+    result.prompt_hidden_rows              = std::move(request->prompt_hidden_rows);
+    result.prompt_token_types              = std::move(request->prompt_token_types);
+    result.prompt_token_ids                = std::move(request->prompt_token_ids);
     if (request->admitted_begin) {
         result.stats.reused_prompt_tokens = request->admitted_begin->reused_prompt_tokens;
         result.stats.prefix_reuse_path    = request->admitted_begin->prefix_reuse_path;

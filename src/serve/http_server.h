@@ -95,6 +95,7 @@ private:
                                               httplib::Response& res) const;
     void register_monitor_routes();
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res);
+    void handle_hidden_states(const httplib::Request& req, httplib::Response& res);
     void handle_score(const httplib::Request& req, httplib::Response& res);
     void handle_systemone(const httplib::Request& req, httplib::Response& res);
     void handle_rerank(const httplib::Request& req, httplib::Response& res);

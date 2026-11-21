@@ -333,6 +333,22 @@ void EngineCore<Instance>::resolve_prefill_progress(
         if (features.empty()) throw std::logic_error("Session prefill omitted reasoning features");
         request->reasoning_features.assign(features.begin(), features.end());
     }
+    if (request->options.execution.capture_prompt_hidden_states) {
+        auto rows              = instance_.session->take_prompt_hidden_rows(lane);
+        const auto hidden_size = instance_.session->prompt_hidden_size(lane);
+        const std::size_t layer_count =
+            std::max<std::size_t>(1, request->options.execution.hidden_states_layers.size());
+        const auto expected = static_cast<std::size_t>(request->prompt_summary.prompt_tokens) *
+                              layer_count * hidden_size;
+        if (hidden_size == 0 || rows.size() != expected)
+            throw std::logic_error("Session prefill omitted prompt hidden rows");
+        request->prompt_hidden_size = hidden_size;
+        request->prompt_hidden_rows = std::move(rows);
+        const auto types = instance_.session->prompt_token_types(lane);
+        request->prompt_token_types.assign(types.begin(), types.end());
+        const auto ids = instance_.session->prompt_token_ids(lane);
+        request->prompt_token_ids.assign(ids.begin(), ids.end());
+    }
     phase.finish();
     commit_pending(std::move(*progress.pending), std::move(flight));
     progress.pending.reset();

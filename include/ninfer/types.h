@@ -396,6 +396,10 @@ struct TokenLogprobs {
     std::vector<TokenLogprob> candidates;
 };
 
+inline constexpr std::uint32_t kMaximumHiddenStateTapLayers = 8;
+inline constexpr std::int32_t kHiddenStateTapFinalNorm      = -1;
+inline constexpr std::int32_t kHiddenStateTapEmbedding      = -2;
+
 struct ExecutionOptions {
     SamplingOverrides sampling;
     TokenLogprobOptions logprobs;
@@ -403,6 +407,12 @@ struct ExecutionOptions {
     // new assistant turn's content (the thinking opener). Requires a text new-assistant prompt
     // and a positive output budget; disables prefix reuse and publication for the request.
     bool capture_reasoning_features       = false;
+    // Prompt hidden-state readout: capture every prompt token's BF16 hidden row during prefill.
+    // Each entry in hidden_states_layers is 0..N-1 (post-layer residual), kHiddenStateTapFinalNorm (-1),
+    // or kHiddenStateTapEmbedding (-2, post-prefix raw embeddings). Empty defaults to {-1}.
+    // Rows are emitted token-major as [seq_len, layers.size(), hidden_size]. Disables prefix reuse.
+    bool capture_prompt_hidden_states     = false;
+    std::vector<std::int32_t> hidden_states_layers;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     // With allow_prefix_reuse, false makes the request read-only in the context cache: it may
@@ -972,6 +982,12 @@ struct GenerationResult {
     std::vector<TokenLogprobs> prompt_logprobs;
     // FP32 expansion of the BF16 reasoning-frontier hidden row.
     std::vector<float> reasoning_features;
+    // Present only when capture_prompt_hidden_states was enabled: packed BF16 [prompt_tokens, hidden_size].
+    std::uint32_t prompt_hidden_size = 0;
+    std::vector<std::uint16_t> prompt_hidden_rows;
+    // Parallel to prompt_tokens when capture_prompt_hidden_states was enabled (0 = text, non-zero = vision).
+    std::vector<std::uint8_t> prompt_token_types;
+    std::vector<TokenId> prompt_token_ids;
     std::string content;
     std::string reasoning;
     std::vector<GeneratedToolCall> tool_calls;

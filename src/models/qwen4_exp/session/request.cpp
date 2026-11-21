@@ -79,6 +79,8 @@ RequestBasePlan Session::plan_request(qwen::PreparedPrompt&& prompt,
     plan->sampling = options.sampling;
     plan->logprobs = options.logprobs;
     plan->reasoning_feature_position = options.reasoning_feature_position;
+    if (options.capture_prompt_hidden_states || !options.hidden_states_layers.empty())
+        throw std::invalid_argument("prompt hidden-state readout is not supported on Qwen4Exp");
     for (auto id : plan->logprobs.candidates)
         if (id < 0 || std::uint32_t(id) >= p.definition->resources().text.public_token_count)
             throw std::invalid_argument("logprob candidate is outside vocabulary");

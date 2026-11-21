@@ -196,6 +196,9 @@ struct GenerationRequest {
     std::vector<LogprobCandidate> logprob_candidates;
     // Ascending prompt token positions whose next-token distribution is read during prefill.
     std::vector<std::uint32_t> logprob_prompt_positions;
+    // Prompt-wide BF16 hidden-state readout for external encoders (empty defaults to {-1} final norm).
+    bool capture_prompt_hidden_states = false;
+    std::vector<std::int32_t> hidden_states_layers;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
     std::size_t tool_name_max_length = 64;

@@ -91,6 +91,25 @@ RequestBasePlan SessionImpl::plan_request(qwen::PreparedPromptData&& prompt,
     }
     base->logprobs                        = options.logprobs;
     base->reasoning_feature_position      = options.reasoning_feature_position;
+    base->capture_prompt_hidden_states    = options.capture_prompt_hidden_states;
+    base->hidden_states_layers            = options.hidden_states_layers;
+    if (!base->hidden_states_layers.empty()) {
+        if (!base->capture_prompt_hidden_states) {
+            throw std::invalid_argument("hidden_states_layers requires capture_prompt_hidden_states");
+        }
+        if (base->hidden_states_layers.size() > kMaximumHiddenStateTapLayers) {
+            throw std::invalid_argument("hidden_states_layers exceeds kMaximumHiddenStateTapLayers");
+        }
+        for (const std::int32_t layer : base->hidden_states_layers) {
+            const bool valid =
+                layer == kHiddenStateTapFinalNorm || layer == kHiddenStateTapEmbedding ||
+                (layer >= 0 &&
+                 static_cast<std::uint32_t>(layer) < plan.profile->config.text.num_hidden_layers);
+            if (!valid) {
+                throw std::invalid_argument("hidden_states_layers entry is outside the model layer range");
+            }
+        }
+    }
     base->context_cache                   = prompt.context_cache;
     base->summary.prompt_tokens           = static_cast<std::uint32_t>(prompt.token_ids.size());
     base->summary.requested_output_tokens = options.requested_output_tokens;

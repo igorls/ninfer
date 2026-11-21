@@ -101,6 +101,17 @@ void SessionImpl::receive_result(runtime::ResultReady<ExecutionTypes>&& event) {
             std::make_move_iterator(forward->prompt_logprobs.end()));
         if (!forward->reasoning_features.empty())
             readout_request.reasoning_features = std::move(forward->reasoning_features);
+        if (!forward->prompt_hidden_rows.empty()) {
+            readout_request.prompt_hidden_size = forward->prompt_hidden_size;
+            if (readout_request.prompt_hidden_rows.empty()) {
+                readout_request.prompt_hidden_rows = std::move(forward->prompt_hidden_rows);
+            } else {
+                readout_request.prompt_hidden_rows.insert(readout_request.prompt_hidden_rows.end(),
+                                                          forward->prompt_hidden_rows.begin(),
+                                                          forward->prompt_hidden_rows.end());
+                forward->prompt_hidden_rows.clear();
+            }
+        }
         if (forward->processed_tokens != current.columns)
             throw std::logic_error("forward result changed its reserved input window");
         for (std::size_t b = 0; b < current.members.size(); ++b)

@@ -29,6 +29,9 @@ struct ResolvedExecutionOptions {
     TokenLogprobOptions logprobs;
     // Prompt position whose final-normalized hidden row the Program copies out during prefill.
     std::optional<std::uint32_t> reasoning_feature_position;
+    // Prompt-wide BF16 hidden readout (empty defaults to {kHiddenStateTapFinalNorm}).
+    bool capture_prompt_hidden_states = false;
+    std::vector<std::int32_t> hidden_states_layers;
 };
 
 struct ResolvedRequestOptions {

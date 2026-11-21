@@ -11,6 +11,7 @@
 #include <optional>
 #include <span>
 #include <variant>
+#include <vector>
 
 namespace ninfer::models::qwen3_5::execution {
 
@@ -67,6 +68,18 @@ struct DFlashFeatureSink {
     std::span<const std::uint32_t> layers;
 };
 
+// Optional pinned-host sink for tapping post-prefix (-2) and/or post-layer (0..N-1) residuals
+// during prefill without allocating extra GPU VRAM.
+struct HiddenTapEntry {
+    std::int32_t layer     = 0;
+    void* host_destination = nullptr;
+    std::size_t host_bytes = 0;
+};
+
+struct HiddenTapSink {
+    std::vector<HiddenTapEntry> taps;
+};
+
 // One mathematical Main traversal. All borrowed storage stays live through completion or
 // cancellation. The arena's residual and pending post-mixer scope remain reserved across
 // readiness yields; destroy the traversal before reusing that arena for subsequent work.
@@ -74,7 +87,8 @@ class TextRun {
 public:
     TextRun(TextExecutionView execution, TextInputs inputs, TextStateUpdate update,
             ops::CausalAttentionExecutionEnvelope envelope, Tensor hidden,
-            const DFlashFeatureSink* features = nullptr);
+            const DFlashFeatureSink* features = nullptr,
+            const HiddenTapSink* hidden_tap   = nullptr);
     ~TextRun();
     TextRun(const TextRun&)            = delete;
     TextRun& operator=(const TextRun&) = delete;
@@ -109,6 +123,7 @@ private:
     ops::CausalAttentionExecutionEnvelope envelope_;
     Tensor hidden_;
     std::optional<DFlashFeatureSink> features_;
+    std::optional<HiddenTapSink> hidden_tap_;
     MemoryArena::Scope traversal_scope_;
     Tensor residual_;
     std::optional<moe::Schedule::Activity> activity_;

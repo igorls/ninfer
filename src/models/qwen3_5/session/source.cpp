@@ -14,7 +14,8 @@ bool SessionImpl::checkpoint_matches(CheckpointHandle handle, const RequestBaseP
     if ((!base.impl_->logprobs.prompt_positions.empty() &&
          record.frontier() > base.impl_->logprobs.prompt_positions.front()) ||
         (base.impl_->reasoning_feature_position &&
-         record.frontier() > *base.impl_->reasoning_feature_position)) {
+         record.frontier() > *base.impl_->reasoning_feature_position) ||
+        base.impl_->capture_prompt_hidden_states) {
         return false;
     }
     if (record.frontier() > base.summary().prompt_tokens ||

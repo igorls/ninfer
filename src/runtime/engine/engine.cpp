@@ -486,7 +486,9 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         throw std::invalid_argument("live generation observations require a Streaming consumer");
     }
 
-    const bool capture_features = options.execution.capture_reasoning_features;
+    const bool capture_features      = options.execution.capture_reasoning_features;
+    const bool capture_prompt_hidden = options.execution.capture_prompt_hidden_states;
+    const auto hidden_states_layers  = options.execution.hidden_states_layers;
     if (capture_features) {
         const PromptSummary& summary = prompt.impl_->summary;
         if (summary.has_media || !summary.reasoning_frontier || *summary.reasoning_frontier == 0 ||
@@ -499,11 +501,49 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
         options.execution.allow_prefix_reuse       = false;
         options.execution.allow_prefix_publication = false;
     }
+    if (capture_prompt_hidden) {
+        if (options.execution.requested_output_tokens == 0) {
+            throw std::invalid_argument(
+                "prompt hidden-state readout requires a positive output budget");
+        }
+        const std::uint32_t model_layers = std::visit(
+            [](const auto& instance) -> std::uint32_t {
+                return instance->session->prompt_hidden_layer_count();
+            },
+            impl_->active);
+        if (model_layers == 0) {
+            throw std::invalid_argument(
+                "prompt hidden-state readout is not supported by this model architecture");
+        }
+        if (hidden_states_layers.size() > kMaximumHiddenStateTapLayers) {
+            throw std::invalid_argument(
+                "hidden_states_layers exceeds kMaximumHiddenStateTapLayers");
+        }
+        for (const std::int32_t layer : hidden_states_layers) {
+            const bool valid =
+                layer == kHiddenStateTapFinalNorm || layer == kHiddenStateTapEmbedding ||
+                (layer >= 0 && static_cast<std::uint32_t>(layer) < model_layers);
+            if (!valid) {
+                throw std::invalid_argument(
+                    "hidden_states_layers entry " + std::to_string(layer) +
+                    " is outside the model layer range [0, " + std::to_string(model_layers) + ")");
+            }
+        }
+        options.execution.allow_prefix_reuse       = false;
+        options.execution.allow_prefix_publication = false;
+    } else if (!hidden_states_layers.empty()) {
+        throw std::invalid_argument(
+            "hidden_states_layers requires capture_prompt_hidden_states");
+    }
     runtime::ResolvedRequestOptions resolved_options = resolve_request_options(
         prompt.impl_->sampling, std::move(options));
     if (capture_features) {
         resolved_options.execution.reasoning_feature_position =
             *prompt.impl_->summary.reasoning_frontier - 1U;
+    }
+    if (capture_prompt_hidden) {
+        resolved_options.execution.capture_prompt_hidden_states = true;
+        resolved_options.execution.hidden_states_layers         = hidden_states_layers;
     }
     const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
 
@@ -515,6 +555,16 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
                 1U >=
             prompt_summary.prompt_tokens) {
         throw std::invalid_argument("prompt position logprobs exceed the prompt");
+    }
+    if (resolved_options.execution.capture_prompt_hidden_states) {
+        const std::size_t layer_count =
+            std::max<std::size_t>(1, resolved_options.execution.hidden_states_layers.size());
+        constexpr std::size_t kMaxHiddenTokenLayers = 32768ULL * kMaximumHiddenStateTapLayers;
+        if (static_cast<std::size_t>(prompt_summary.prompt_tokens) * layer_count >
+            kMaxHiddenTokenLayers) {
+            throw std::invalid_argument(
+                "prompt_tokens * num_layers exceeds hidden_states payload cap");
+        }
     }
     if (prompt_summary.prompt_tokens > impl_->options.max_context) {
         throw RequestError(RequestErrorKind::ContextLengthExceeded,

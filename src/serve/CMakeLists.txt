@@ -24,6 +24,7 @@ add_library(ninfer_serve STATIC
   metrics.cpp
   http_server.cpp
   llamacpp_props.cpp
+  ninfer_hidden_states_http.cpp
   ninfer_score_http.cpp
   typesafe_systemone.cpp
   typesafe_systemone_http.cpp

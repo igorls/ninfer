@@ -70,7 +70,8 @@ struct ComputeOperation {
     std::optional<Result> result;
     CausalScores scores;
     std::vector<std::size_t> prompt_indices;
-    bool feature_pending = false;
+    bool feature_pending       = false;
+    bool prompt_hidden_pending = false;
     GpuExecutionObservation gpu;
     AttentionWorkCounters attention;
     std::optional<Tensor> input_embeddings;
