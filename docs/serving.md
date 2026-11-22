@@ -100,6 +100,7 @@ docker run --rm \
 | `GET /props` | llama.cpp-compatible server properties for llama.cpp's web UI |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
 | `POST /v1/score` | closed-set scoring of isolated questions against one shared prefix |
+| `POST /v1/hidden_states` | per-token hidden states of a prompt at up to 8 layers, from one prefill pass |
 | `POST /v1/rerank` | Jina-shaped document reranking scored by an in-process System One Choice |
 | `POST /v1/responses` | OpenAI Responses Core generation, state, typed Items, and SSE |
 | `POST /v1/responses/input_tokens` | Responses prompt-token count without generation |
@@ -463,6 +464,65 @@ so an unmatched nested parameter opener or a standalone `</parameter>` cannot be
 unambiguously. After a declared function header has started, malformed structure fails that request
 with `invalid_tool_output`; earlier tool events are never retracted into ordinary content.
 An unrecognized header on the free-generation route can still be returned as text.
+
+### Prompt hidden states: `POST /v1/hidden_states`
+
+Runs one prefill pass over a prompt and returns the hidden state of every prompt token at the
+layers you name. Nothing is generated. It lets another program use the resident model as a text
+and vision encoder.
+
+```json
+{
+  "model": "qwen3.8-27b",
+  "messages": [
+    {"role": "user", "content": [
+      {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}},
+      {"type": "text", "text": "A red door, lit from the left."}
+    ]}
+  ],
+  "layers": [-2, 15, 47, 55, 63],
+  "enable_thinking": false
+}
+```
+
+`messages` is in Chat Completions format, including image parts, and goes through the model's
+chat template. `model` is optional. `enable_thinking` defaults to `false`; a
+`chat_template_kwargs` object replaces it when present.
+
+Name the layers with `layers`, an array of 1 to 8 integers, or with a single `layer`; sending
+both is an error, and sending neither reads the final normalized state.
+
+| Layer | Hidden state |
+|---|---|
+| `0` to `N-1` | the residual stream after that block |
+| `-1` | the output of the final normalization |
+| `-2` | the input embeddings, before the first block |
+
+The request reads the prompt cache without writing to it. `prompt tokens x layers` may not
+exceed 262,144.
+
+The response is `application/octet-stream` in three parts:
+
+1. 8 bytes: the header's length in bytes, as a little-endian unsigned 64-bit integer.
+2. The header, a UTF-8 JSON object.
+3. The states: `seq_len x num_layers x hidden_size` little-endian bfloat16 values. Each token's
+   row holds its layers in the order you asked for them.
+
+| Header field | Value |
+|---|---|
+| `model` | the model id that answered |
+| `seq_len` | prompt tokens, after the chat template and image expansion |
+| `num_layers`, `layers` | how many layers, and which, in payload order |
+| `layer` | the block index when one non-negative `layer` was asked for, else `null` |
+| `hidden_size` | values per token per layer |
+| `dtype` | `"bf16"` |
+| `token_ids` | the prompt's token ids |
+| `token_types` | per token: `0` for text, `1` for an image position |
+| `token_texts` | each token's bytes as text; bytes that are not valid UTF-8 are replaced |
+| `token_byte_lens` | each token's length in bytes, for aligning with another tokenizer |
+| `prefill_ms`, `vision_ms` | time spent in prefill and in the vision tower |
+
+Errors use the Chat Completions error object.
 
 ### Tool constraints
 
