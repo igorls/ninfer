@@ -108,6 +108,10 @@ def main() -> int:
                 assert status == 200 and props["total_slots"] == CONCURRENT_REQUESTS, props
                 status, residency = get_json(endpoint, "/admin/residency")
                 assert status == 200 and residency["model"] == "unloaded", residency
+                status, info = get_json(endpoint, "/monitor/info")
+                assert status == 503 and info["error"]["code"] == "model_not_resident", info
+                status, snapshot = get_json(endpoint, "/monitor/snapshot")
+                assert status == 503 and snapshot["error"]["code"] == "model_not_resident", snapshot
 
                 # Concurrent requests after the unload share one reload and are all served.
                 started = time.monotonic()

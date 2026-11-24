@@ -507,7 +507,7 @@ void HttpServer::register_routes() {
     // reports its Engine availability as before; an unloaded or loading one is not a failure,
     // because the next request that needs it loads it.
     server_.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
-        nlohmann::json body = residency_json();
+        nlohmann::json body = residency_json(false);
         bool available      = true;
         if (const auto model = residency_->peek()) available = service_->is_available();
         body["status"] = available ? "ok" : "unavailable";
@@ -1028,7 +1028,7 @@ std::shared_ptr<GenerationResidency::Lease> HttpServer::acquire_model() {
     }
 }
 
-nlohmann::json HttpServer::residency_json() const {
+nlohmann::json HttpServer::residency_json(bool include_load_error) const {
     const ResidencyStatus status = residency_->status();
     nlohmann::json body          = {{"model", residency_state_name(status.state)},
                                     {"idle_unload_ms", status.idle_unload_ms},
@@ -1036,7 +1036,9 @@ nlohmann::json HttpServer::residency_json() const {
                                     {"unloads", status.unloads},
                                     {"last_load_seconds", status.last_load_seconds},
                                     {"last_unload_seconds", status.last_unload_seconds}};
-    if (!status.last_load_error.empty()) body["last_load_error"] = status.last_load_error;
+    if (include_load_error && !status.last_load_error.empty()) {
+        body["last_load_error"] = status.last_load_error;
+    }
     return body;
 }
 
@@ -1054,7 +1056,7 @@ void HttpServer::write_model_not_resident(httplib::Response& res) const {
 void HttpServer::handle_admin_residency_get(const httplib::Request&,
                                             httplib::Response& res) const {
     res.set_header("Cache-Control", "no-store");
-    res.set_content(residency_json().dump(), "application/json");
+    res.set_content(residency_json(true).dump(), "application/json");
 }
 
 // Changes the idle limit of the running server; the startup option is only the initial value.
@@ -1079,7 +1081,7 @@ void HttpServer::handle_admin_residency_set(const httplib::Request& req, httplib
     residency_->set_idle_unload_ms(idle_unload_ms);
     operational_log_.idle_unload_changed(idle_unload_ms);
     res.set_header("Cache-Control", "no-store");
-    res.set_content(residency_json().dump(), "application/json");
+    res.set_content(residency_json(true).dump(), "application/json");
 }
 
 bool HttpServer::listen() {

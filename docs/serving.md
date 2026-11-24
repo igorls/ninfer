@@ -1645,12 +1645,15 @@ While the model is unloaded:
   `{"status":"ok","model":"unloaded","idle_unload_ms":1800000,"loads":1,"unloads":1,...}`.
   `model` is `loaded`, `loading`, `unloading` or `unloaded`; `loads` counts completed loads,
   including the startup load; `last_load_seconds` and `last_unload_seconds` time the latest of
-  each; `last_load_error` is present after a failed reload.
+  each. `/health` needs no API key, so it never carries the load error text; after a failed
+  reload, `GET /admin/residency` (same fields) adds `last_load_error`, and the operational log
+  records it.
 - `GET /v1/models`, `GET /v1/models/{id}` and `GET /props` answer as when loaded.
 - `GET /metrics` stays readable, reports `ninfer_engine_ready 0` and
   `ninfer_model_resident 0`, and has no Engine counters; counters start again with each load.
-- `/monitor/*` routes and `/admin/vram`, `/admin/stats`, `/admin/experts` and `/admin/quiesce`
-  answer HTTP 503 with code `model_not_resident`; they never trigger a load.
+- `/monitor/info`, `/monitor/snapshot`, `/admin/vram`, `/admin/stats`, `/admin/experts` and
+  `/admin/quiesce` answer HTTP 503 with code `model_not_resident`; they never trigger a load.
+  `/monitor/events` keeps streaming.
 
 The first authenticated request to a model route (`/v1/chat/completions`, `/v1/responses`,
 `/v1/responses/input_tokens`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/score`,
@@ -1667,9 +1670,10 @@ The idle clock restarts when each request and its response are released, includi
 stream. An in-flight request or open stream keeps the model loaded however long it runs. Status
 reads (`/health`, `/metrics`, `/admin/*`) neither restart the clock nor keep the model loaded.
 
-`GET /admin/residency` returns the same residency object as `/health`. `POST /admin/residency`
-with `{"idle_unload_ms": N}` changes the limit of the running server (0 disables it) and returns
-the new state; the idle clock keeps counting from the last request. Both follow the API key.
+`GET /admin/residency` returns the same residency object as `/health`, plus `last_load_error`
+after a failed load. `POST /admin/residency` with `{"idle_unload_ms": N}` changes the limit of
+the running server (0 disables it) and returns the new state; the idle clock keeps counting from
+the last request. Both follow the API key.
 
 Serve logs `model unloaded | idle … | unload …`, `model reloading`, `model reloaded | …` and, on
 failure, `model reload failed | … | the next request retries`, followed by the usual load,

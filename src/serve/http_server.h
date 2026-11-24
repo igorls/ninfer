@@ -104,7 +104,9 @@ private:
     // ApiException (503) when the load fails or the server is stopping. Every handler that
     // reaches service_ holds one for as long as it, or its streaming response, uses the model.
     [[nodiscard]] std::shared_ptr<GenerationResidency::Lease> acquire_model();
-    [[nodiscard]] nlohmann::json residency_json() const;
+    // The load error text can name local paths and device details, so only the authenticated
+    // admin route includes it; the unauthenticated /health does not.
+    [[nodiscard]] nlohmann::json residency_json(bool include_load_error) const;
     // 503 for a status route whose answer needs the model while it is not resident.
     void write_model_not_resident(httplib::Response& res) const;
     void handle_admin_residency_get(const httplib::Request& req, httplib::Response& res) const;
