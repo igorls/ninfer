@@ -1498,94 +1498,6 @@ int test_process_scoped_error() {
     return f;
 }
 
-// The in-flight window: opened by status=submitted, closed by every terminal
-// status. This is what makes "cannot unload mid-request" independent of the
-// engine's log cadence.
-int test_classify_request_line() {
-    using namespace ninfer::supervisor;
-    int f           = 0;
-    const auto open = classify_request_line(
-        "[2026-09-04 23:52:12.090] [info] [ninfer-serve] request id=812 status=submitted "
-        "protocol=\"openai\" stream=true messages=3");
-    f += check(open.matched && open.id == 812 && open.opens && !open.closes,
-               "submitted opens request 812");
-
-    const auto done = classify_request_line(
-        "[2026-09-04 23:52:12.090] [info] [ninfer-serve] request id=812 status=done "
-        "finish_reason=stop prompt_tokens=10");
-    f += check(done.matched && done.id == 812 && done.closes && !done.opens, "done closes it");
-
-    for (const char* status : {"failed", "rejected", "cancelled"}) {
-        const auto terminal =
-            classify_request_line(std::string("request id=5 status=") + status + " protocol=\"x\"");
-        f += check(terminal.matched && terminal.closes,
-                   std::string("status=") + status + " closes the request");
-    }
-
-    // A second record about a request that has its own terminal line; counting
-    // it would close an id that is still running, or open one that never closes.
-    const auto response = classify_request_line(
-        "[2026-09-04 23:52:12.090] [error] [ninfer-serve] response request_id=812 status=failed");
-    f += check(!response.matched, "a response record is not a request lifecycle line");
-
-    const auto throughput = classify_request_line("[2026-09-04 23:52:12.090] [info] [ninfer-serve] "
-                                                  "throughput interval_ms=5000.000 running=1");
-    f += check(!throughput.matched, "the throughput line is not a request lifecycle line");
-
-    const auto no_status = classify_request_line("request id=42");
-    f += check(no_status.matched && no_status.id == 42 && !no_status.opens && !no_status.closes,
-               "a request line with no status neither opens nor closes");
-    f += check(!classify_request_line("request id=x status=submitted").matched,
-               "a non-numeric id is not a request");
-    f += check(!classify_request_line("").matched, "an empty line is not a request");
-    return f;
-}
-
-int test_idle_unload_due() {
-    using namespace ninfer::supervisor;
-    int f                   = 0;
-    const std::int64_t now  = 1000000000;
-    const std::int64_t hour = 60 * 60 * 1000;
-    IdleInputs base{now, now - hour, 60, true, true};
-    f += check(idle_unload_due(base), "exactly at the window is due");
-
-    IdleInputs never   = base;
-    never.idle_minutes = 0;
-    f += check(!idle_unload_due(never), "0 minutes never unloads");
-
-    IdleInputs stopped = base;
-    stopped.running    = false;
-    f += check(!idle_unload_due(stopped), "a stopped engine is not unloaded");
-
-    IdleInputs sick = base;
-    sick.healthy    = false;
-    f += check(!idle_unload_due(sick), "an engine not answering /health is not unloaded");
-
-    IdleInputs inside       = base;
-    inside.last_activity_ms = now - hour + 1;
-    f += check(!idle_unload_due(inside), "one millisecond inside the window is not due");
-
-    IdleInputs past       = base;
-    past.last_activity_ms = now - 5 * hour;
-    f += check(idle_unload_due(past), "long past the window is due");
-
-    IdleInputs unknown       = base;
-    unknown.last_activity_ms = 0;
-    f += check(!idle_unload_due(unknown), "an unknown activity clock never unloads");
-
-    // The hard floor. With --log-stats-interval-ms 0 and no request log a long
-    // generation emits nothing between submit and done, so the activity clock
-    // ages past the window while the engine is mid-answer.
-    IdleInputs busy        = past;
-    busy.inflight_requests = 1;
-    f += check(!idle_unload_due(busy),
-               "an open request blocks the unload however old the activity clock is");
-    IdleInputs drained        = busy;
-    drained.inflight_requests = 0;
-    f += check(idle_unload_due(drained), "the unload proceeds once the request closes");
-    return f;
-}
-
 int test_format_halt_notice() {
     using namespace ninfer::supervisor;
     int f        = 0;
@@ -1949,6 +1861,30 @@ int test_with_request_log() {
     f += check(with_request_log(full_history, "other.jsonl") == full_history,
                "explicit full history takes precedence over managed retention");
     f += check(with_request_log({"model.ninfer"}, "").size() == 1, "empty path adds nothing");
+    return f;
+}
+
+// The tray's "Unload when idle" choice reaches the engine as its own --idle-unload limit, so the
+// engine keeps listening while unloaded instead of the supervisor stopping the process.
+int test_with_idle_unload() {
+    using namespace ninfer::supervisor;
+    int f            = 0;
+    const auto added = with_idle_unload({"model.ninfer"}, 15);
+    f += check(added.size() == 3 && added[1] == "--idle-unload" && added[2] == "900s",
+               "the tray's minutes reach the child as an engine duration");
+    const auto off = with_idle_unload({"model.ninfer"}, 0);
+    f += check(off.size() == 3 && off[2] == "0s", "never is an explicit 0s, not an omission");
+    const auto replaced = with_idle_unload({"model.ninfer", "--idle-unload", "30s"}, 60);
+    f += check(replaced.size() == 3 && replaced[2] == "3600s",
+               "the tray's choice replaces a configured limit");
+    std::vector<std::string> argv_text{"ninfer-serve"};
+    for (const auto& arg : with_idle_unload({"model.ninfer"}, 240)) argv_text.push_back(arg);
+    std::vector<char*> argv;
+    for (auto& arg : argv_text) argv.push_back(arg.data());
+    const auto parsed =
+        ninfer::product::parse_serve_options(static_cast<int>(argv.size()), argv.data());
+    f += check(parsed.idle_unload_ms == 240u * 60u * 1000u,
+               "the engine parses the duration the supervisor writes");
     return f;
 }
 
@@ -2803,12 +2739,11 @@ int main() {
     failures += test_redact_engine_args();
     failures += test_engine_endpoint_sync();
     failures += test_with_request_log();
+    failures += test_with_idle_unload();
     failures += test_with_api_key_file();
     failures += test_tray_command_ids();
     failures += test_classify_engine_line();
     failures += test_process_scoped_error();
-    failures += test_classify_request_line();
-    failures += test_idle_unload_due();
     failures += test_format_halt_notice();
     failures += test_model_label();
     failures += test_single_instance_name();

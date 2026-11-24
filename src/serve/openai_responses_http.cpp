@@ -260,6 +260,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         return;
     }
 
+    const auto model           = acquire_model();
     const std::uint64_t req_id = ++request_seq_;
     const RequestLogMetadata metadata{
         .http_request_id                   = res.get_header_value("x-request-id"),
@@ -280,6 +281,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
              .first_token   = first_token_observer(req_id),
              .route_tag     = req_id},
             [&req] { return client_disconnected(req); }, std::move(resolved.cache_hints));
+        prepared.residency = model;
     } catch (const ApiException& exception) {
         const ApiError error = responses_error(exception.error());
         record_request_rejected(make_request_rejection_log_context(
@@ -549,6 +551,7 @@ void HttpServer::handle_response_input_tokens(const httplib::Request& req, httpl
         request.model = resolve_openai_model(request.model, served_model_names_);
         OpenAIResponsesResolvedPrompt resolved =
             resolve_openai_responses_prompt(request, openai_responses_store_, std::nullopt, false);
+        const auto model = acquire_model();
         const int tokens = service_->count_prompt_tokens(
             resolved.generation, [&req] { return client_disconnected(req); });
         res.set_content(make_openai_response_input_tokens_body(tokens), "application/json");

@@ -42,7 +42,8 @@ void test_resources_and_units() {
                 !defaults.launch.generation.sampling.seed &&
                 !defaults.launch.generation.enable_thinking &&
                 defaults.launch.logging.stats_interval_ms == 5000 &&
-                defaults.launch.logging.request_jsonl_max_bytes == 0,
+                defaults.launch.logging.request_jsonl_max_bytes == 0 &&
+                defaults.idle_unload_ms == 0,
             "server defaults changed");
     require(!defaults.model_id_override, "public model alias is unexpectedly set by default");
     for (auto [quantity, bytes] : std::vector<std::pair<std::string, std::uint64_t>>{
@@ -60,8 +61,10 @@ void test_resources_and_units() {
         parse({"ninfer-serve", "--pending-timeout", "1.25s", "model.ninfer", "--stats-interval",
                "0ms", "--media-cache-capacity", "0B", "--max-request-size", "1.5MiB",
                "--max-concurrency", "4", "--media-preprocess-threads", "auto", "--context-capacity",
-               "auto", "--checkpoint-interval", "16384", "--request-log-max-size", "64MiB"});
+               "auto", "--checkpoint-interval", "16384", "--request-log-max-size", "64MiB",
+               "--idle-unload", "1800s"});
     require(controls.launch.engine.pending_timeout_ms == 1250 &&
+                controls.idle_unload_ms == 1800000 &&
                 controls.launch.logging.stats_interval_ms == 0 &&
                 controls.launch.logging.request_jsonl_max_bytes == 64ULL * 1024 * 1024 &&
                 controls.max_request_bytes == 1572864 &&

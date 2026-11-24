@@ -93,7 +93,7 @@ docker run --rm \
 
 | Method and path | Behavior |
 |---|---|
-| `GET /health` | Engine readiness |
+| `GET /health` | server liveness, Engine readiness and model residency |
 | `GET /metrics` | Prometheus counters, gauges and latency histograms |
 | `GET /v1/models` | public model id, each `--model-alias`, advertised rerank id, and effective `max_model_len` |
 | `GET /v1/models/{id}` | lookup of the model id, an alias, `default` or the advertised rerank id, and effective `max_model_len` |
@@ -115,10 +115,15 @@ docker run --rm \
 | `GET /admin/stats` | cumulative runtime and Host-work statistics |
 | `GET /admin/experts` | live routed-expert counts (with `--expert-stats`) |
 | `POST /admin/quiesce` | hold the Engine still at an execution boundary (diagnostic) |
+| `GET /admin/residency` | model residency and idle-unload limit |
+| `POST /admin/residency` | change the idle-unload limit of the running server |
 
-`GET /health` returns HTTP 200 with `{"status":"ok"}` while the Engine can accept work. After an
-Engine-wide failure it returns HTTP 503 with `{"status":"unavailable"}`. Temporary queue
-saturation does not make the Engine unavailable. The endpoint remains unauthenticated.
+`GET /health` returns HTTP 200 with `"status":"ok"` while the Engine can accept work. After an
+Engine-wide failure it returns HTTP 503 with `"status":"unavailable"`. Temporary queue
+saturation does not make the Engine unavailable. The body also carries the model's residency
+([Idle unload and reload](#idle-unload-and-reload)): an unloaded or loading model still answers
+HTTP 200 with `"status":"ok"`, because the next request loads it. The endpoint remains
+unauthenticated.
 
 Every OpenAI-compatible response carries a unique `x-request-id` header, including streaming and
 error responses. Anthropic endpoints use their separate `request-id` contract.
@@ -1627,6 +1632,62 @@ curl http://127.0.0.1:8080/v1/models \
 ```
 
 `--cors` adds permissive browser CORS headers. It is disabled by default.
+
+## Idle unload and reload
+
+`--idle-unload DURATION` (`server.idle_unload`, default `0ms`, which keeps the model loaded)
+unloads the model after that long without a request that needs it. The HTTP server keeps
+listening on the same port; only the Engine and its device memory are released.
+
+While the model is unloaded:
+
+- `GET /health` answers HTTP 200, for example
+  `{"status":"ok","model":"unloaded","idle_unload_ms":1800000,"loads":1,"unloads":1,...}`.
+  `model` is `loaded`, `loading`, `unloading` or `unloaded`; `loads` counts completed loads,
+  including the startup load; `last_load_seconds` and `last_unload_seconds` time the latest of
+  each; `last_load_error` is present after a failed reload.
+- `GET /v1/models`, `GET /v1/models/{id}` and `GET /props` answer as when loaded.
+- `GET /metrics` stays readable, reports `ninfer_engine_ready 0` and
+  `ninfer_model_resident 0`, and has no Engine counters; counters start again with each load.
+- `/monitor/*` routes and `/admin/vram`, `/admin/stats`, `/admin/experts` and `/admin/quiesce`
+  answer HTTP 503 with code `model_not_resident`; they never trigger a load.
+
+The first authenticated request to a model route (`/v1/chat/completions`, `/v1/responses`,
+`/v1/responses/input_tokens`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/score`,
+`/v1/hidden_states`, `/v1/rerank`, `/v1/systemone`, `/systemone`) after an unload reloads the same
+artifact with the startup options, including warmup, then is served normally. Requests that arrive
+during the reload wait for that same load instead of starting another. A request whose body cannot
+be parsed, or that fails authentication, is rejected without loading the model. If the reload fails, every
+request that waited for it receives HTTP 503 with code `model_unavailable` and the load error in its
+protocol's error shape (TypeSafe's for System One, Anthropic's for `/v1/messages`); the model stays
+unloaded and the next request tries again. A reload refuses an artifact whose model name changed
+since startup, because clients hold the startup name.
+
+The idle clock restarts when each request and its response are released, including the end of a
+stream. An in-flight request or open stream keeps the model loaded however long it runs. Status
+reads (`/health`, `/metrics`, `/admin/*`) neither restart the clock nor keep the model loaded.
+
+`GET /admin/residency` returns the same residency object as `/health`. `POST /admin/residency`
+with `{"idle_unload_ms": N}` changes the limit of the running server (0 disables it) and returns
+the new state; the idle clock keeps counting from the last request. Both follow the API key.
+
+Serve logs `model unloaded | idle … | unload …`, `model reloading`, `model reloaded | …` and, on
+failure, `model reload failed | … | the next request retries`, followed by the usual load,
+capacity and warmup records. Each load is a new Engine instance: runtime counters, `/metrics`
+Engine series and the monitor baseline restart from it, and the throughput log reports no interval
+that spans an unload. The JSONL `server_start` record is written once per process.
+
+The unloaded process keeps its CUDA context and host-side state, so it holds a small amount of
+device memory rather than none. A reload pays the full startup load and warmup time; set the limit
+well above the gap between bursts of traffic that needs a fast first token.
+
+Upgrading an existing installation needs no migration. A server started without `--idle-unload`
+behaves as before. To adopt the behaviour, add `--idle-unload 1800s` (or `idle_unload = "1800s"`
+under `[server]`) and restart once; afterwards the limit can be changed through
+`POST /admin/residency` without a restart. A load balancer or health check that treats only
+HTTP 200 from `/health` as healthy keeps routing to an unloaded server, whose next request then
+waits for the reload; a router that needs to prefer a resident model can read `model` from the
+body.
 
 ## Server options
 

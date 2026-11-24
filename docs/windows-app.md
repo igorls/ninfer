@@ -76,6 +76,15 @@ agent does not stop it. **Exit** in the tray closes Supervisor and its managed e
 also closes the app; running before sign-in would require a separate Windows service design.
 Toggle **Start at login** in the tray to change the sign-in preference.
 
+**Unload when idle** in the tray (never, 15 minutes, 1 hour or 4 hours) sets the engine's
+`--idle-unload` limit: after that long without a request, the engine releases the model and its GPU
+memory but keeps listening on its port. `/health` and `/v1/models` keep answering, and the next
+request reloads the model with the same settings and waits for it
+([Idle unload and reload](serving.md#idle-unload-and-reload)). A change applies to the running
+engine at once and is passed to every later start; the tray's choice replaces an `--idle-unload` in
+the configured arguments. Existing tray preferences keep their value; after updating, restart the
+engine once so the first start passes the limit.
+
 Launch from the Start menu, or use the installed binary from automation:
 
 ```powershell

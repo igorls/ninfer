@@ -29,6 +29,11 @@ void forward_to_engine(const httplib::Request& req, httplib::Response& res,
                        const EngineSpec& engine, const std::atomic<bool>& stopping,
                        const std::string& upstream_target);
 
+// Sets the running engine's idle-unload limit (POST /admin/residency); 0 keeps the model loaded.
+// The engine keeps listening while unloaded and reloads on the next request. False when the
+// engine is unreachable or refuses the change; the next spawn passes the limit as --idle-unload.
+bool apply_engine_idle_unload(const EngineSpec& engine, int minutes);
+
 // The dashboard's API test bench: /api/engine/<engine route> forwards to that engine route.
 // Every method needs a local caller and the supervisor control header, like the engine controls,
 // so another site's page cannot reach the engine through the bench. Unlike a frontend, the bench

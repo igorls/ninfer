@@ -40,6 +40,7 @@ std::string escape_label(std::string_view value) {
 
 void Metrics::configure(std::string model, const EngineOptions& options,
                         const StartupReport& startup, double start_seconds) {
+    std::lock_guard lock(mutex_);
     model_         = std::move(model);
     options_       = options;
     startup_       = startup;
@@ -48,6 +49,7 @@ void Metrics::configure(std::string model, const EngineOptions& options,
 
 std::string Metrics::render(const EngineSnapshot& snapshot, const ServiceSnapshot& service,
                             bool ready) const {
+    std::lock_guard lock(mutex_);
     const auto& stats    = snapshot.runtime;
     const auto& requests = service.counters;
     std::ostringstream out;

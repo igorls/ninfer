@@ -19,6 +19,7 @@ void HttpServer::handle_count_tokens(const httplib::Request& req, httplib::Respo
     try {
         const AnthropicCountTokensRequest request =
             parse_anthropic_count_tokens_request(parse_json_body(req));
+        const auto model       = acquire_model();
         const int input_tokens = service_->count_prompt_tokens(
             request.generation, [&req] { return client_disconnected(req); });
         res.set_content(make_anthropic_count_tokens_response(input_tokens), "application/json");
@@ -57,6 +58,7 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
         return;
     }
 
+    const auto model           = acquire_model();
     const std::uint64_t req_id = ++request_seq_;
     RequestLogMetadata metadata{.http_request_id        = request_id,
                                 .model                  = request.model,
@@ -73,6 +75,7 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
              .first_token   = first_token_observer(req_id),
              .route_tag     = req_id},
             [&req] { return client_disconnected(req); });
+        prepared.residency = model;
     } catch (const ApiException& exception) {
         const ApiError error = normalize_anthropic_error(exception.error());
         record_request_rejected(make_request_rejection_log_context(

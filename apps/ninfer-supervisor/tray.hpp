@@ -62,11 +62,6 @@ public:
     bool try_add_icon();
     void refresh_icon_add();
 
-    // Idle unload, evaluated on the same timer. Stops the engine after the
-    // configured quiet period so a workstation is not holding 70 GiB of weights
-    // while nobody is using it. Reload happens on the next explicit start.
-    void tick_idle_unload();
-
     // Read by the menu builder. Small accessors rather than friendship: the menu
     // lives in an anonymous namespace in the .cpp and only needs to read state
     // and hand back the choices a user can make.

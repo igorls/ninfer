@@ -8,7 +8,6 @@
 #include <functional>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -40,14 +39,10 @@ struct EngineStatus {
     // which is read for engine.log anyway.
     std::string last_error_line;
     std::int64_t last_error_unix_ms    = 0;
-    std::int64_t last_activity_unix_ms = 0;
     bool ready                         = false; // engine printed `server status=ready`
     int recent_exits                   = 0;
     int crash_window_s                 = 0;
     int desktop_reserve_gib            = 0; // effective at the last spawn; <0 = config default
-    // Requests the engine opened and has not finished, counted from its own
-    // stderr. Non-zero means "do not unload", whatever the activity clock says.
-    int inflight_requests              = 0;
     // KV plan actually launched. effective is 0 unless the supervisor shrank the configured
     // value to fit the runtime reservation the engine could get; note says why.
     // The argument vector the running process was actually started with, after every
@@ -76,6 +71,10 @@ public:
     // what the first version did, could never reach the command line.
     // kReserveUnset leaves the config's own arguments untouched.
     void set_desktop_reserve_gib(int gib);
+    // The tray's idle-unload choice, passed to the NEXT spawn as --idle-unload. The engine
+    // itself unloads and reloads the model; a running engine is updated through
+    // /admin/residency. Negative leaves the configured arguments untouched.
+    void set_idle_unload_minutes(int minutes);
     void note_config_migration(const std::vector<std::string>& changes, const std::string& error);
     bool save_desktop_reserve_gib(int gib, std::optional<PlannedContext> planned = std::nullopt);
     void set_reserve_budget_provider(std::function<nlohmann::json(std::optional<PlannedContext>)> provider) { reserve_budget_provider_ = std::move(provider); }
@@ -95,12 +94,6 @@ public:
     // is assigning is a race whatever the members happen to be.
     [[nodiscard]] SupervisorConfig config() const;
     [[nodiscard]] std::string logs_dir() const;
-
-    // Last moment the engine proved it was doing something, from its own stderr.
-    // Atomic because the reader thread writes it and the UI timer reads it.
-    [[nodiscard]] std::int64_t last_activity_unix_ms() const noexcept {
-        return last_activity_ms_.load(std::memory_order_relaxed);
-    }
 
     void run_loop();
 
@@ -127,15 +120,14 @@ private:
     std::atomic<bool> stop_child_{false};
     std::atomic<bool> quit_{false};
     std::atomic<bool> auto_restart_{true};
-    std::atomic<std::int64_t> last_activity_ms_{0};
     int desktop_reserve_gib_ = kReserveUnset; // under mu_
+    int idle_unload_minutes_ = -1;            // under mu_; negative = not chosen by the tray
     EngineSpec launched_spec_;
     std::function<nlohmann::json(std::optional<PlannedContext>)> reserve_budget_provider_;
     std::string line_buf_;                    // under mu_; partial stderr line
     // Under mu_. The last reservation failure the engine reported, consumed by the next
     // spawn; and the shrunken KV plan that spawn chose, kept across automatic restarts and
     // retired when the configuration changes or the engine is started by hand.
-    std::set<std::uint64_t> inflight_;        // under mu_; open request ids
     void* process_handle_ = nullptr;          // HANDLE
     void* job_handle_     = nullptr;
     std::string log_path_;

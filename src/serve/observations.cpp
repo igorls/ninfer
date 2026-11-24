@@ -95,7 +95,7 @@ ServiceObservations::ServiceObservations() {
 
 void ServiceObservations::attach(EngineSnapshot baseline) {
     baseline_      = std::move(baseline);
-    start_seconds_ = unix_seconds();
+    start_seconds_.store(unix_seconds(), std::memory_order_relaxed);
 }
 
 EngineSnapshot ServiceObservations::normalize(EngineSnapshot current) const {

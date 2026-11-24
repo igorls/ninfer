@@ -70,6 +70,7 @@ model_id = "" # Empty uses the artifact's public name.
 model_aliases = []
 cors = false
 max_request_size = "384MiB"
+idle_unload = "0ms" # Unload the model after this long without requests; the port stays up and the next request reloads it.
 
 [server.responses]
 max_records = 1024

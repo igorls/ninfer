@@ -127,9 +127,12 @@ void HttpServer::handle_score(const httplib::Request& req, httplib::Response& re
     std::vector<ScoreQuestion> questions;
     std::vector<ScoreBranch> branches;
     std::string model;
+    std::shared_ptr<GenerationResidency::Lease> resident;
     try {
         const Json body = parse_json_body(req);
         if (!body.is_object()) { score_bad_request("request body must be an object", ""); }
+        // Validation tokenizes text candidates, so the model is needed from here on.
+        resident = acquire_model();
         if (!body.contains("model") || !body.at("model").is_string()) {
             score_bad_request("model must be a string", "model");
         }

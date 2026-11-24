@@ -52,6 +52,7 @@ enum class Field {
     MaxRequestSize,
     ResponseRecords,
     ResponseSize,
+    IdleUnload,
     LogLevel,
     StatsInterval,
     RequestJsonl,

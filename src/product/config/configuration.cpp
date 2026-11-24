@@ -241,6 +241,9 @@ StartupConfigurationView view(const LaunchOptions& launch, EntryPoint entry, con
         case Field::ResponseSize:
             value = std::uint64_t{server->response_store_max_bytes};
             break;
+        case Field::IdleUnload:
+            value = std::uint64_t{server->idle_unload_ms};
+            break;
         case Field::LogLevel:
             value = std::string(log_level_name(launch.logging.level));
             break;
