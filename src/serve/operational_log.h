@@ -58,6 +58,13 @@ public:
     void server_ready(std::string_view host, int port, std::string_view model_id,
                       bool auth_enabled) const;
     void server_stopped() const;
+    // Model residency: the server keeps listening across an idle unload and the reload that the
+    // next request triggers.
+    void model_unloaded(double idle_seconds, double unload_seconds) const;
+    void model_reload_started() const;
+    void model_reloaded(double seconds) const;
+    void model_reload_failure(double seconds, std::string_view detail) const;
+    void idle_unload_changed(std::uint32_t idle_unload_ms) const;
     void server_failure(bool serving, std::string_view detail) const;
 
 private:

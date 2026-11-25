@@ -87,14 +87,17 @@ EngineStatus EngineChild::status() const {
     s.recent_exits          = gate_.recent_exits();
     s.crash_window_s        = gate_.policy().crash_loop_window_s;
     s.desktop_reserve_gib   = desktop_reserve_gib_;
-    s.last_activity_unix_ms = last_activity_ms_.load(std::memory_order_relaxed);
-    s.inflight_requests     = static_cast<int>(inflight_.size());
     return s;
 }
 
 void EngineChild::set_desktop_reserve_gib(int gib) {
     std::lock_guard lock(mu_);
     desktop_reserve_gib_ = gib;
+}
+
+void EngineChild::set_idle_unload_minutes(int minutes) {
+    std::lock_guard lock(mu_);
+    idle_unload_minutes_ = minutes;
 }
 
 bool EngineChild::save_desktop_reserve_gib(int gib, std::optional<PlannedContext> planned) {
@@ -148,9 +151,6 @@ void EngineChild::note_engine_output(const char* data, std::size_t n) {
             continue;
         }
         const EngineLineSignal sig = classify_engine_line(line_buf_);
-        if (sig.activity || sig.ready) {
-            last_activity_ms_.store(unix_ms(), std::memory_order_relaxed);
-        }
         if (sig.ready) {
             st_.ready = true;
             // A successful start retires the previous failure's text; keeping it
@@ -166,18 +166,6 @@ void EngineChild::note_engine_output(const char* data, std::size_t n) {
             st_.last_error_line =
                 sig.message.empty() ? line_buf_.substr(0, 200) : sig.message;
             st_.last_error_unix_ms = unix_ms();
-        }
-        // A startup that died for want of runtime memory is not a crash to repeat: the
-        // next spawn shrinks the KV plan by the shortfall it names.
-        // In-flight accounting: the one activity signal no log-cadence flag can
-        // switch off, and the reason an idle unload cannot land mid-generation.
-        const RequestLifecycle rq = classify_request_line(line_buf_);
-        if (rq.matched) {
-            // Bounded: a producer that opens without ever closing must not grow
-            // this without limit. 4096 is far past any real concurrency here,
-            // and stopping at the cap only ever errs towards "busy".
-            if (rq.opens && inflight_.size() < 4096u) { inflight_.insert(rq.id); }
-            if (rq.closes) { inflight_.erase(rq.id); }
         }
         line_buf_.clear();
     }
@@ -363,13 +351,16 @@ void EngineChild::spawn() {
     std::vector<std::string> args;
     EngineSpec launch_spec;
     int reserve = kReserveUnset;
+    int idle_unload_minutes = -1;
     {
         std::lock_guard lock(mu_);
         args    = cfg_.engine.args;
         launch_spec = cfg_.engine;
         reserve = desktop_reserve_gib_;
+        idle_unload_minutes = idle_unload_minutes_;
     }
     if (reserve >= 0) { args = with_desktop_reserve(std::move(args), reserve); }
+    if (idle_unload_minutes >= 0) { args = with_idle_unload(std::move(args), idle_unload_minutes); }
     args = with_request_log(std::move(args), launch_spec.request_log);
     // Same omission, with teeth: api_key_file was read only by the collector, so the
     // engine ran unauthenticated however it was bound. launch_spec, not cfg_, because
@@ -425,10 +416,6 @@ void EngineChild::spawn() {
     }
     AssignProcessToJobObject(static_cast<HANDLE>(job_handle_), pi.hProcess);
 
-    // A spawn is activity: the model load that follows takes about a minute, and
-    // an idle-unload timer that started counting before it finished would kill
-    // the engine during its own startup.
-    last_activity_ms_.store(unix_ms(), std::memory_order_relaxed);
     {
         std::lock_guard lock(mu_);
         process_handle_      = pi.hProcess;
@@ -439,7 +426,6 @@ void EngineChild::spawn() {
         st_.started_unix_ms  = unix_ms();
         st_.ready            = false; // Running means "process exists", not "serving"
         line_buf_.clear();
-        inflight_.clear(); // a new process has nothing in flight
 
         ++st_.restart_count;
         st_.last_event = "engine started";
@@ -474,7 +460,6 @@ void EngineChild::capture_wait() {
         st_.state          = EngineState::Stopped;
         st_.ready          = false;
         st_.last_event     = "engine exited";
-        inflight_.clear(); // an exited process is not serving anything
     }
     CloseHandle(proc);
     // The process is gone, so its end of the pipe is closed and the reader is

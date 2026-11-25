@@ -1,5 +1,7 @@
 #include "tray.hpp"
 
+#include "engine_proxy.hpp"
+
 #include "frontend_server.hpp"
 
 #include "run_at_login.hpp"
@@ -14,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <string>
+#include <thread>
 
 namespace ninfer::supervisor {
 namespace {
@@ -28,11 +31,6 @@ constexpr wchar_t kClass[]  = L"NInferSupervisorTray";
 // comes up. Without handling it the process is still running but has no icon --
 // invisible and unkillable except through Task Manager.
 UINT g_taskbar_created = 0;
-
-std::int64_t now_unix_ms() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
-}
 
 COLORREF status_fill(TrayStatus status) {
     switch (status) {
@@ -407,7 +405,6 @@ LRESULT CALLBACK tray_wnd(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     }
     if (msg == WM_TIMER && wparam == kTimer) {
         self->refresh_icon();
-        self->tick_idle_unload();
         return 0;
     }
     if (msg == kTrayMsg && LOWORD(lparam) == WM_LBUTTONUP) {
@@ -440,6 +437,9 @@ TrayIcon::TrayIcon(EngineChild& child, Collector& collector, std::string dashboa
     // reads -- rewriting main's copy, which is what the first version did, could
     // never reach the command line.
     child_.set_desktop_reserve_gib(prefs_.desktop_reserve_gib);
+    // Same for the idle limit: the engine unloads and reloads the model itself, so the choice
+    // has to be on its command line from the first spawn.
+    child_.set_idle_unload_minutes(prefs_.idle_unload_minutes);
 }
 
 TrayIcon::~TrayIcon() {
@@ -530,6 +530,12 @@ void TrayIcon::on_idle_chosen(int minutes) { set_idle_minutes(minutes); }
 void TrayIcon::set_idle_minutes(int minutes) {
     prefs_.idle_unload_minutes = minutes;
     update_tray_preference(prefs_path_, false, prefs_.idle_unload_minutes);
+    child_.set_idle_unload_minutes(minutes);
+    // The running engine takes the new limit without a restart. Off the UI thread: the call
+    // waits for the engine, and a failure only means the next spawn applies it instead.
+    std::thread([engine = child_.config().engine, minutes] {
+        apply_engine_idle_unload(engine, minutes);
+    }).detach();
 }
 
 void TrayIcon::on_start_at_login_toggled() {
@@ -545,38 +551,6 @@ void TrayIcon::on_start_at_login_toggled() {
     } catch (const std::exception& ex) {
         MessageBoxW(nullptr, widen(ex.what()).c_str(), L"NInfer Workstation", MB_OK | MB_ICONWARNING);
     }
-}
-
-// Unloads an idle engine so a workstation is not holding ~70 GB of weights while
-// nobody is using it.
-//
-// "Idle" is now measured rather than assumed: the engine's own stderr says when
-// a request arrives or finishes, and the request log's mtime says the same thing
-// across a supervisor restart. The previous version reset its clock only on a
-// state change, so an engine that served continuously for longer than the window
-// was terminated mid-request.
-void TrayIcon::tick_idle_unload() {
-    if (prefs_.idle_unload_minutes <= 0 || !manages_engine_) { return; }
-    const EngineStatus st = child_.status();
-    IdleInputs in;
-    in.now_ms           = now_unix_ms();
-    in.last_activity_ms = (std::max)(st.last_activity_unix_ms,
-                                     collector_.request_log_last_write_unix_ms());
-    in.idle_minutes     = prefs_.idle_unload_minutes;
-    in.running          = st.state == EngineState::Running;
-    in.healthy          = st.health == "ok";
-    // The hard floor. Both activity clocks depend on the engine's log cadence --
-    // --log-stats-interval-ms 0 removes the throughput line, and a config need
-    // not have a request log -- so a 20-minute generation could otherwise emit
-    // nothing between submit and done and be terminated in the middle of itself.
-    // An open request that has not closed does not depend on any cadence.
-    in.inflight_requests = st.inflight_requests;
-    if (!idle_unload_due(in)) { return; }
-    child_.stop();
-    notify(L"NInfer model unloaded",
-           L"The engine was idle and its memory has been returned to the desktop. "
-           L"Load it again from the tray menu.",
-           NIIF_INFO | NIIF_RESPECT_QUIET_TIME);
 }
 
 void TrayIcon::open_dashboard() const {

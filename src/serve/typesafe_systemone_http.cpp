@@ -92,6 +92,7 @@ void write_typesafe_error(httplib::Response& response, const ApiError& error) {
 SystemOneExecution HttpServer::execute_systemone(const SystemOneRequest& request,
                                                     const httplib::Request& req,
                                                     std::string_view endpoint, bool read_only) {
+    const auto model = acquire_model();
     std::vector<SystemOneBranch> branches;
     // Labels are printable ASCII characters, "Yes"/"No" and digits: each one native token.
     std::unordered_map<std::string, ninfer::TokenId> token_ids;

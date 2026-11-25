@@ -2,9 +2,12 @@
 
 #include "serve/observations.h"
 
+#include <mutex>
+
 namespace ninfer::serve {
 
-// Prometheus formatting over the same post-warmup observations used by the JSON API.
+// Prometheus formatting over the same post-warmup observations used by the JSON API. A model
+// reload reconfigures it while /metrics may be rendering, so both take the lock.
 class Metrics {
 public:
     void configure(std::string model, const EngineOptions&, const StartupReport&,
@@ -12,6 +15,7 @@ public:
     [[nodiscard]] std::string render(const EngineSnapshot&, const ServiceSnapshot&,
                                      bool ready) const;
 private:
+    mutable std::mutex mutex_;
     std::string model_;
     EngineOptions options_;
     StartupReport startup_;

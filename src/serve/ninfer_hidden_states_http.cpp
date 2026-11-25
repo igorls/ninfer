@@ -122,6 +122,7 @@ void HttpServer::handle_hidden_states(const httplib::Request& req, httplib::Resp
         return;
     }
 
+    const auto model           = acquire_model();
     const std::uint64_t req_id = ++request_seq_;
     RequestLogMetadata metadata{.http_request_id        = res.get_header_value("x-request-id"),
                                 .model                  = request.model,
@@ -137,6 +138,7 @@ void HttpServer::handle_hidden_states(const httplib::Request& req, httplib::Resp
         prepared = service_->prepare(request.generation, GenerationConsumerMode::Aggregate,
                                      std::move(observation),
                                      [&req] { return client_disconnected(req); });
+        prepared.residency = model;
         if (static_cast<std::size_t>(std::max(0, prepared.prompt_tokens)) * tap_layers.size() >
             kMaxHiddenTokenLayers) {
             hidden_bad_request("prompt_tokens * num_layers exceeds hidden_states payload cap",

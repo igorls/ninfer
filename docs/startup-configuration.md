@@ -246,6 +246,7 @@ HTTP 参数保留各协议的取值合同；例如 OpenAI 请求可以将输出�
 | `server.max_request_size` | `--max-request-size` | 正容量 / `384MiB` | JSON 解析前的请求 body 上限 |
 | `server.responses.max_records` | `--response-store-max-records` | 正整数 / 1024 | 进程本地 Responses store 记录数上限 |
 | `server.responses.max_size` | `--response-store-max-size` | 正容量 / `256MiB` | Responses store 内存上限，与 context cache 无关 |
+| `server.idle_unload` | `--idle-unload` | 毫秒时长 / `0ms` | 无模型请求达到该时长后卸载模型；HTTP 服务继续监听，下一个模型请求以相同启动参数重新加载；`0ms` 保持常驻，见 [serving](serving.md#idle-unload-and-reload) |
 | `logging.level` | `--log-level` | `trace/debug/info/warning/error/critical/off` / `info` | 产品诊断日志级别 |
 | `logging.stats_interval` | `--stats-interval` | 毫秒时长 / `5s` | serve 吞吐统计周期；0 关闭周期输出 |
 | `logging.request_jsonl` | `--request-log-jsonl` | 路径 / `""` | serve 结构化启动/请求日志；空值关闭 |

@@ -1031,6 +1031,16 @@ inline std::vector<std::string> with_api_key_file(std::vector<std::string> args,
     return product::set_serve_argument(std::move(args), "server.api_key_file", path);
 }
 
+// The tray's "Unload when idle" choice is the engine's own --idle-unload limit: the engine keeps
+// listening while unloaded and reloads on the next request. The tray owns this setting for a
+// managed engine, so its choice replaces any value in the configured arguments; 0 keeps the
+// model loaded.
+inline std::vector<std::string> with_idle_unload(std::vector<std::string> args, int minutes) {
+    const int seconds = minutes > 0 ? minutes * 60 : 0;
+    return product::set_serve_argument(std::move(args), "server.idle_unload",
+                                       std::to_string(seconds) + "s");
+}
+
 inline std::vector<std::string> with_desktop_reserve(std::vector<std::string> args, int gib) {
     if (desktop_reserve_pinned(args)) return args;
     // Zero must override the engine's nonzero default explicitly.
@@ -1197,82 +1207,6 @@ inline EngineLineSignal classify_engine_line(std::string_view raw) {
 // can mention a request.
 inline bool is_process_scoped_error(const EngineLineSignal& sig) {
     return sig.error && (sig.fatal || !sig.activity);
-}
-
-// One request's lifecycle, from the same stderr line the activity signal reads.
-//
-// This is the hard floor under "unload when idle": the log-cadence signals can
-// all be silenced (--log-stats-interval-ms 0 removes the throughput line, and a
-// config need not have a request log), and a 20-minute generation would then
-// look idle and be terminated mid-answer. A request that opened and has not
-// closed is proof of work in flight regardless of any cadence.
-//
-// Formats (src/serve/operational_log.cpp): open is `request id=<n>
-// status=submitted ...`; close is status=done / failed / rejected / cancelled.
-// `response request_id=` is deliberately not matched -- it is a second record
-// about a request that has its own terminal line.
-struct RequestLifecycle {
-    bool matched         = false; // the line is about a specific request
-    std::uint64_t id     = 0;
-    bool opens           = false;
-    bool closes          = false;
-};
-
-inline RequestLifecycle classify_request_line(std::string_view raw) {
-    RequestLifecycle out;
-    const std::string_view line = trim_sv(raw);
-    constexpr std::string_view kReq = "request id=";
-    const auto p                    = line.find(kReq);
-    if (p == std::string_view::npos) { return out; }
-    std::size_t i          = p + kReq.size();
-    std::uint64_t id       = 0;
-    std::size_t digits     = 0;
-    while (i < line.size() && line[i] >= '0' && line[i] <= '9') {
-        // Ignore overflow past 19 digits rather than wrapping: an id that long
-        // is not something this engine emits, and a wrapped one could collide.
-        if (digits < 19) { id = id * 10 + static_cast<std::uint64_t>(line[i] - '0'); }
-        ++digits;
-        ++i;
-    }
-    if (digits == 0 || digits > 19) { return out; }
-    out.matched = true;
-    out.id      = id;
-    constexpr std::string_view kStatus = " status=";
-    const auto s                       = line.find(kStatus, i);
-    if (s == std::string_view::npos) { return out; }
-    const std::size_t b = s + kStatus.size();
-    std::size_t e       = b;
-    while (e < line.size() && line[e] != ' ') { ++e; }
-    const std::string_view status = line.substr(b, e - b);
-    out.opens                     = status == "submitted";
-    out.closes = status == "done" || status == "failed" || status == "rejected" ||
-                 status == "cancelled";
-    return out;
-}
-
-// Inputs to "unload the model because nobody is using it". Kept as a struct so
-// the decision is one pure function: killing a live engine mid-request is the
-// worst thing this program can do, so the rule must be testable in isolation.
-struct IdleInputs {
-    std::int64_t now_ms           = 0;
-    std::int64_t last_activity_ms = 0;
-    int idle_minutes              = 0;
-    bool running                  = false;
-    bool healthy                  = false;
-    // Requests the engine has opened and not closed. The activity clock depends
-    // on the engine's log cadence; this does not, and it is what makes "cannot
-    // unload mid-request" absolute rather than conditional on a flag.
-    int inflight_requests         = 0;
-};
-
-inline bool idle_unload_due(const IdleInputs& in) {
-    if (in.idle_minutes <= 0 || !in.running || !in.healthy) { return false; }
-    if (in.inflight_requests > 0) { return false; }
-    // No activity clock yet (engine just adopted, log not yet seen): never
-    // unload. An unknown last-use time is not the same as a long-ago one.
-    if (in.last_activity_ms <= 0) { return false; }
-    const std::int64_t window_ms = static_cast<std::int64_t>(in.idle_minutes) * 60000;
-    return in.now_ms - in.last_activity_ms >= window_ms;
 }
 
 // Balloon body for a crash-loop halt. NOTIFYICONDATA::szInfo is 256 wchar_t

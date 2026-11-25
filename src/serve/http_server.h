@@ -2,6 +2,7 @@
 
 #include "serve/generation_service.h"
 #include "serve/metrics.h"
+#include "serve/model_residency.h"
 #include "serve/openai_common.h"
 #include "serve/operational_log.h"
 #include "serve/openai_responses_store.h"
@@ -15,6 +16,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <memory>
 #include <string>
@@ -46,14 +48,23 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const product::Ser
 [[nodiscard]] bool matches_bearer_credential(std::string_view authorization,
                                              std::string_view api_key) noexcept;
 
+using GenerationResidency = ModelResidency<GenerationService>;
+
 class HttpServer {
 public:
-    HttpServer(product::ServeOptions options, std::shared_ptr<spdlog::logger> logger);
+    // Builds one ready GenerationService: Engine load and warmup with the startup options. The
+    // startup load and every reload after an idle unload run the same loader.
+    using ServiceLoader = std::function<std::unique_ptr<GenerationService>(LoadCause)>;
 
-    // Reserves the configured address before model loading. The service is attached only after its
-    // Engine is ready, then listen() enters the blocking accept loop on the already-bound socket.
+    HttpServer(product::ServeOptions options, std::shared_ptr<spdlog::logger> logger);
+    ~HttpServer();
+
+    // Reserves the configured address before model loading. attach() runs the startup load and
+    // owns the service from then on; listen() enters the blocking accept loop on the
+    // already-bound socket. With --idle-unload the model can later be unloaded and reloaded
+    // while the socket keeps listening.
     bool bind();
-    void attach(GenerationService& service);
+    void attach(ServiceLoader loader);
     bool listen();
     void stop();
 
@@ -89,6 +100,19 @@ private:
     [[nodiscard]] std::shared_ptr<RequestLifecycle> begin_request(RequestLogContext context);
 
     void register_routes();
+    // A use lease on the resident model, loading it first when it is unloaded. Throws an
+    // ApiException (503) when the load fails or the server is stopping. Every handler that
+    // reaches service_ holds one for as long as it, or its streaming response, uses the model.
+    [[nodiscard]] std::shared_ptr<GenerationResidency::Lease> acquire_model();
+    // The load error text can name local paths and device details, so only the authenticated
+    // admin route includes it; the unauthenticated /health does not.
+    [[nodiscard]] nlohmann::json residency_json(bool include_load_error) const;
+    // 503 for a status route whose answer needs the model while it is not resident.
+    void write_model_not_resident(httplib::Response& res) const;
+    void handle_admin_residency_get(const httplib::Request& req, httplib::Response& res) const;
+    void handle_admin_residency_set(const httplib::Request& req, httplib::Response& res);
+    void attach_service(GenerationService& service, LoadCause cause);
+    void detach_service(GenerationService& service);
     // Writes the endpoint-shaped rejection and returns true when a configured key is missing or
     // wrong.
     [[nodiscard]] bool reject_unauthenticated(const httplib::Request& req,
@@ -145,7 +169,12 @@ private:
     void run_stats_reporter();
     void stop_stats_reporter();
 
+    // The resident service. Written only by the residency's attach/detach hooks, which run while
+    // no lease exists; read only by a thread that holds a lease from residency_, so the lease's
+    // acquire/release ordering makes every read see the attached service.
     GenerationService* service_ = nullptr;
+    std::unique_ptr<GenerationResidency> residency_;
+    std::string props_body_; // /props from the startup load; every reload uses the same options
     product::ServeOptions options_;
     ServedModelNames served_model_names_; // id is the public model id; aliases from --model-alias
     std::int64_t loaded_unix_seconds_ = 0;

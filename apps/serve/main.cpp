@@ -63,24 +63,29 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        ninfer::serve::GenerationService service(options, startup_log.observer());
-        startup_log.engine_ready(service.startup_report().load);
-        operational_log.engine_capacity(service);
+        // One ready service from the startup options. The startup load runs it here; with
+        // --idle-unload the first request after an unload runs it again on a request thread.
+        server.attach([&options, &startup_log, &operational_log](ninfer::serve::LoadCause) {
+            auto service = std::make_unique<ninfer::serve::GenerationService>(
+                options, startup_log.observer());
+            startup_log.engine_ready(service->startup_report().load);
+            operational_log.engine_capacity(*service);
 
-        using Clock                            = std::chrono::steady_clock;
-        const Clock::time_point warmup_started = Clock::now();
-        operational_log.warmup_started();
-        try {
-            service.warmup();
-        } catch (const std::exception& exception) {
-            const double seconds =
-                std::chrono::duration<double>(Clock::now() - warmup_started).count();
-            operational_log.warmup_failure(seconds, exception.what());
-            return 1;
-        }
-        operational_log.warmup_complete(
-            std::chrono::duration<double>(Clock::now() - warmup_started).count());
-        server.attach(service);
+            using Clock                            = std::chrono::steady_clock;
+            const Clock::time_point warmup_started = Clock::now();
+            operational_log.warmup_started();
+            try {
+                service->warmup();
+            } catch (const std::exception& exception) {
+                const double seconds =
+                    std::chrono::duration<double>(Clock::now() - warmup_started).count();
+                operational_log.warmup_failure(seconds, exception.what());
+                throw;
+            }
+            operational_log.warmup_complete(
+                std::chrono::duration<double>(Clock::now() - warmup_started).count());
+            return service;
+        });
 
         std::signal(SIGINT, handle_signal);
         std::signal(SIGTERM, handle_signal);

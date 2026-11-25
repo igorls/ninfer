@@ -38,6 +38,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         return;
     }
 
+    const auto model           = acquire_model();
     const std::uint64_t req_id = ++request_seq_;
     RequestLogMetadata metadata{.http_request_id        = res.get_header_value("x-request-id"),
                                 .model                  = request.model,
@@ -58,6 +59,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             request.generation,
             request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
             std::move(observation), [&req] { return client_disconnected(req); });
+        prepared.residency = model;
     } catch (const ApiException& exception) {
         record_request_rejected(make_request_rejection_log_context(
             req_id, "openai_chat_completions", request.generation, metadata, exception.error()));

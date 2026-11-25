@@ -87,7 +87,10 @@ public:
 
     [[nodiscard]] const std::string& instance_id() const noexcept { return instance_id_; }
 
-    [[nodiscard]] double start_seconds() const noexcept { return start_seconds_; }
+    // Restarts with each model load; atomic because status routes read it during a reload.
+    [[nodiscard]] double start_seconds() const noexcept {
+        return start_seconds_.load(std::memory_order_relaxed);
+    }
 
     [[nodiscard]] EngineSnapshot normalize(EngineSnapshot current) const;
     [[nodiscard]] ServiceSnapshot snapshot(bool include_requests = false) const;
@@ -106,7 +109,7 @@ public:
 private:
     void event(const char* kind, std::uint64_t id, nlohmann::json details = {});
     std::string instance_id_;
-    double start_seconds_ = 0;
+    std::atomic<double> start_seconds_{0};
     EngineSnapshot baseline_;
     mutable std::mutex mutex_;
     ServiceCounters counters_;

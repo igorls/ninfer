@@ -98,11 +98,6 @@ public:
     // The cached device-wide memory reading, so the tray menu never queries on the UI thread.
     [[nodiscard]] NvidiaMemory last_nvidia();
 
-    // mtime of the engine's request log, or 0 when none is configured. A second,
-    // coarser activity source than the stderr scan: it survives a supervisor
-    // restart, where the stderr clock does not.
-    [[nodiscard]] std::int64_t request_log_last_write_unix_ms();
-
 private:
     struct RequestLogSink;
 
@@ -130,7 +125,6 @@ private:
     // Caller holds mu_.
     void reset_live_request_log_locked();
     void observe_loop();
-    [[nodiscard]] std::int64_t poll_request_log_mtime() const;
     void record_transitions(const Collected& snap);
     void persist_sample(const VramSample& s);
     void persist_event(const VramSeriesEvent& e);
@@ -197,7 +191,6 @@ private:
     nlohmann::json last_gpu_processes_ = {{"ok", false}, {"apps", nlohmann::json::array()}};
     HealthObserver health_observer_;
     EngineStateProvider engine_state_provider_;
-    std::int64_t request_log_mtime_ms_ = 0;
 };
 
 } // namespace ninfer::supervisor

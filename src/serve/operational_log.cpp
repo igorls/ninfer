@@ -531,6 +531,33 @@ void OperationalLog::server_ready(std::string_view host, int port, std::string_v
 
 void OperationalLog::server_stopped() const { logger_->info("server stopped"); }
 
+void OperationalLog::model_unloaded(double idle_seconds, double unload_seconds) const {
+    logger_->info("model unloaded | idle {} | unload {} | server keeps listening",
+                  product::format_pretty_duration(idle_seconds),
+                  product::format_pretty_duration(unload_seconds));
+}
+
+void OperationalLog::model_reload_started() const {
+    logger_->info("model reloading | requested by an inference request");
+}
+
+void OperationalLog::model_reloaded(double seconds) const {
+    logger_->info("model reloaded | {}", product::format_pretty_duration(seconds));
+}
+
+void OperationalLog::model_reload_failure(double seconds, std::string_view detail) const {
+    logger_->error("model reload failed | {} | {} | the next request retries",
+                   product::format_pretty_duration(seconds), product::format_pretty_text(detail));
+}
+
+void OperationalLog::idle_unload_changed(std::uint32_t idle_unload_ms) const {
+    if (idle_unload_ms == 0) {
+        logger_->info("idle unload disabled");
+    } else {
+        logger_->info("idle unload after {}", product::format_pretty_duration(idle_unload_ms / 1000.0));
+    }
+}
+
 void OperationalLog::server_failure(bool serving, std::string_view detail) const {
     logger_->critical("server failed during {} | {}", serving ? "serving" : "startup",
                       product::format_pretty_text(detail));

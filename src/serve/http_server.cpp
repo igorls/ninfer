@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -355,8 +356,19 @@ void HttpServer::record_throughput(const ThroughputReport& report) {
 }
 
 void HttpServer::run_stats_reporter() {
-    using Clock                     = std::chrono::steady_clock;
-    ninfer::EngineSnapshot previous = service_->snapshot();
+    using Clock = std::chrono::steady_clock;
+    // Runtime counters belong to one Engine instance. An interval is reported only between two
+    // samples of the same load; an unloaded model has nothing to report.
+    struct Sample {
+        ninfer::EngineSnapshot snapshot;
+        std::uint64_t load = 0;
+    };
+    const auto sample = [this]() -> std::optional<Sample> {
+        const auto model = residency_->peek();
+        if (!model) return std::nullopt;
+        return Sample{.snapshot = service_->snapshot(), .load = residency_->status().loads};
+    };
+    std::optional<Sample> previous  = sample();
     Clock::time_point previous_time = Clock::now();
     const auto interval = std::chrono::milliseconds(options_.launch.logging.stats_interval_ms);
     Clock::time_point next_deadline = previous_time + interval;
@@ -369,22 +381,27 @@ void HttpServer::run_stats_reporter() {
             }
         }
 
-        const ninfer::EngineSnapshot current = service_->snapshot();
-        const Clock::time_point now          = Clock::now();
-        const ThroughputReport report        = make_throughput_report(
-            previous, current, std::chrono::duration<double>(now - previous_time).count());
-        if (report_has_activity(report)) { record_throughput(report); }
-        previous      = current;
+        std::optional<Sample> current = sample();
+        const Clock::time_point now   = Clock::now();
+        if (previous && current && previous->load == current->load) {
+            const ThroughputReport report =
+                make_throughput_report(previous->snapshot, current->snapshot,
+                                       std::chrono::duration<double>(now - previous_time).count());
+            if (report_has_activity(report)) { record_throughput(report); }
+        }
+        previous      = std::move(current);
         previous_time = now;
         next_deadline += interval;
         const Clock::time_point after_write = Clock::now();
         if (next_deadline <= after_write) { next_deadline = after_write + interval; }
     }
 
-    const ninfer::EngineSnapshot current = service_->snapshot();
-    const Clock::time_point now          = Clock::now();
-    ThroughputReport tail                = make_throughput_report(
-        previous, current, std::chrono::duration<double>(now - previous_time).count());
+    const std::optional<Sample> current = sample();
+    if (!previous || !current || previous->load != current->load) return;
+    const Clock::time_point now = Clock::now();
+    ThroughputReport tail       = make_throughput_report(
+        previous->snapshot, current->snapshot,
+        std::chrono::duration<double>(now - previous_time).count());
     // The exact partial interval remains useful to measurement consumers. Pretty throughput is a
     // fixed-cadence operational record and deliberately has no irregular shutdown tail.
     tail.final_interval = true;
@@ -486,20 +503,36 @@ void HttpServer::register_routes() {
         });
 
     register_monitor_routes();
+    // Liveness of the server, which keeps listening while the model is unloaded. A resident model
+    // reports its Engine availability as before; an unloaded or loading one is not a failure,
+    // because the next request that needs it loads it.
     server_.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
-        const bool available = service_ != nullptr && service_->is_available();
-        res.status           = available ? 200 : 503;
-        res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
-                        "application/json");
+        nlohmann::json body = residency_json(false);
+        bool available      = true;
+        if (const auto model = residency_->peek()) available = service_->is_available();
+        body["status"] = available ? "ok" : "unavailable";
+        res.status     = available ? 200 : 503;
+        res.set_content(body.dump(), "application/json");
     });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
     server_.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
-        const auto stats = observations_.normalize(service_->snapshot());
+        std::string body;
+        bool resident = false;
+        if (const auto model = residency_->peek()) {
+            resident = true;
+            body     = metrics_.render(observations_.normalize(service_->snapshot()),
+                                       observations_.snapshot(), service_->is_available());
+        } else {
+            // Engine counters restart with each load, so an unloaded model reports none.
+            body = metrics_.render(ninfer::EngineSnapshot{}, observations_.snapshot(), false);
+        }
+        body += "# HELP ninfer_model_resident Whether the model is loaded; 0 while it is unloaded "
+                "after --idle-unload.\n# TYPE ninfer_model_resident gauge\nninfer_model_resident ";
+        body += resident ? "1\n" : "0\n";
         res.set_header("Cache-Control", "no-store");
-        res.set_content(metrics_.render(stats, observations_.snapshot(), service_->is_available()),
-                        "text/plain; version=0.0.4; charset=utf-8");
+        res.set_content(body, "text/plain; version=0.0.4; charset=utf-8");
     });
     server_.Get(R"(/v1/models/(.+))", [this](const httplib::Request& req, httplib::Response& res) {
         handle_model(req, res);
@@ -562,6 +595,10 @@ void HttpServer::register_routes() {
         handle_admin_experts(req, res);
     });
     post("/admin/quiesce", &HttpServer::handle_admin_quiesce);
+    server_.Get("/admin/residency", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_admin_residency_get(req, res);
+    });
+    post("/admin/residency", &HttpServer::handle_admin_residency_set);
 }
 
 bool HttpServer::reject_unauthenticated(const httplib::Request& req, httplib::Response& res) const {
@@ -620,12 +657,9 @@ std::optional<DeviceSnapshotReading> device_snapshot(int device) {
 //      overshoot; free memory falling without that gap moving is somebody else's doing, and
 //      the two must never be conflated when deciding whether to shed load.
 void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& res) const {
-    if (service_ == nullptr) {
-        ApiError error;
-        error.status  = 503;
-        error.type    = "service_unavailable";
-        error.message = "engine is not attached";
-        write_openai_error(res, error);
+    const auto model = residency_->peek();
+    if (!model) {
+        write_model_not_resident(res);
         return;
     }
 
@@ -739,8 +773,12 @@ void HttpServer::handle_admin_vram(const httplib::Request&, httplib::Response& r
 }
 
 void HttpServer::handle_admin_experts(const httplib::Request& req, httplib::Response& res) const {
-    const ExpertRouteRecorder* recorder =
-        service_ != nullptr ? service_->expert_route_recorder() : nullptr;
+    const auto model = residency_->peek();
+    if (!model) {
+        write_model_not_resident(res);
+        return;
+    }
+    const ExpertRouteRecorder* recorder = service_->expert_route_recorder();
     if (recorder == nullptr) {
         ApiError error;
         error.status  = 404;
@@ -754,12 +792,9 @@ void HttpServer::handle_admin_experts(const httplib::Request& req, httplib::Resp
 }
 
 void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& res) const {
-    if (service_ == nullptr) {
-        ApiError error;
-        error.status  = 503;
-        error.type    = "service_unavailable";
-        error.message = "engine is not attached";
-        write_openai_error(res, error);
+    const auto model = residency_->peek();
+    if (!model) {
+        write_model_not_resident(res);
         return;
     }
     const ninfer::RuntimeStats s = service_->snapshot().runtime;
@@ -804,12 +839,9 @@ void HttpServer::handle_admin_stats(const httplib::Request&, httplib::Response& 
 }
 
 void HttpServer::handle_admin_quiesce(const httplib::Request& req, httplib::Response& res) const {
-    if (service_ == nullptr) {
-        ApiError error;
-        error.status  = 503;
-        error.type    = "service_unavailable";
-        error.message = "engine is not attached";
-        write_openai_error(res, error);
+    const auto model = residency_->peek();
+    if (!model) {
+        write_model_not_resident(res);
         return;
     }
 
@@ -896,50 +928,164 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
 }
 
 void HttpServer::handle_props(const httplib::Request&, httplib::Response& res) const {
-    // One model is served, so llama.cpp's per-model `?model=` query selects the same answer.
-    const ninfer::EngineOptions& engine = service_->engine_options();
-    res.set_content(
-        make_llamacpp_props(
-            {.model_alias   = served_model_names_.id,
-             .model_path    = std::filesystem::path(options_.launch.engine.artifact_path).filename().string(),
-             .n_ctx         = engine.max_context,
-             .total_slots   = engine.max_concurrency,
-             .vision        = engine.enable_vision,
-             .chat_template = service_->chat_template_source()}),
-        "application/json");
+    // One model is served, so llama.cpp's per-model `?model=` query selects the same answer. The
+    // body is fixed by the startup load, which a reload repeats, so it answers while unloaded.
+    res.set_content(props_body_, "application/json");
 }
 
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
 
-void HttpServer::attach(GenerationService& service) {
-    if (service_ != nullptr) {
-        throw std::logic_error("HTTP generation service is already attached");
-    }
-    const ninfer::LoadSummary load = service.startup_report().load;
-    if (!options_.model_id_override && load.model_name.empty())
-        throw std::logic_error("loaded artifact model name must not be empty");
-    served_model_names_.id = options_.model_id_override.value_or(load.model_name);
-    served_model_names_.aliases.clear();
-    for (const std::string& alias : options_.model_aliases) {
-        // An alias equal to an artifact-derived id adds no name.
-        if (alias != served_model_names_.id) { served_model_names_.aliases.push_back(alias); }
+HttpServer::~HttpServer() {
+    // The service goes before the observers its Engine callbacks report to.
+    residency_.reset();
+}
+
+void HttpServer::attach(ServiceLoader loader) {
+    if (residency_) { throw std::logic_error("HTTP generation service is already attached"); }
+    GenerationResidency::Hooks hooks{
+        .attach = [this](GenerationService& service,
+                         LoadCause cause) { attach_service(service, cause); },
+        .detach = [this](GenerationService& service) { detach_service(service); },
+        .load_started =
+            [this](LoadCause cause) {
+                if (cause == LoadCause::Request) operational_log_.model_reload_started();
+            },
+        .loaded =
+            [this](LoadCause cause, double seconds) {
+                if (cause == LoadCause::Request) operational_log_.model_reloaded(seconds);
+            },
+        .load_failed =
+            [this](LoadCause cause, double seconds, const std::string& error) {
+                if (cause == LoadCause::Request)
+                    operational_log_.model_reload_failure(seconds, error);
+            },
+        .unloaded =
+            [this](double idle_seconds, double unload_seconds) {
+                operational_log_.model_unloaded(idle_seconds, unload_seconds);
+            },
+    };
+    residency_ = std::make_unique<GenerationResidency>(std::move(loader), std::move(hooks),
+                                                       options_.idle_unload_ms);
+    residency_->load_at_startup();
+}
+
+void HttpServer::attach_service(GenerationService& service, LoadCause cause) {
+    if (cause == LoadCause::Startup) {
+        const ninfer::LoadSummary load = service.startup_report().load;
+        if (!options_.model_id_override && load.model_name.empty())
+            throw std::logic_error("loaded artifact model name must not be empty");
+        served_model_names_.id = options_.model_id_override.value_or(load.model_name);
+        served_model_names_.aliases.clear();
+        for (const std::string& alias : options_.model_aliases) {
+            // An alias equal to an artifact-derived id adds no name.
+            if (alias != served_model_names_.id) { served_model_names_.aliases.push_back(alias); }
+        }
+        const ninfer::EngineOptions& engine = service.engine_options();
+        props_body_ = make_llamacpp_props(
+            {.model_alias =
+                 served_model_names_.id,
+             .model_path =
+                 std::filesystem::path(options_.launch.engine.artifact_path).filename().string(),
+             .n_ctx         = engine.max_context,
+             .total_slots   = engine.max_concurrency,
+             .vision        = engine.enable_vision,
+             .chat_template = service.chat_template_source()});
+    } else if (const std::string& name = service.startup_report().load.model_name;
+               !options_.model_id_override && name != served_model_names_.id) {
+        // The artifact on disk was replaced since startup; clients hold the startup name.
+        throw std::runtime_error("reloaded artifact is named '" + name + "', not '" +
+                                 served_model_names_.id + "'");
     }
     service_ = &service;
+    // Engine counters start again with every load, so measurement restarts from this baseline.
     const auto initial_snapshot = service.snapshot();
     observations_.attach(initial_snapshot);
     metrics_.configure(served_model_names_.id, service.engine_options(), service.startup_report(),
                        observations_.start_seconds());
-    request_jsonl_.write_server_start(
-        options_, service.engine_options(), service.sampling_defaults(), served_model_names_.id,
-        service.description(), service.startup_report(), initial_snapshot);
+    if (cause == LoadCause::Startup) {
+        request_jsonl_.write_server_start(
+            options_, service.engine_options(), service.sampling_defaults(), served_model_names_.id,
+            service.description(), service.startup_report(), initial_snapshot);
+    }
     if (ExpertRouteRecorder* recorder = service.expert_route_recorder()) {
         recorder->configure(request_jsonl_.server_instance_id(), served_model_names_.id,
                             options_.launch.engine.artifact_path.string());
     }
 }
 
+void HttpServer::detach_service(GenerationService&) { service_ = nullptr; }
+
+std::shared_ptr<GenerationResidency::Lease> HttpServer::acquire_model() {
+    try {
+        return std::make_shared<GenerationResidency::Lease>(residency_->acquire());
+    } catch (const ModelUnavailable& exception) {
+        ApiError error;
+        error.status  = 503;
+        error.type    = "service_unavailable";
+        error.code    = "model_unavailable";
+        error.message = exception.what();
+        throw ApiException(std::move(error));
+    }
+}
+
+nlohmann::json HttpServer::residency_json(bool include_load_error) const {
+    const ResidencyStatus status = residency_->status();
+    nlohmann::json body          = {{"model", residency_state_name(status.state)},
+                                    {"idle_unload_ms", status.idle_unload_ms},
+                                    {"loads", status.loads},
+                                    {"unloads", status.unloads},
+                                    {"last_load_seconds", status.last_load_seconds},
+                                    {"last_unload_seconds", status.last_unload_seconds}};
+    if (include_load_error && !status.last_load_error.empty()) {
+        body["last_load_error"] = status.last_load_error;
+    }
+    return body;
+}
+
+void HttpServer::write_model_not_resident(httplib::Response& res) const {
+    ApiError error;
+    error.status  = 503;
+    error.type    = "service_unavailable";
+    error.code    = "model_not_resident";
+    error.message = std::string("the model is ") +
+                    residency_state_name(residency_->status().state) +
+                    "; the next inference request loads it";
+    write_openai_error(res, error);
+}
+
+void HttpServer::handle_admin_residency_get(const httplib::Request&,
+                                            httplib::Response& res) const {
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(residency_json(true).dump(), "application/json");
+}
+
+// Changes the idle limit of the running server; the startup option is only the initial value.
+void HttpServer::handle_admin_residency_set(const httplib::Request& req, httplib::Response& res) {
+    std::uint32_t idle_unload_ms = 0;
+    try {
+        const auto body = nlohmann::json::parse(req.body);
+        if (!body.is_object() || !body.contains("idle_unload_ms") ||
+            !body["idle_unload_ms"].is_number_unsigned() ||
+            body["idle_unload_ms"].get<std::uint64_t>() > 0xffffffffULL)
+            throw std::invalid_argument("idle_unload_ms");
+        idle_unload_ms = body["idle_unload_ms"].get<std::uint32_t>();
+    } catch (const std::exception&) {
+        ApiError error;
+        error.status  = 400;
+        error.param   = "idle_unload_ms";
+        error.message = "body must be JSON with a non-negative integer idle_unload_ms; 0 keeps the "
+                        "model loaded";
+        write_openai_error(res, error);
+        return;
+    }
+    residency_->set_idle_unload_ms(idle_unload_ms);
+    operational_log_.idle_unload_changed(idle_unload_ms);
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(residency_json(true).dump(), "application/json");
+}
+
 bool HttpServer::listen() {
-    if (service_ == nullptr) { throw std::logic_error("HTTP generation service is not attached"); }
+    if (!residency_) { throw std::logic_error("HTTP generation service is not attached"); }
     if (served_model_names_.id.empty()) {
         throw std::logic_error("HTTP public model id is not resolved");
     }
@@ -960,8 +1106,9 @@ bool HttpServer::listen() {
 }
 
 void HttpServer::stop() {
-    // Wake generation handlers before cpp-httplib joins its HTTP worker queue.
-    if (service_) service_->request_stop();
+    // Wake generation handlers before cpp-httplib joins its HTTP worker queue. Requests waiting
+    // for a reload are refused instead.
+    if (residency_) residency_->stop([](GenerationService& service) { service.request_stop(); });
     observations_.stop();
     server_.stop();
 }

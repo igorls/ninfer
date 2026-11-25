@@ -117,6 +117,9 @@ struct ServeOptions {
     std::size_t max_request_bytes          = kDefaultMaxRequestBytes;
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
+    // Idle time after which the model is unloaded while the server keeps listening; 0 keeps
+    // it loaded. The next request that needs the model reloads it with these same options.
+    std::uint32_t idle_unload_ms = 0;
 };
 
 [[nodiscard]] CliOptions parse_cli_options(int argc, char** argv);

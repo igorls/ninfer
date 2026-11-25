@@ -21,7 +21,14 @@ Json coordinate(const ParallelCoordinate& value) {
 } // namespace
 
 void HttpServer::register_monitor_routes() {
+    // Info and snapshot read the resident Engine, so they hold a status lease like the admin
+    // routes; events only subscribes to observations and keeps working while unloaded.
     server_.Get("/monitor/info", [this](const httplib::Request&, httplib::Response& res) {
+        const auto model = residency_->peek();
+        if (!model) {
+            write_model_not_resident(res);
+            return;
+        }
         auto out                = identity(observations_);
         const auto& description = service_->description();
         auto options            = options_;
@@ -63,6 +70,11 @@ void HttpServer::register_monitor_routes() {
         res.set_content(out.dump(), "application/json");
     });
     server_.Get("/monitor/snapshot", [this](const httplib::Request&, httplib::Response& res) {
+        const auto model = residency_->peek();
+        if (!model) {
+            write_model_not_resident(res);
+            return;
+        }
         const auto snapshot =
             observations_.normalize(service_->snapshot({.include_requests = true}));
         const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(

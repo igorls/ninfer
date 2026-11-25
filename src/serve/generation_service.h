@@ -101,6 +101,9 @@ request_error_to_api_error(const ninfer::RequestError& exception,
 // request keeps its ingress/response lifetime reservation until the HTTP response is released and
 // is consumed exactly once by run().
 struct PreparedRequest {
+    // Keeps the model resident until the request and its response are released. Declared first
+    // so it is released last, after the generation handle that belongs to that model.
+    std::shared_ptr<void> residency;
     std::string constraint_param;
     std::vector<std::string> tool_schema_params;
     ninfer::GenerationHandle generation;

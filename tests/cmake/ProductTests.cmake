@@ -66,6 +66,9 @@ ninfer_add_test(ninfer_request_log_file_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_request_log_file.cpp"
           "${PROJECT_SOURCE_DIR}/src/serve/request_log_file.cpp")
 
+ninfer_add_test(ninfer_model_residency_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_model_residency.cpp")
+
 ninfer_add_test(ninfer_expert_route_recorder_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_expert_route_recorder.cpp"
   LIBRARIES ninfer_serve)
@@ -111,6 +114,11 @@ if(TARGET ninfer-serve)
       $<TARGET_FILE:ninfer-serve>)
   set_tests_properties(ninfer_serve_shutdown_real_test PROPERTIES
     SKIP_RETURN_CODE 77 RUN_SERIAL TRUE LABELS "gpu;real" TIMEOUT 150)
+  add_test(NAME ninfer_serve_idle_unload_real_test
+    COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_idle_unload_real.py"
+      $<TARGET_FILE:ninfer-serve>)
+  set_tests_properties(ninfer_serve_idle_unload_real_test PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE LABELS "gpu;real" TIMEOUT 900)
 endif()
 
 ninfer_add_test(ninfer_tool_streaming_test

@@ -171,6 +171,19 @@ void forward_to_engine(const httplib::Request& req, httplib::Response& res,
         });
 }
 
+bool apply_engine_idle_unload(const EngineSpec& engine, int minutes) {
+    httplib::Client client(engine_connect_host(engine), engine.engine_port);
+    client.set_connection_timeout(std::chrono::seconds(2));
+    client.set_read_timeout(std::chrono::seconds(5));
+    const std::string key = read_api_key_quiet(engine.api_key_file);
+    if (!key.empty()) { client.set_bearer_token_auth(key); }
+    const std::uint64_t ms = minutes > 0 ? static_cast<std::uint64_t>(minutes) * 60000 : 0;
+    const auto result      = client.Post("/admin/residency",
+                                         nlohmann::json{{"idle_unload_ms", ms}}.dump(),
+                                         "application/json");
+    return result && result->status == 200;
+}
+
 void add_engine_bench_routes(httplib::Server& server, EngineSpecProvider engine,
                              const std::atomic<bool>& stopping,
                              std::function<bool(const std::string& remote)> local_peer) {

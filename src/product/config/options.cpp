@@ -513,6 +513,9 @@ ParsedOptions parse(int argc, char** argv, EntryPoint entry,
         case Field::ResponseSize:
             parsed.serve.response_store_max_bytes = u64();
             break;
+        case Field::IdleUnload:
+            parsed.serve.idle_unload_ms = u32();
+            break;
         case Field::LogLevel:
             launch.logging.level = parse_log_level(string());
             break;

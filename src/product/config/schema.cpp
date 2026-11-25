@@ -121,6 +121,10 @@ constexpr FieldSpec kFields[] = {
      "N", "Responses store record limit (1024).", Scope::Serve},
     {Field::ResponseSize, "server.responses.max_size", "--response-store-max-size", "", "SIZE",
      "Responses store capacity (256MiB).", Scope::Serve, ConfigurationUnit::Bytes},
+    {Field::IdleUnload, "server.idle_unload", "--idle-unload", "", "DURATION",
+     "Unload the model after this long without a request; the next request reloads it. "
+     "0ms keeps it loaded.",
+     Scope::Serve, ConfigurationUnit::Milliseconds},
     {Field::ExpertStats, "expert_observation.stats", "--expert-stats", "--no-expert-stats", "",
      "Collect live routed-expert counts.", Scope::Serve, ConfigurationUnit::None},
     {Field::ExpertTrace, "expert_observation.trace_directory", "--expert-trace", "", "DIR",
@@ -407,6 +411,7 @@ FieldValue parse_field_value(Field field, const RawValue& value, bool command_li
     case Field::PendingTimeout:
         return std::uint64_t{parse_duration_ms(value, true)};
     case Field::StatsInterval:
+    case Field::IdleUnload:
         return std::uint64_t{parse_duration_ms(value, false)};
     case Field::Temperature:
         return real(value, command_line, 0, 2);
